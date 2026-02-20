@@ -1,0 +1,14 @@
+[theme]
+# Databricks brand colours
+primaryColor = "#EB1600"
+backgroundColor = "#1B3139"
+secondaryBackgroundColor = "#1F3C46"
+textColor = "#FAFAFA"
+font = "sans serif"
+
+[server]
+maxUploadSize = 10
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
