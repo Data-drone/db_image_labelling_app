@@ -46,29 +46,17 @@ ON_DATABRICKS = bool(os.environ.get("DATABRICKS_HOST"))
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.image(
-        "https://upload.wikimedia.org/wikipedia/commons/6/63/Databricks_Logo.png",
-        width=180,
-    )
-    st.markdown("---")
-    st.markdown("### CV Dataset Explorer")
-    st.caption("Browse volumes, explore datasets, label images.")
-    st.markdown("---")
-    st.markdown(
-        """
-        **Pages**
-        1. Browse Volumes - find image folders
-        2. Dataset Explorer - view & filter
-        3. Labeling - annotate images
-        4. Search - find similar images
-        5. Dashboard - stats & progress
-        """
-    )
     st.markdown("---")
     if ON_DATABRICKS:
         st.success("Connected to Databricks", icon="✅")
     else:
-        st.info("Running locally (no Databricks connection)", icon="ℹ️")
+        st.info("Running locally", icon="ℹ️")
+    st.markdown("---")
+    st.image(
+        "https://upload.wikimedia.org/wikipedia/commons/6/63/Databricks_Logo.png",
+        width=120,
+    )
+    st.caption("CV Dataset Explorer · Built on Databricks")
 
 # ---------------------------------------------------------------------------
 # Main content
