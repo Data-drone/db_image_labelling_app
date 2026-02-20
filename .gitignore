@@ -1,6 +1,33 @@
-venv/
 __pycache__/
 *.pyc
-.DS_Store
-test-write.txt
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# SQLite databases (local dev only)
 *.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Environment
+.env
+*.env.local
