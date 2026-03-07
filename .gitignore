@@ -28,6 +28,9 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
+# Pytest
+.pytest_cache/
+
 # Environment
 .env
 *.env.local
