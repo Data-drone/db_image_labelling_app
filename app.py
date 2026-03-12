@@ -6,6 +6,9 @@ Databricks App for browsing UC Volumes, exploring CV datasets, and labeling imag
 import streamlit as st
 import os
 
+from utils.database import init_db, get_session, Dataset
+from utils.datasets import create_dataset_from_directory
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -15,6 +18,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ---------------------------------------------------------------------------
+# Database init + demo data seeding
+# ---------------------------------------------------------------------------
+init_db()
+
+DEMO_VOLUME_PATH = os.environ.get(
+    "DEMO_VOLUME_PATH",
+    "/Volumes/brian_gen_ai/cv_explorer/demo_images",
+)
+
+def _seed_demo_data():
+    """Create a demo dataset from the UC volume if it doesn't exist yet."""
+    if not os.path.isdir(DEMO_VOLUME_PATH):
+        return
+    session = get_session()
+    existing = session.query(Dataset).filter_by(name="COCO Demo").first()
+    session.close()
+    if existing:
+        return
+    create_dataset_from_directory("COCO Demo", DEMO_VOLUME_PATH)
+
+_seed_demo_data()
 
 # ---------------------------------------------------------------------------
 # Session state defaults

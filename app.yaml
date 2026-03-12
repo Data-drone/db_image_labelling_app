@@ -2,3 +2,5 @@ command: ['streamlit', 'run', 'app.py', '--server.port', '8501']
 env:
   - name: DATABASE_URL
     value: 'sqlite:////tmp/cv_explorer.db'
+  - name: DEMO_VOLUME_PATH
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
