@@ -64,9 +64,88 @@ def get_db():
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+DEMO_VOLUME_PATH = os.environ.get(
+    "DEMO_VOLUME_PATH",
+    "/Volumes/brian_gen_ai/cv_explorer/demo_images",
+)
+
+
+def _seed_demo_data():
+    """Create a demo dataset from the UC volume if it exists and DB is empty."""
+    if not os.path.isdir(DEMO_VOLUME_PATH):
+        return
+    db = get_session()
+    try:
+        existing = db.query(Dataset).filter_by(name="COCO Demo").first()
+        if existing:
+            return
+
+        ds = Dataset(name="COCO Demo", description="Demo dataset from COCO images", image_dir=DEMO_VOLUME_PATH)
+        db.add(ds)
+        db.flush()
+
+        image_files = sorted(
+            f for f in os.listdir(DEMO_VOLUME_PATH)
+            if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
+        )
+        for fname in image_files:
+            db.add(Sample(
+                dataset_id=ds.id,
+                filepath=os.path.join(DEMO_VOLUME_PATH, fname),
+                filename=fname,
+            ))
+        db.flush()
+
+        # Import COCO annotations if labels.json exists
+        coco_path = os.path.join(DEMO_VOLUME_PATH, "labels.json")
+        if os.path.exists(coco_path):
+            import json as _json
+            with open(coco_path) as f:
+                coco = _json.load(f)
+            images_map = {img["id"]: img for img in coco.get("images", [])}
+            categories = {cat["id"]: cat["name"] for cat in coco.get("categories", [])}
+            samples = db.query(Sample).filter_by(dataset_id=ds.id).all()
+            fname_to_sample = {s.filename: s for s in samples}
+            for ann in coco.get("annotations", []):
+                img_info = images_map.get(ann.get("image_id"))
+                if not img_info:
+                    continue
+                fname = img_info.get("file_name", "")
+                sample = fname_to_sample.get(fname)
+                if not sample:
+                    continue
+                cat_name = categories.get(ann.get("category_id"), "unknown")
+                bbox = ann.get("bbox", [])
+                if bbox and len(bbox) == 4:
+                    img_w = img_info.get("width", 1)
+                    img_h = img_info.get("height", 1)
+                    bbox_norm = _json.dumps({
+                        "x": bbox[0] / img_w, "y": bbox[1] / img_h,
+                        "w": bbox[2] / img_w, "h": bbox[3] / img_h,
+                    })
+                    db.add(Annotation(
+                        sample_id=sample.id, ann_type="detection",
+                        label=cat_name, bbox_json=bbox_norm,
+                    ))
+                else:
+                    db.add(Annotation(
+                        sample_id=sample.id, ann_type="classification",
+                        label=cat_name,
+                    ))
+
+        db.commit()
+        print(f"Seeded demo dataset with {len(image_files)} images")
+    except Exception as e:
+        print(f"Demo seed failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def startup():
     init_db()
+    _seed_demo_data()
 
 
 # ---------------------------------------------------------------------------
@@ -481,3 +560,36 @@ def browse_directory(path: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"path": path, "folders": folders, "files": files}
+
+
+# ---------------------------------------------------------------------------
+# Static file serving (React build)
+# ---------------------------------------------------------------------------
+STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+
+if STATIC_DIR.exists():
+    from fastapi.staticfiles import StaticFiles
+    from starlette.responses import HTMLResponse
+
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="static-assets")
+
+    # Serve other static files (favicon, etc.)
+    @app.get("/vite.svg")
+    def vite_svg():
+        return FileResponse(str(STATIC_DIR / "vite.svg"))
+
+    # Catch-all for React router — must be last
+    @app.get("/{path:path}")
+    def serve_spa(path: str):
+        # Don't catch API or image routes
+        if path.startswith("api/") or path.startswith("images/"):
+            raise HTTPException(status_code=404)
+        file_path = STATIC_DIR / path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+        return HTMLResponse(content=(STATIC_DIR / "index.html").read_text())
+else:
+    @app.get("/")
+    def root():
+        return {"message": "CV Dataset Explorer API. Frontend not built yet — run 'npm run build' in frontend/."}
