@@ -1,6 +1,5 @@
 /**
- * API client for CV Dataset Explorer backend.
- * All endpoints are proxied through Vite dev server to http://localhost:8000.
+ * API client for CV Explorer — Phase 1 (project-centric).
  */
 
 import axios from 'axios';
@@ -11,61 +10,47 @@ const api = axios.create({
 });
 
 // ---------------------------------------------------------------------------
-// Datasets
+// Projects
 // ---------------------------------------------------------------------------
-export const fetchDatasets = () => api.get('/datasets').then(r => r.data);
+export const fetchProjects = () => api.get('/projects').then(r => r.data);
 
-export const fetchDataset = (id) => api.get(`/datasets/${id}`).then(r => r.data);
+export const fetchProject = (id) => api.get(`/projects/${id}`).then(r => r.data);
 
-export const createDataset = (data) => api.post('/datasets', data).then(r => r.data);
+export const createProject = (data) => api.post('/projects', data).then(r => r.data);
 
-export const deleteDataset = (id) => api.delete(`/datasets/${id}`).then(r => r.data);
+export const deleteProject = (id) => api.delete(`/projects/${id}`).then(r => r.data);
 
-export const fetchDatasetStats = (id) => api.get(`/datasets/${id}/stats`).then(r => r.data);
+export const fetchProjectStats = (id) => api.get(`/projects/${id}/stats`).then(r => r.data);
 
 // ---------------------------------------------------------------------------
 // Samples
 // ---------------------------------------------------------------------------
-export const fetchSamples = (datasetId, params = {}) =>
-  api.get(`/datasets/${datasetId}/samples`, { params }).then(r => r.data);
+export const fetchSamples = (projectId, params = {}) =>
+  api.get(`/projects/${projectId}/samples`, { params }).then(r => r.data);
 
-export const fetchSample = (id) => api.get(`/samples/${id}`).then(r => r.data);
-
-// ---------------------------------------------------------------------------
-// Annotations
-// ---------------------------------------------------------------------------
-export const fetchAnnotations = (sampleId) =>
-  api.get(`/samples/${sampleId}/annotations`).then(r => r.data);
-
-export const createAnnotation = (data) =>
-  api.post('/annotations', data).then(r => r.data);
-
-export const createAnnotationsBatch = (annotations) =>
-  api.post('/annotations/batch', annotations).then(r => r.data);
-
-export const deleteAnnotation = (id) =>
-  api.delete(`/annotations/${id}`).then(r => r.data);
+export const fetchNextSample = (projectId) =>
+  api.get(`/projects/${projectId}/next`).then(r => r.data);
 
 // ---------------------------------------------------------------------------
-// Tags
+// Annotations / Labeling
 // ---------------------------------------------------------------------------
-export const fetchTags = (sampleId) =>
-  api.get(`/samples/${sampleId}/tags`).then(r => r.data);
+export const annotateSample = (projectId, sampleId, data) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/annotate`, data).then(r => r.data);
 
-export const createTag = (data) => api.post('/tags', data).then(r => r.data);
-
-export const deleteTag = (id) => api.delete(`/tags/${id}`).then(r => r.data);
+export const skipSample = (projectId, sampleId) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/skip`).then(r => r.data);
 
 // ---------------------------------------------------------------------------
 // Image URLs
 // ---------------------------------------------------------------------------
-export const imageUrl = (sampleId) => `/images/${sampleId}`;
+export const sampleImageUrl = (projectId, sampleId) =>
+  `/api/projects/${projectId}/samples/${sampleId}/image`;
 
-export const thumbnailUrl = (sampleId, size = 300) =>
-  `/images/${sampleId}/thumbnail?size=${size}`;
+export const sampleThumbnailUrl = (projectId, sampleId, size = 300) =>
+  `/api/projects/${projectId}/samples/${sampleId}/thumbnail?size=${size}`;
 
 // ---------------------------------------------------------------------------
-// Browse & Volume navigation
+// Browse & Volume navigation (kept from original)
 // ---------------------------------------------------------------------------
 export const fetchCatalogs = () => api.get('/catalogs').then(r => r.data);
 
