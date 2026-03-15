@@ -1,4 +1,8 @@
-command: ['streamlit', 'run', 'app.py', '--server.port', '8501']
+command: ['python', 'start.py']
 env:
   - name: DATABASE_URL
-    value: 'sqlite:////tmp/cv_explorer.db'
+    value: 'sqlite:////tmp/cv_explorer_react.db'
+  - name: DEMO_VOLUME_PATH
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
+  - name: DB_BACKUP_VOLUME
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'

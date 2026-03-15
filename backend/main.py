@@ -9,17 +9,18 @@ Run with:
 """
 
 import json
+import io
 import os
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .models import (
-    get_session, init_db,
+    get_session, init_db, schedule_backup,
     Dataset, Sample, Annotation, Tag,
 )
 from .schemas import (
@@ -49,6 +50,28 @@ app.add_middleware(
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 
 
+def _is_volume_path(path: str) -> bool:
+    return path.startswith("/Volumes/")
+
+
+def _get_workspace_client():
+    """Get a cached WorkspaceClient."""
+    if not hasattr(_get_workspace_client, "_client"):
+        from databricks.sdk import WorkspaceClient
+        _get_workspace_client._client = WorkspaceClient()
+    return _get_workspace_client._client
+
+
+def _download_volume_file(path: str) -> Optional[bytes]:
+    """Download a single file from a /Volumes/ path via the SDK."""
+    try:
+        w = _get_workspace_client()
+        resp = w.files.download(path)
+        return resp.contents.read()
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
@@ -62,79 +85,116 @@ def get_db():
 
 
 # ---------------------------------------------------------------------------
-# Startup
+# Startup — demo data seeding
 # ---------------------------------------------------------------------------
 DEMO_VOLUME_PATH = os.environ.get(
     "DEMO_VOLUME_PATH",
     "/Volumes/brian_gen_ai/cv_explorer/demo_images",
 )
+DEMO_LOCAL_DIR = "/tmp/demo_images"
+
+
+def _download_volume_to_local(volume_path: str, local_dir: str) -> bool:
+    """Download all files from a UC volume to a local directory using the SDK."""
+    if os.path.isdir(local_dir) and os.listdir(local_dir):
+        return True
+    try:
+        w = _get_workspace_client()
+        os.makedirs(local_dir, exist_ok=True)
+        files = list(w.files.list_directory_contents(volume_path + "/"))
+        for f in files:
+            if f.is_directory:
+                continue
+            resp = w.files.download(f.path)
+            local_path = os.path.join(local_dir, f.name)
+            with open(local_path, "wb") as out:
+                out.write(resp.contents.read())
+        return bool(os.listdir(local_dir))
+    except Exception as exc:
+        print(f"Volume download failed: {exc}")
+        return False
 
 
 def _seed_demo_data():
-    """Create a demo dataset from the UC volume if it exists and DB is empty."""
-    if not os.path.isdir(DEMO_VOLUME_PATH):
-        return
+    """Seed demo dataset using /Volumes/ paths (images served via SDK per request)."""
+    image_dir = DEMO_VOLUME_PATH  # /Volumes/brian_gen_ai/cv_explorer/demo_images
+
     db = get_session()
     try:
         existing = db.query(Dataset).filter_by(name="COCO Demo").first()
         if existing:
+            sample_count = db.query(Sample).filter_by(dataset_id=existing.id).count()
+            if sample_count > 0:
+                return
+            # Stale dataset with 0 samples — delete and re-create
+            db.delete(existing)
+            db.flush()
+
+        # List images in volume via SDK
+        try:
+            w = _get_workspace_client()
+            entries = list(w.files.list_directory_contents(image_dir.rstrip("/") + "/"))
+        except Exception as exc:
+            print(f"Cannot list demo volume: {exc}")
             return
 
-        ds = Dataset(name="COCO Demo", description="Demo dataset from COCO images", image_dir=DEMO_VOLUME_PATH)
+        image_files = sorted(
+            e.name for e in entries
+            if not e.is_directory and os.path.splitext(e.name)[1].lower() in IMAGE_EXTENSIONS
+        )
+        if not image_files:
+            print("No images found in demo volume")
+            return
+
+        ds = Dataset(name="COCO Demo", description="Demo dataset from COCO images", image_dir=image_dir)
         db.add(ds)
         db.flush()
 
-        image_files = sorted(
-            f for f in os.listdir(DEMO_VOLUME_PATH)
-            if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
-        )
         for fname in image_files:
-            db.add(Sample(
-                dataset_id=ds.id,
-                filepath=os.path.join(DEMO_VOLUME_PATH, fname),
-                filename=fname,
-            ))
+            fpath = image_dir.rstrip("/") + "/" + fname
+            db.add(Sample(dataset_id=ds.id, filepath=fpath, filename=fname))
         db.flush()
 
-        # Import COCO annotations if labels.json exists
-        coco_path = os.path.join(DEMO_VOLUME_PATH, "labels.json")
-        if os.path.exists(coco_path):
-            import json as _json
-            with open(coco_path) as f:
-                coco = _json.load(f)
-            images_map = {img["id"]: img for img in coco.get("images", [])}
-            categories = {cat["id"]: cat["name"] for cat in coco.get("categories", [])}
-            samples = db.query(Sample).filter_by(dataset_id=ds.id).all()
-            fname_to_sample = {s.filename: s for s in samples}
-            for ann in coco.get("annotations", []):
-                img_info = images_map.get(ann.get("image_id"))
-                if not img_info:
-                    continue
-                fname = img_info.get("file_name", "")
-                sample = fname_to_sample.get(fname)
-                if not sample:
-                    continue
-                cat_name = categories.get(ann.get("category_id"), "unknown")
-                bbox = ann.get("bbox", [])
-                if bbox and len(bbox) == 4:
-                    img_w = img_info.get("width", 1)
-                    img_h = img_info.get("height", 1)
-                    bbox_norm = _json.dumps({
-                        "x": bbox[0] / img_w, "y": bbox[1] / img_h,
-                        "w": bbox[2] / img_w, "h": bbox[3] / img_h,
-                    })
-                    db.add(Annotation(
-                        sample_id=sample.id, ann_type="detection",
-                        label=cat_name, bbox_json=bbox_norm,
-                    ))
-                else:
-                    db.add(Annotation(
-                        sample_id=sample.id, ann_type="classification",
-                        label=cat_name,
-                    ))
+        # Import COCO annotations if labels.json exists in the volume
+        coco_data = _download_volume_file(image_dir.rstrip("/") + "/labels.json")
+        if coco_data:
+            try:
+                coco = json.loads(coco_data)
+                images_map = {img["id"]: img for img in coco.get("images", [])}
+                categories = {cat["id"]: cat["name"] for cat in coco.get("categories", [])}
+                samples = db.query(Sample).filter_by(dataset_id=ds.id).all()
+                fname_to_sample = {s.filename: s for s in samples}
+                for ann in coco.get("annotations", []):
+                    img_info = images_map.get(ann.get("image_id"))
+                    if not img_info:
+                        continue
+                    fname = img_info.get("file_name", "")
+                    sample = fname_to_sample.get(fname)
+                    if not sample:
+                        continue
+                    cat_name = categories.get(ann.get("category_id"), "unknown")
+                    bbox = ann.get("bbox", [])
+                    if bbox and len(bbox) == 4:
+                        img_w = img_info.get("width", 1)
+                        img_h = img_info.get("height", 1)
+                        bbox_norm = json.dumps({
+                            "x": bbox[0] / img_w, "y": bbox[1] / img_h,
+                            "w": bbox[2] / img_w, "h": bbox[3] / img_h,
+                        })
+                        db.add(Annotation(
+                            sample_id=sample.id, ann_type="detection",
+                            label=cat_name, bbox_json=bbox_norm,
+                        ))
+                    else:
+                        db.add(Annotation(
+                            sample_id=sample.id, ann_type="classification",
+                            label=cat_name,
+                        ))
+            except Exception as exc:
+                print(f"COCO annotation import failed: {exc}")
 
         db.commit()
-        print(f"Seeded demo dataset with {len(image_files)} images")
+        print(f"Seeded demo dataset with {len(image_files)} images (volume paths)")
     except Exception as e:
         print(f"Demo seed failed: {e}")
         db.rollback()
@@ -195,20 +255,33 @@ def create_dataset(payload: DatasetCreate, db: Session = Depends(get_db)):
 
     # Scan image_dir if provided
     sample_count = 0
-    if payload.image_dir and os.path.isdir(payload.image_dir):
-        for fname in sorted(os.listdir(payload.image_dir)):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
-                sample = Sample(
-                    dataset_id=ds.id,
-                    filepath=os.path.join(payload.image_dir, fname),
-                    filename=fname,
-                )
-                db.add(sample)
-                sample_count += 1
+    if payload.image_dir:
+        if _is_volume_path(payload.image_dir):
+            try:
+                w = _get_workspace_client()
+                for entry in w.files.list_directory_contents(payload.image_dir.rstrip("/") + "/"):
+                    if not entry.is_directory:
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in IMAGE_EXTENSIONS:
+                            fpath = payload.image_dir.rstrip("/") + "/" + entry.name
+                            db.add(Sample(dataset_id=ds.id, filepath=fpath, filename=entry.name))
+                            sample_count += 1
+            except Exception as e:
+                print(f"Volume scan failed: {e}")
+        elif os.path.isdir(payload.image_dir):
+            for fname in sorted(os.listdir(payload.image_dir)):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in IMAGE_EXTENSIONS:
+                    db.add(Sample(
+                        dataset_id=ds.id,
+                        filepath=os.path.join(payload.image_dir, fname),
+                        filename=fname,
+                    ))
+                    sample_count += 1
 
     db.commit()
     db.refresh(ds)
+    schedule_backup()
 
     return DatasetOut(
         id=ds.id,
@@ -263,7 +336,6 @@ def dataset_stats(dataset_id: int, db: Session = Depends(get_db)):
         .count()
     )
 
-    # Distinct classes
     class_rows = (
         db.query(Annotation.label)
         .join(Sample)
@@ -273,7 +345,6 @@ def dataset_stats(dataset_id: int, db: Session = Depends(get_db)):
     )
     classes = sorted([r[0] for r in class_rows])
 
-    # Class distribution
     class_dist = {}
     for cls in classes:
         count = (
@@ -285,7 +356,6 @@ def dataset_stats(dataset_id: int, db: Session = Depends(get_db)):
         )
         class_dist[cls] = count
 
-    # Distinct tags
     tag_rows = (
         db.query(Tag.tag)
         .join(Sample)
@@ -295,7 +365,6 @@ def dataset_stats(dataset_id: int, db: Session = Depends(get_db)):
     )
     tags = sorted([r[0] for r in tag_rows])
 
-    # Tag distribution
     tag_dist = {}
     for t in tags:
         count = (
@@ -326,7 +395,7 @@ def dataset_stats(dataset_id: int, db: Session = Depends(get_db)):
 def list_samples(
     dataset_id: int,
     page: int = Query(0, ge=0),
-    page_size: int = Query(24, ge=1, le=200),
+    page_size: int = Query(24, ge=1, le=10000),
     label: Optional[str] = None,
     tag: Optional[str] = None,
     search: Optional[str] = None,
@@ -372,7 +441,6 @@ def get_sample(sample_id: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.get("/api/samples/{sample_id}/annotations", response_model=list[AnnotationOut])
 def list_annotations(sample_id: int, db: Session = Depends(get_db)):
-    """List all annotations for a sample."""
     return (
         db.query(Annotation)
         .filter_by(sample_id=sample_id)
@@ -383,7 +451,6 @@ def list_annotations(sample_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/annotations", response_model=AnnotationOut)
 def create_annotation(payload: AnnotationCreate, db: Session = Depends(get_db)):
-    """Create a new annotation on a sample."""
     sample = db.query(Sample).filter_by(id=payload.sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
@@ -398,13 +465,13 @@ def create_annotation(payload: AnnotationCreate, db: Session = Depends(get_db)):
     )
     db.add(ann)
 
-    # Auto-add "labeled" tag
     existing_tag = db.query(Tag).filter_by(sample_id=sample.id, tag="labeled").first()
     if not existing_tag:
         db.add(Tag(sample_id=sample.id, tag="labeled"))
 
     db.commit()
     db.refresh(ann)
+    schedule_backup()
     return AnnotationOut.model_validate(ann)
 
 
@@ -413,7 +480,6 @@ def create_annotations_batch(
     annotations: list[AnnotationCreate],
     db: Session = Depends(get_db),
 ):
-    """Create multiple annotations at once."""
     results = []
     sample_ids = set()
     for payload in annotations:
@@ -429,7 +495,6 @@ def create_annotations_batch(
         sample_ids.add(payload.sample_id)
         results.append(ann)
 
-    # Auto-add "labeled" tag to all affected samples
     for sid in sample_ids:
         existing_tag = db.query(Tag).filter_by(sample_id=sid, tag="labeled").first()
         if not existing_tag:
@@ -438,12 +503,12 @@ def create_annotations_batch(
     db.commit()
     for ann in results:
         db.refresh(ann)
+    schedule_backup()
     return [AnnotationOut.model_validate(a) for a in results]
 
 
 @app.delete("/api/annotations/{annotation_id}")
 def delete_annotation(annotation_id: int, db: Session = Depends(get_db)):
-    """Delete an annotation."""
     ann = db.query(Annotation).filter_by(id=annotation_id).first()
     if not ann:
         raise HTTPException(status_code=404, detail="Annotation not found.")
@@ -457,13 +522,11 @@ def delete_annotation(annotation_id: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.get("/api/samples/{sample_id}/tags", response_model=list[TagOut])
 def list_tags(sample_id: int, db: Session = Depends(get_db)):
-    """List all tags for a sample."""
     return db.query(Tag).filter_by(sample_id=sample_id).order_by(Tag.id).all()
 
 
 @app.post("/api/tags", response_model=TagOut)
 def create_tag(payload: TagCreate, db: Session = Depends(get_db)):
-    """Add a tag to a sample (no duplicates)."""
     sample = db.query(Sample).filter_by(id=payload.sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
@@ -476,12 +539,12 @@ def create_tag(payload: TagCreate, db: Session = Depends(get_db)):
     db.add(tag)
     db.commit()
     db.refresh(tag)
+    schedule_backup()
     return TagOut.model_validate(tag)
 
 
 @app.delete("/api/tags/{tag_id}")
 def delete_tag(tag_id: int, db: Session = Depends(get_db)):
-    """Delete a tag."""
     tag = db.query(Tag).filter_by(id=tag_id).first()
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found.")
@@ -491,7 +554,7 @@ def delete_tag(tag_id: int, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Image serving
+# Image serving — handles both local files and /Volumes/ paths via SDK
 # ---------------------------------------------------------------------------
 @app.get("/images/{sample_id}")
 def serve_image(sample_id: int, db: Session = Depends(get_db)):
@@ -499,9 +562,16 @@ def serve_image(sample_id: int, db: Session = Depends(get_db)):
     sample = db.query(Sample).filter_by(id=sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
-    if not os.path.exists(sample.filepath):
-        raise HTTPException(status_code=404, detail="Image file not found on disk.")
-    return FileResponse(sample.filepath)
+
+    if _is_volume_path(sample.filepath):
+        data = _download_volume_file(sample.filepath)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Image file not found in volume.")
+        return StreamingResponse(io.BytesIO(data), media_type="image/jpeg")
+    else:
+        if not os.path.exists(sample.filepath):
+            raise HTTPException(status_code=404, detail="Image file not found on disk.")
+        return FileResponse(sample.filepath)
 
 
 @app.get("/images/{sample_id}/thumbnail")
@@ -514,52 +584,111 @@ def serve_thumbnail(
     sample = db.query(Sample).filter_by(id=sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
-    if not os.path.exists(sample.filepath):
-        raise HTTPException(status_code=404, detail="Image file not found on disk.")
 
     try:
         from PIL import Image
-        import io
-        img = Image.open(sample.filepath).convert("RGB")
+
+        if _is_volume_path(sample.filepath):
+            data = _download_volume_file(sample.filepath)
+            if data is None:
+                raise HTTPException(status_code=404, detail="Image file not found in volume.")
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+        else:
+            if not os.path.exists(sample.filepath):
+                raise HTTPException(status_code=404, detail="Image file not found on disk.")
+            img = Image.open(sample.filepath).convert("RGB")
+
         img.thumbnail((size, size), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         buf.seek(0)
-        from fastapi.responses import StreamingResponse
         return StreamingResponse(buf, media_type="image/jpeg")
+    except HTTPException:
+        raise
     except Exception:
+        if _is_volume_path(sample.filepath):
+            raise HTTPException(status_code=500, detail="Could not process image.")
         return FileResponse(sample.filepath)
 
 
 # ---------------------------------------------------------------------------
-# Directory browsing (for volume-like browsing)
+# Directory browsing — SDK for /Volumes/, os for local
 # ---------------------------------------------------------------------------
-@app.get("/api/browse")
-def browse_directory(path: str = Query(...)):
-    """Browse a local directory, returning folders and image files."""
-    if not os.path.isdir(path):
-        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
-
-    folders = []
-    files = []
+@app.get("/api/catalogs")
+def list_catalogs():
+    """List UC catalogs visible to the app."""
     try:
-        for entry in sorted(os.listdir(path)):
-            full = os.path.join(path, entry)
-            if os.path.isdir(full):
-                # Count images recursively
-                img_count = 0
-                for root, _, filenames in os.walk(full):
-                    img_count += sum(
-                        1 for f in filenames
-                        if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
-                    )
-                folders.append({"name": entry, "image_count": img_count})
-            elif os.path.splitext(entry)[1].lower() in IMAGE_EXTENSIONS:
-                files.append({"name": entry, "path": full})
+        w = _get_workspace_client()
+        names = []
+        for c in w.catalogs.list():
+            names.append(c.name)
+            if len(names) >= 200:
+                break
+        return sorted(names)
+    except Exception as e:
+        print(f"catalogs.list() failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/schemas")
+def list_schemas(catalog: str = Query(...)):
+    """List schemas inside a catalog."""
+    try:
+        w = _get_workspace_client()
+        return sorted(s.name for s in w.schemas.list(catalog_name=catalog))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {"path": path, "folders": folders, "files": files}
+
+@app.get("/api/volumes")
+def list_volumes(catalog: str = Query(...), schema: str = Query(...)):
+    """List volumes inside a catalog.schema."""
+    try:
+        w = _get_workspace_client()
+        return sorted(v.name for v in w.volumes.list(catalog_name=catalog, schema_name=schema))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/browse")
+def browse_directory(path: str = Query(...)):
+    """Browse a directory, returning folders and image files."""
+    if _is_volume_path(path):
+        try:
+            w = _get_workspace_client()
+            folders = []
+            files = []
+            for entry in w.files.list_directory_contents(path.rstrip("/") + "/"):
+                if entry.is_directory:
+                    folders.append({"name": entry.name, "image_count": 0})
+                elif os.path.splitext(entry.name)[1].lower() in IMAGE_EXTENSIONS:
+                    files.append({"name": entry.name, "path": path.rstrip("/") + "/" + entry.name})
+            return {"path": path, "folders": sorted(folders, key=lambda x: x["name"]), "files": sorted(files, key=lambda x: x["name"])}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        if not os.path.isdir(path):
+            raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+
+        folders = []
+        files = []
+        try:
+            for entry in sorted(os.listdir(path)):
+                full = os.path.join(path, entry)
+                if os.path.isdir(full):
+                    img_count = 0
+                    for root, _, filenames in os.walk(full):
+                        img_count += sum(
+                            1 for f in filenames
+                            if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
+                        )
+                    folders.append({"name": entry, "image_count": img_count})
+                elif os.path.splitext(entry)[1].lower() in IMAGE_EXTENSIONS:
+                    files.append({"name": entry, "path": full})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return {"path": path, "folders": folders, "files": files}
 
 
 # ---------------------------------------------------------------------------
@@ -571,18 +700,14 @@ if STATIC_DIR.exists():
     from fastapi.staticfiles import StaticFiles
     from starlette.responses import HTMLResponse
 
-    # Serve static assets (JS, CSS, images)
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="static-assets")
 
-    # Serve other static files (favicon, etc.)
     @app.get("/vite.svg")
     def vite_svg():
         return FileResponse(str(STATIC_DIR / "vite.svg"))
 
-    # Catch-all for React router — must be last
     @app.get("/{path:path}")
     def serve_spa(path: str):
-        # Don't catch API or image routes
         if path.startswith("api/") or path.startswith("images/"):
             raise HTTPException(status_code=404)
         file_path = STATIC_DIR / path

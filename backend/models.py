@@ -5,6 +5,9 @@ Reuses the same schema as the Streamlit app (utils/database.py).
 
 import json
 import os
+import shutil
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -23,6 +26,81 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "sqlite:////tmp/cv_explorer.db",
 )
+
+# Volume path for persistent DB backup (set via env or defaults to None)
+DB_BACKUP_VOLUME = os.environ.get("DB_BACKUP_VOLUME", "")
+
+
+# ---------------------------------------------------------------------------
+# DB backup/restore to UC Volume for persistence across deploys
+# ---------------------------------------------------------------------------
+def _get_local_db_path() -> str:
+    """Extract local file path from sqlite:/// URL."""
+    if DATABASE_URL.startswith("sqlite:///"):
+        return DATABASE_URL.replace("sqlite:///", "", 1)
+    return ""
+
+
+def _restore_db_from_volume():
+    """On startup, download DB from UC Volume if it exists."""
+    if not DB_BACKUP_VOLUME:
+        return
+    local_path = _get_local_db_path()
+    if not local_path:
+        return
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        volume_path = DB_BACKUP_VOLUME.rstrip("/") + "/cv_explorer.db"
+        resp = w.files.download(volume_path)
+        data = resp.contents.read()
+        if len(data) > 0:
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(data)
+            print(f"Restored DB from {volume_path} ({len(data)} bytes)")
+    except Exception as e:
+        print(f"No backup DB to restore (this is normal on first run): {e}")
+
+
+def backup_db_to_volume():
+    """Upload local SQLite DB to UC Volume for persistence."""
+    if not DB_BACKUP_VOLUME:
+        return
+    local_path = _get_local_db_path()
+    if not local_path or not os.path.exists(local_path):
+        return
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        volume_path = DB_BACKUP_VOLUME.rstrip("/") + "/cv_explorer.db"
+        with open(local_path, "rb") as f:
+            w.files.upload(volume_path, f, overwrite=True)
+        print(f"Backed up DB to {volume_path}")
+    except Exception as e:
+        print(f"DB backup failed: {e}")
+
+
+# Debounced backup: schedules a backup after writes settle
+_backup_timer = None
+_backup_lock = threading.Lock()
+
+
+def schedule_backup():
+    """Schedule a DB backup 5 seconds after the last write."""
+    global _backup_timer
+    if not DB_BACKUP_VOLUME:
+        return
+    with _backup_lock:
+        if _backup_timer:
+            _backup_timer.cancel()
+        _backup_timer = threading.Timer(5.0, backup_db_to_volume)
+        _backup_timer.daemon = True
+        _backup_timer.start()
+
+
+# Restore DB from volume before creating engine
+_restore_db_from_volume()
 
 engine = create_engine(DATABASE_URL, echo=False)
 
