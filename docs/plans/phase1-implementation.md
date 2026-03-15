@@ -6,7 +6,6 @@ Reference: [Phase 1 Design](../phase1-design.md)
 
 Before starting implementation:
 - [ ] Get Lakebase connection string from Databricks workspace
-- [ ] Confirm SQL warehouse endpoint for Delta Table exports
 - [ ] Merge `react-rebuild` → `main`, remove Streamlit code
 
 ## Step 1: Branch Merge & Cleanup
@@ -35,7 +34,7 @@ Before starting implementation:
    - Remove: `Dataset`, `Sample`, `Annotation`, `Tag` models
    - Remove: SQLite backup/restore mechanism
    - Remove: WAL mode pragma
-   - Add: `LabelingProject`, `ProjectSample`, `Annotation`, `ExportHistory` models
+   - Add: `LabelingProject`, `ProjectSample`, `Annotation` models
    - Use `DATABASE_URL` env var pointing to Lakebase Postgres endpoint
    - Add `psycopg2-binary` to requirements
 2. Update `backend/schemas.py`:
@@ -43,11 +42,9 @@ Before starting implementation:
    - Add: `ProjectCreate`, `ProjectOut`, `ProjectStats`
    - Add: `SampleOut`, `SamplePage`
    - Add: `AnnotationCreate`, `AnnotationOut`
-   - Add: `ExportOut`
 3. Update `app.yaml`:
    - Change `DATABASE_URL` to Lakebase connection string
    - Remove `DB_BACKUP_VOLUME` env var
-   - Keep `DEMO_VOLUME_PATH` for backward compat (optional)
 
 **Files touched:**
 - Rewrite: `backend/models.py`, `backend/schemas.py`
@@ -65,7 +62,7 @@ Before starting implementation:
 **Goal:** API endpoints for creating and managing labeling projects.
 
 **Tasks:**
-1. `POST /api/projects` — create project (name, task_type, class_list, source_volume, output location)
+1. `POST /api/projects` — create project (name, task_type, class_list, source_volume)
    - Scan source volume for images, create `project_samples` rows
 2. `GET /api/projects` — list all projects with stats (sample counts by status)
 3. `GET /api/projects/{id}` — single project detail
@@ -112,32 +109,7 @@ Before starting implementation:
 
 ---
 
-## Step 5: Backend API — Export to Delta Table
-
-**Goal:** Export annotations as a versioned Delta Table.
-
-**Tasks:**
-1. `POST /api/projects/{id}/export` — trigger export
-   - Query all annotations for the project
-   - Determine next version number from `export_history`
-   - Use `databricks-sql-connector` to write to Delta Table
-   - Record in `export_history`
-   - Return version number + row count
-2. `GET /api/projects/{id}/exports` — list export history
-
-**Files touched:**
-- Add to: `backend/main.py`
-- New: `backend/export.py` (Delta export logic, isolated for testability)
-
-**Verification:**
-- Export a project with labeled samples
-- Query Delta Table in Databricks SQL to verify data
-- Export again, verify version increments
-- Query `WHERE version = 1` vs `WHERE version = 2`
-
----
-
-## Step 6: Frontend — Projects List Page
+## Step 5: Frontend — Projects List Page
 
 **Goal:** Replace the home page with a projects-centric view.
 
@@ -172,7 +144,7 @@ Before starting implementation:
 
 ---
 
-## Step 7: Frontend — Create Project Page
+## Step 6: Frontend — Create Project Page
 
 **Goal:** Form to create a new labeling project.
 
@@ -182,7 +154,6 @@ Before starting implementation:
    - Volume browser (reuse/adapt `BrowseVolumes.jsx`)
    - Task type selector (classification / detection)
    - Class list editor (add/remove labels dynamically)
-   - Output location fields (catalog, schema, table) with defaults
    - Submit → POST /api/projects → redirect to project dashboard
 2. Update `api/client.js` with project API functions
 
@@ -198,7 +169,7 @@ Before starting implementation:
 
 ---
 
-## Step 8: Frontend — Labeling View (Rewrite)
+## Step 7: Frontend — Labeling View (Rewrite)
 
 **Goal:** Rewrite labeling view for project-centric workflow.
 
@@ -228,9 +199,9 @@ Before starting implementation:
 
 ---
 
-## Step 9: Frontend — Project Dashboard
+## Step 8: Frontend — Project Dashboard
 
-**Goal:** Per-project stats, export trigger, version history.
+**Goal:** Per-project stats and Lakehouse Sync status.
 
 **Tasks:**
 1. New `ProjectDashboard.jsx`:
@@ -238,9 +209,8 @@ Before starting implementation:
    - Stats cards: total, labeled, unlabeled, skipped
    - Per-user contribution table
    - "Start Labeling" button → navigates to labeling view
-   - "Export to Delta Table" button → triggers export, shows progress
-   - Export history table (version, rows, date, who)
-2. Update `api/client.js` with export API functions
+   - Lakehouse Sync status indicator
+   - Info panel: where the Delta tables live in UC, example queries
 
 **Files touched:**
 - New: `frontend/src/pages/ProjectDashboard.jsx`
@@ -248,29 +218,35 @@ Before starting implementation:
 
 **Verification:**
 - Dashboard shows correct stats
-- Export button creates Delta Table
-- Version history populates after export
+- Sync status displays correctly
+- Links to UC catalog work
 
 ---
 
-## Step 10: Cleanup & Polish
+## Step 9: Lakehouse Sync Setup & Cleanup
 
-**Goal:** Remove dead code, test end-to-end, deploy.
+**Goal:** Configure sync, remove dead code, test end-to-end, deploy.
 
 **Tasks:**
-1. Remove unused files:
+1. Configure Lakehouse Sync in Databricks workspace:
+   - `ALTER TABLE labeling_projects REPLICA IDENTITY FULL;`
+   - `ALTER TABLE project_samples REPLICA IDENTITY FULL;`
+   - `ALTER TABLE annotations REPLICA IDENTITY FULL;`
+   - Enable sync in Lakebase UI → choose destination catalog/schema
+2. Remove unused files:
    - `frontend/src/pages/DatasetExplorer.jsx`
    - `frontend/src/pages/SearchPage.jsx`
    - `frontend/src/components/DatasetSelector.jsx`
    - `frontend/src/components/Pagination.jsx` (if not reused)
-2. Remove unused backend endpoints (old dataset/sample/tag CRUD)
-3. Update `start.py` if needed
-4. Build frontend: `npm run build`
-5. Deploy to Databricks Apps
-6. End-to-end test:
-   - Create project → Label images → Export Delta Table → Verify in SQL
+3. Remove unused backend endpoints (old dataset/sample/tag CRUD)
+4. Update `start.py` if needed
+5. Build frontend: `npm run build`
+6. Deploy to Databricks Apps
+7. End-to-end test:
+   - Create project → Label images → Check Delta tables in UC
    - Test with 2 users for lock-on-open behavior
-7. Update `CLAUDE.md` with final state
+   - Verify Lakehouse Sync is replicating changes
+8. Update `CLAUDE.md` with final state
 
 **Files touched:**
 - Delete unused files
@@ -285,24 +261,23 @@ Before starting implementation:
 Step 1 (branch merge) ─────────────────────────────────────────────────┐
 Step 2 (models) ────────────────────────────────────────────────────────┤
 Step 3 (project API) ──────────────────┬───────────────────────────────┤
-Step 4 (labeling API) ─────────────────┤                               │
-Step 5 (export API) ───────────────────┘                               │
+Step 4 (labeling API) ─────────────────┘                               │
                                        │                               │
-Step 6 (projects list page) ───────────┼── depends on Step 3 API ──────┤
-Step 7 (create project page) ──────────┤                               │
-Step 8 (labeling view) ────────────────┼── depends on Step 4 API ──────┤
-Step 9 (project dashboard) ────────────┼── depends on Step 5 API ──────┤
+Step 5 (projects list page) ───────────┼── depends on Step 3 API ──────┤
+Step 6 (create project page) ──────────┤                               │
+Step 7 (labeling view) ────────────────┼── depends on Step 4 API ──────┤
+Step 8 (project dashboard) ────────────┤                               │
                                        │                               │
-Step 10 (cleanup & deploy) ────────────┴───────────────────────────────┘
+Step 9 (sync setup & deploy) ──────────┴───────────────────────────────┘
 ```
 
-Backend steps (2-5) can be done before frontend steps (6-9).
-Frontend steps (6-9) are mostly independent of each other once the API is ready.
-Step 10 depends on everything else.
+Backend steps (2-4) can be done before frontend steps (5-8).
+Frontend steps (5-8) are mostly independent of each other once the API is ready.
+Step 9 depends on everything else.
 
 ## Key Decisions to Confirm During Implementation
 
 - Lakebase connection string (need from workspace admin or service principal)
-- SQL warehouse ID for Delta Table exports
+- Destination UC catalog/schema for Lakehouse Sync Delta tables
 - Whether to keep the existing BrowseVolumes component or simplify it
 - Image thumbnail caching strategy (currently regenerated per request)
