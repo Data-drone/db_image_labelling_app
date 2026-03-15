@@ -1,0 +1,6 @@
+command: ['python', '-m', 'uvicorn', 'backend.main:app', '--host', '0.0.0.0', '--port', '8000']
+env:
+  - name: DATABASE_URL
+    value: 'sqlite:////tmp/cv_explorer_react.db'
+  - name: DEMO_VOLUME_PATH
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
