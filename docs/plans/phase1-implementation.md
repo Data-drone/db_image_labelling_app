@@ -1,6 +1,6 @@
 # Phase 1 Implementation Plan
 
-Reference: [Phase 1 Design](../phase1-design.md)
+Reference: [Phase 1 Design](../phase1-design.md) | [UI Design](ui-design.md)
 
 ## Prerequisites
 
@@ -21,9 +21,15 @@ No manual Lakebase setup required — the app self-provisions.
 4. Update `CLAUDE.md` with correct paths, new architecture, Phase 1 goals
 5. Push to `main`
 
+5. Migrate CSS theme to Databricks dark mode palette:
+   - Update `frontend/src/index.css` — replace all CSS variables per [UI Design](ui-design.md) migration table
+   - Key shift: blue-tinted navy → neutral charcoal grays
+   - Accent: teal (`#00b4d8`) → Databricks blue (`#4299e0`)
+   - Narrow sidebar from 260px → 220px
+
 **Files touched:**
 - Delete: `app.py`, `pages/`, `utils/`
-- Edit: `CLAUDE.md`, `requirements.txt`
+- Edit: `CLAUDE.md`, `requirements.txt`, `frontend/src/index.css`
 
 ---
 
@@ -169,15 +175,15 @@ No manual Lakebase setup required — the app self-provisions.
 
 ## Step 6: Frontend — Projects List Page
 
-**Goal:** Replace the home page with a projects-centric view.
+**Goal:** Replace the home page with a projects-centric view. See [UI Design — Projects List](ui-design.md#1-projects-list-).
 
 **Tasks:**
 1. New `ProjectsPage.jsx` — replaces `HomePage.jsx`
-   - Table/grid of all projects
-   - Progress bars (labeled / total)
-   - Task type badge, creator, date
-   - "Create Project" button → navigates to create form
-   - Click project → navigates to project dashboard
+   - Responsive grid of project cards (1-3 columns)
+   - Each card: name, task type badge, progress bar (gradient fill), sample counts, creator + date
+   - Card style: `--bg-card` background, `--border-color` border, blue hover accent
+   - "Create Project" button (primary style) → navigates to create form
+   - Click card → navigates to project dashboard
 2. New `ProjectContext.jsx` — replaces `DatasetContext.jsx`
    - Stores current project, provides to child components
 3. Update `App.jsx` routing:
@@ -185,7 +191,11 @@ No manual Lakebase setup required — the app self-provisions.
    - `/projects/new` → CreateProject
    - `/projects/:id` → ProjectDashboard
    - `/projects/:id/label` → LabelingView
-4. Update `Layout.jsx` sidebar navigation
+4. Update `Layout.jsx` sidebar:
+   - Narrow to 220px
+   - Databricks diamond + "CV Explorer" logo
+   - Active item: blue text + left accent border + subtle bg
+   - Bottom: user email display
 
 **Files touched:**
 - New: `frontend/src/pages/ProjectsPage.jsx`
@@ -204,14 +214,16 @@ No manual Lakebase setup required — the app self-provisions.
 
 ## Step 7: Frontend — Create Project Page
 
-**Goal:** Form to create a new labeling project.
+**Goal:** Form to create a new labeling project. See [UI Design — Create Project](ui-design.md#2-create-project-projectsnew).
 
 **Tasks:**
 1. New `CreateProject.jsx`:
-   - Project name + description inputs
+   - Centered form layout (max-width 600px)
+   - Project name + description inputs (`--bg-input` background, `--border-focus` on focus)
    - Volume browser (reuse/adapt `BrowseVolumes.jsx`)
-   - Task type selector (classification / detection)
-   - Class list editor (add/remove labels dynamically)
+   - Task type radio selector (classification / detection)
+   - Dynamic class list editor (type + Enter to add, × to remove, pill badges)
+   - Image preview strip (5 random thumbnails from selected volume)
    - Submit → POST /api/projects → redirect to project dashboard
 2. Update `api/client.js` with project API functions
 
@@ -229,17 +241,19 @@ No manual Lakebase setup required — the app self-provisions.
 
 ## Step 8: Frontend — Labeling View (Rewrite)
 
-**Goal:** Rewrite labeling view for project-centric workflow.
+**Goal:** Rewrite labeling view for project-centric workflow. See [UI Design — Labeling View](ui-design.md#3-labeling-view-projectsidlabel).
 
 **Tasks:**
-1. Rewrite `LabelingView.jsx`:
+1. Rewrite `LabelingView.jsx` with 3-zone layout:
+   - *Top bar:* back arrow, project name, progress counter ("42 / 500") + bar, settings
+   - *Center (75%):* large image display, maximized
+     - Classification: image only
+     - Detection: bounding box canvas overlay (reuse `AnnotationCanvas.jsx`)
+   - *Right panel (25%):* class buttons (numbered), skip button, file info, lock status
    - Fetch next unlabeled sample via `GET /api/projects/{id}/next`
-   - For classification: show class buttons from project's `class_list`
-   - For detection: show bounding box canvas (reuse `AnnotationCanvas.jsx`)
-   - Next / Skip / Previous navigation
-   - Keyboard shortcuts: 1-9 for class labels, arrow keys for navigation
-   - Progress bar: "42 / 500 labeled"
-   - Lock indicator (show who has which sample locked)
+   - Classification: numbered class buttons, click or keypress → annotate + auto-advance
+   - Detection: class selector + click-drag to draw bbox, annotation list with delete
+   - Keyboard shortcuts: `1`-`9` class labels, `→`/`Enter` next, `←` prev, `S` skip, `Esc` back
    - Show existing annotation if sample already labeled
 2. Update `api/client.js` with labeling API functions
 
@@ -259,16 +273,17 @@ No manual Lakebase setup required — the app self-provisions.
 
 ## Step 9: Frontend — Project Dashboard
 
-**Goal:** Per-project stats and Lakehouse Sync status.
+**Goal:** Per-project stats and Lakehouse Sync status. See [UI Design — Project Dashboard](ui-design.md#4-project-dashboard-projectsid).
 
 **Tasks:**
 1. New `ProjectDashboard.jsx`:
-   - Project header (name, description, task type)
-   - Stats cards: total, labeled, unlabeled, skipped
-   - Per-user contribution table
-   - "Start Labeling" button → navigates to labeling view
-   - Lakehouse Sync status indicator
-   - Info panel: where the Delta tables live in UC, example queries
+   - Project header (name, description, task type badge, creator, date)
+   - Stats cards row: total, labeled, skipped, unlabeled — large blue metric numbers
+   - Full-width progress bar (gradient fill)
+   - Per-user contribution table (striped rows, `--bg-hover` alternating)
+   - "Start Labeling" primary button → navigates to labeling view
+   - Lakehouse Sync status: green dot = active, gray = not configured
+   - Delta table location display with copy-to-clipboard
 
 **Files touched:**
 - New: `frontend/src/pages/ProjectDashboard.jsx`
