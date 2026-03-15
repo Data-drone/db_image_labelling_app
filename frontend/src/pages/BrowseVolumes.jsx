@@ -10,7 +10,6 @@ import {
   fetchSchemas,
   fetchVolumes,
   browseDirectory,
-  createDataset,
 } from '../api/client';
 
 export default function BrowseVolumes() {
@@ -35,11 +34,6 @@ export default function BrowseVolumes() {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  // Dataset creation
-  const [datasetName, setDatasetName] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createResult, setCreateResult] = useState(null);
 
   // Load catalogs when picker mode is activated
   useEffect(() => {
@@ -85,7 +79,6 @@ export default function BrowseVolumes() {
     setSubpath('');
     setFolders([]);
     setFiles([]);
-    setCreateResult(null);
   }, [catalog, schema, volume, mode]);
 
   // Compute current path based on mode
@@ -105,13 +98,10 @@ export default function BrowseVolumes() {
     if (!currentPath) return;
     setLoading(true);
     setError('');
-    setCreateResult(null);
     try {
       const data = await browseDirectory(currentPath);
       setFolders(data.folders || []);
       setFiles(data.files || []);
-      const pathParts = currentPath.split('/').filter(Boolean);
-      setDatasetName(pathParts[pathParts.length - 1] || '');
     } catch (e) {
       setError('Could not browse: ' + (e.response?.data?.detail || e.message));
       setFolders([]);
@@ -147,28 +137,6 @@ export default function BrowseVolumes() {
     setFolders([]);
     setFiles([]);
     loadDirectory();
-  };
-
-  const handleCreateDataset = async () => {
-    if (!datasetName.trim()) return;
-    setCreating(true);
-    setCreateResult(null);
-    try {
-      const result = await createDataset({
-        name: datasetName.trim(),
-        description: `Created from ${currentPath}`,
-        image_dir: currentPath,
-      });
-      setCreateResult({
-        success: true,
-        message: `Dataset "${result.name}" created with ${result.sample_count} images.`,
-      });
-    } catch (e) {
-      const detail = e.response?.data?.detail || e.message;
-      setCreateResult({ success: false, message: detail });
-    } finally {
-      setCreating(false);
-    }
   };
 
   return (
@@ -447,54 +415,6 @@ export default function BrowseVolumes() {
                 })}
               </div>
 
-              {/* Create dataset */}
-              <div style={{
-                borderTop: '1px solid var(--border-color)',
-                marginTop: '2rem',
-                paddingTop: '1.5rem',
-              }}>
-                <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>
-                  Create Dataset from This Folder
-                </h3>
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                  <div style={{ flex: 1, minWidth: 200 }}>
-                    <label style={labelStyle}>Dataset name</label>
-                    <input
-                      type="text"
-                      value={datasetName}
-                      onChange={(e) => setDatasetName(e.target.value)}
-                      placeholder="Enter dataset name"
-                      style={inputStyle}
-                    />
-                  </div>
-                  <button
-                    onClick={handleCreateDataset}
-                    disabled={creating || !datasetName.trim()}
-                    className="btn-primary"
-                    style={{ padding: '0.5rem 1.5rem', whiteSpace: 'nowrap' }}
-                  >
-                    {creating ? 'Creating...' : 'Create Dataset'}
-                  </button>
-                </div>
-
-                {createResult && (
-                  <div style={{
-                    marginTop: '0.75rem',
-                    padding: '0.75rem 1rem',
-                    borderRadius: 8,
-                    fontSize: '0.85rem',
-                    background: createResult.success
-                      ? 'rgba(0, 200, 0, 0.1)'
-                      : 'rgba(255, 50, 50, 0.1)',
-                    border: `1px solid ${createResult.success
-                      ? 'rgba(0, 200, 0, 0.3)'
-                      : 'rgba(255, 50, 50, 0.3)'}`,
-                    color: createResult.success ? '#4caf50' : '#ff6b6b',
-                  }}>
-                    {createResult.message}
-                  </div>
-                )}
-              </div>
             </div>
           )}
         </>
