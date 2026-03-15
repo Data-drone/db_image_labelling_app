@@ -5,8 +5,10 @@ Reference: [Phase 1 Design](../phase1-design.md)
 ## Prerequisites
 
 Before starting implementation:
-- [ ] Get Lakebase connection string from Databricks workspace
 - [ ] Merge `react-rebuild` → `main`, remove Streamlit code
+- [ ] Confirm `databricks-sdk >= 0.99` is available (for Lakebase Autoscaling API)
+
+No manual Lakebase setup required — the app self-provisions.
 
 ## Step 1: Branch Merge & Cleanup
 
@@ -15,7 +17,7 @@ Before starting implementation:
 **Tasks:**
 1. Merge `react-rebuild` into `main`
 2. Delete Streamlit files from `main`: `app.py`, `pages/`, `utils/`, old `requirements.txt`
-3. Move React app structure to root-level (or keep as-is with `backend/` + `frontend/`)
+3. Keep React app structure as-is with `backend/` + `frontend/`
 4. Update `CLAUDE.md` with correct paths, new architecture, Phase 1 goals
 5. Push to `main`
 
@@ -25,45 +27,101 @@ Before starting implementation:
 
 ---
 
-## Step 2: Lakebase Migration — Backend Models
+## Step 2: Lakebase Setup Module
 
-**Goal:** Replace SQLite models with PostgreSQL-backed Project-centric schema.
+**Goal:** Backend module that auto-provisions Lakebase and manages connections.
 
 **Tasks:**
-1. Replace `backend/models.py` entirely:
-   - Remove: `Dataset`, `Sample`, `Annotation`, `Tag` models
-   - Remove: SQLite backup/restore mechanism
-   - Remove: WAL mode pragma
-   - Add: `LabelingProject`, `ProjectSample`, `Annotation` models
-   - Use `DATABASE_URL` env var pointing to Lakebase Postgres endpoint
-   - Add `psycopg2-binary` to requirements
-2. Update `backend/schemas.py`:
-   - Remove old Pydantic schemas
-   - Add: `ProjectCreate`, `ProjectOut`, `ProjectStats`
-   - Add: `SampleOut`, `SamplePage`
-   - Add: `AnnotationCreate`, `AnnotationOut`
+1. New `backend/lakebase.py`:
+   - `ensure_lakebase_project()` — find or create Lakebase Autoscaling project via SDK
+     ```python
+     w = WorkspaceClient()  # uses DATABRICKS_CLIENT_ID/SECRET from Apps SP
+     # Try to get existing project
+     try:
+         project = w.postgres.get_project(name=f"projects/{project_id}")
+     except NotFound:
+         op = w.postgres.create_project(
+             project=Project(spec=ProjectSpec(display_name=display_name)),
+             project_id=project_id,
+         )
+         project = op.wait()
+     ```
+   - `get_endpoint()` — find the read-write endpoint, get host
+   - `generate_connection_string()` — call `generate_database_credential()`, build `postgresql://` URL
+   - `refresh_token_loop()` — background thread that refreshes the token every 30 min
+   - `get_engine()` — returns SQLAlchemy engine with current connection string
+   - `setup_replica_identity()` — runs `ALTER TABLE ... REPLICA IDENTITY FULL` on each table after creation
+
+2. Update `backend/models.py`:
+   - Remove: SQLite backup/restore, WAL pragma, all old models
+   - Add: `LabelingProject`, `ProjectSample`, `Annotation` (new schema)
+   - Engine creation uses `lakebase.get_engine()` instead of direct `create_engine(DATABASE_URL)`
+   - `init_db()` calls `create_all()` then `setup_replica_identity()`
+
 3. Update `app.yaml`:
-   - Change `DATABASE_URL` to Lakebase connection string
-   - Remove `DB_BACKUP_VOLUME` env var
+   ```yaml
+   command: ['python', 'start.py']
+   env:
+     - name: LAKEBASE_PROJECT_ID
+       valueFrom: lakebase-db
+     - name: DEMO_VOLUME_PATH
+       value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
+   ```
+
+4. Update `backend/requirements.txt`:
+   - Add: `psycopg2-binary`
+   - Ensure: `databricks-sdk>=0.99`
 
 **Files touched:**
-- Rewrite: `backend/models.py`, `backend/schemas.py`
+- New: `backend/lakebase.py`
+- Rewrite: `backend/models.py`
 - Edit: `app.yaml`, `backend/requirements.txt`
 
 **Verification:**
-- App starts without errors
-- Tables created in Lakebase
-- Basic CRUD via curl/httpie
+- Run app locally with DATABRICKS_HOST + token configured
+- Verify Lakebase project is created (or connected to existing)
+- Verify tables are created in Lakebase
+- Verify REPLICA IDENTITY FULL is set
+- Token refresh works (check logs after 30 min)
 
 ---
 
-## Step 3: Backend API — Project CRUD
+## Step 3: Backend Models & Schemas
+
+**Goal:** New Project-centric data models and Pydantic schemas.
+
+**Tasks:**
+1. Finalize `backend/models.py` with new models:
+   - `LabelingProject` — id, name, description, task_type, class_list, source_volume, created_by, created_at
+   - `ProjectSample` — id, project_id, filepath, filename, locked_by, locked_at, status
+   - `Annotation` — id, sample_id, project_id, label, ann_type, bbox_json, created_by, created_at
+
+2. Rewrite `backend/schemas.py`:
+   - `ProjectCreate` — name, description, task_type, class_list, source_volume
+   - `ProjectOut` — all fields + sample_count, labeled_count
+   - `ProjectStats` — per-status counts, per-user breakdown
+   - `SampleOut` — id, filepath, filename, status, annotations
+   - `SamplePage` — items + total + page info
+   - `AnnotationCreate` — label, ann_type, bbox_json (optional)
+   - `AnnotationOut` — all fields
+
+**Files touched:**
+- Edit: `backend/models.py`, `backend/schemas.py`
+
+**Verification:**
+- Models create tables correctly
+- Schemas serialize/deserialize without errors
+
+---
+
+## Step 4: Backend API — Project CRUD
 
 **Goal:** API endpoints for creating and managing labeling projects.
 
 **Tasks:**
 1. `POST /api/projects` — create project (name, task_type, class_list, source_volume)
    - Scan source volume for images, create `project_samples` rows
+   - Extract user email from Databricks Apps headers
 2. `GET /api/projects` — list all projects with stats (sample counts by status)
 3. `GET /api/projects/{id}` — single project detail
 4. `DELETE /api/projects/{id}` — delete project and all associated data
@@ -79,7 +137,7 @@ Before starting implementation:
 
 ---
 
-## Step 4: Backend API — Labeling Workflow
+## Step 5: Backend API — Labeling Workflow
 
 **Goal:** Endpoints for the labeling flow with lock-on-open.
 
@@ -109,7 +167,7 @@ Before starting implementation:
 
 ---
 
-## Step 5: Frontend — Projects List Page
+## Step 6: Frontend — Projects List Page
 
 **Goal:** Replace the home page with a projects-centric view.
 
@@ -144,7 +202,7 @@ Before starting implementation:
 
 ---
 
-## Step 6: Frontend — Create Project Page
+## Step 7: Frontend — Create Project Page
 
 **Goal:** Form to create a new labeling project.
 
@@ -169,7 +227,7 @@ Before starting implementation:
 
 ---
 
-## Step 7: Frontend — Labeling View (Rewrite)
+## Step 8: Frontend — Labeling View (Rewrite)
 
 **Goal:** Rewrite labeling view for project-centric workflow.
 
@@ -199,7 +257,7 @@ Before starting implementation:
 
 ---
 
-## Step 8: Frontend — Project Dashboard
+## Step 9: Frontend — Project Dashboard
 
 **Goal:** Per-project stats and Lakehouse Sync status.
 
@@ -223,16 +281,15 @@ Before starting implementation:
 
 ---
 
-## Step 9: Lakehouse Sync Setup & Cleanup
+## Step 10: Lakehouse Sync, Cleanup & Deploy
 
-**Goal:** Configure sync, remove dead code, test end-to-end, deploy.
+**Goal:** Enable sync, remove dead code, test end-to-end, deploy.
 
 **Tasks:**
 1. Configure Lakehouse Sync in Databricks workspace:
-   - `ALTER TABLE labeling_projects REPLICA IDENTITY FULL;`
-   - `ALTER TABLE project_samples REPLICA IDENTITY FULL;`
-   - `ALTER TABLE annotations REPLICA IDENTITY FULL;`
+   - Verify `REPLICA IDENTITY FULL` was set by the app
    - Enable sync in Lakebase UI → choose destination catalog/schema
+   - Verify Delta tables appear in UC
 2. Remove unused files:
    - `frontend/src/pages/DatasetExplorer.jsx`
    - `frontend/src/pages/SearchPage.jsx`
@@ -241,8 +298,11 @@ Before starting implementation:
 3. Remove unused backend endpoints (old dataset/sample/tag CRUD)
 4. Update `start.py` if needed
 5. Build frontend: `npm run build`
-6. Deploy to Databricks Apps
+6. Deploy to Databricks Apps with resources configured:
+   - Lakebase database resource (key: `lakebase-db`)
+   - UC Volume resource (key: `source-volume`)
 7. End-to-end test:
+   - App starts → auto-provisions/connects to Lakebase
    - Create project → Label images → Check Delta tables in UC
    - Test with 2 users for lock-on-open behavior
    - Verify Lakehouse Sync is replicating changes
@@ -259,25 +319,27 @@ Before starting implementation:
 
 ```
 Step 1 (branch merge) ─────────────────────────────────────────────────┐
-Step 2 (models) ────────────────────────────────────────────────────────┤
-Step 3 (project API) ──────────────────┬───────────────────────────────┤
-Step 4 (labeling API) ─────────────────┘                               │
+Step 2 (lakebase module) ──────────────────────────────────────────────┤
+Step 3 (models & schemas) ─────────────────────────────────────────────┤
+Step 4 (project API) ──────────────────┬───────────────────────────────┤
+Step 5 (labeling API) ─────────────────┘                               │
                                        │                               │
-Step 5 (projects list page) ───────────┼── depends on Step 3 API ──────┤
-Step 6 (create project page) ──────────┤                               │
-Step 7 (labeling view) ────────────────┼── depends on Step 4 API ──────┤
-Step 8 (project dashboard) ────────────┤                               │
+Step 6 (projects list page) ───────────┼── depends on Step 4 API ──────┤
+Step 7 (create project page) ──────────┤                               │
+Step 8 (labeling view) ────────────────┼── depends on Step 5 API ──────┤
+Step 9 (project dashboard) ────────────┤                               │
                                        │                               │
-Step 9 (sync setup & deploy) ──────────┴───────────────────────────────┘
+Step 10 (sync, cleanup & deploy) ──────┴───────────────────────────────┘
 ```
 
-Backend steps (2-4) can be done before frontend steps (5-8).
-Frontend steps (5-8) are mostly independent of each other once the API is ready.
-Step 9 depends on everything else.
+Backend steps (2-5) must be done sequentially (each builds on the previous).
+Frontend steps (6-9) are mostly independent of each other once the API is ready.
+Step 10 depends on everything else.
 
 ## Key Decisions to Confirm During Implementation
 
-- Lakebase connection string (need from workspace admin or service principal)
+- Lakebase project ID naming convention (e.g., `cv-explorer`)
 - Destination UC catalog/schema for Lakehouse Sync Delta tables
 - Whether to keep the existing BrowseVolumes component or simplify it
 - Image thumbnail caching strategy (currently regenerated per request)
+- Token refresh interval (30 min default — may need tuning based on token TTL)

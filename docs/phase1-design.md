@@ -228,29 +228,148 @@ Databricks Apps provides user identity via HTTP headers. The FastAPI backend ext
 3. Continue Phase 1 development on `main`
 4. Update `CLAUDE.md` to reflect new structure
 
+## Lakebase Auto-Provisioning
+
+The app self-provisions its Lakebase infrastructure on first run. Users can either specify an existing Lakebase project or let the app create one.
+
+### How It Works
+
+On startup, the backend runs a setup check:
+
+1. **Check for existing Lakebase project** — look for a project matching a configured name (e.g., `cv-explorer`)
+2. **If not found → create one** via `w.postgres.create_project(...)` and wait for it to be ready
+3. **Ensure an endpoint exists** — the project needs a read-write endpoint for connections
+4. **Generate database credentials** — use `w.postgres.generate_database_credential(endpoint)` to get a short-lived token
+5. **Build the connection string** — `postgresql://token:TOKEN@HOST:5432/databricks_postgres`
+6. **Run SQLAlchemy `create_all()`** — creates tables if they don't exist
+7. **Set REPLICA IDENTITY FULL** on each table (required for Lakehouse Sync)
+
+### SDK API Reference (databricks-sdk >= 0.99)
+
+```python
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.postgres import (
+    Project, ProjectSpec, EndpointType,
+)
+
+w = WorkspaceClient()
+
+# List existing projects
+projects = list(w.postgres.list_projects())
+
+# Create a new project
+op = w.postgres.create_project(
+    project=Project(spec=ProjectSpec(display_name="cv-explorer")),
+    project_id="cv-explorer",
+)
+project = op.wait()  # blocks until ACTIVE
+
+# Get endpoint (created with the project)
+endpoints = list(w.postgres.list_endpoints(parent=project.name))
+endpoint = endpoints[0]
+
+# Get connection details
+host = endpoint.status.hosts.host           # e.g. "xxx.postgres.azuredatabricks.net"
+cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+token = cred.token                           # short-lived auth token
+
+# Connection string
+DATABASE_URL = f"postgresql://token:{token}@{host}:5432/databricks_postgres"
+```
+
+### Token Refresh
+
+`generate_database_credential` returns a short-lived token (expires in ~1 hour). The app needs a token refresh mechanism:
+
+- On startup: generate initial token, build connection string
+- Background thread: refresh token every 30 minutes
+- On connection failure: attempt token refresh before retrying
+
+### Configuration Flow
+
+The app accepts configuration via environment variables:
+
+| Env Var | Purpose | Example |
+|---------|---------|---------|
+| `LAKEBASE_PROJECT_ID` | Existing Lakebase project ID (optional — creates if missing) | `cv-explorer` |
+| `LAKEBASE_DISPLAY_NAME` | Display name for new projects | `CV Explorer` |
+
+If `LAKEBASE_PROJECT_ID` is set and the project exists → connect to it.
+If not found or not set → create a new project with the given name.
+
+## Databricks Apps Resource Configuration
+
+Databricks Apps uses a resource model where the app declares dependencies on platform services. Resources are configured in the Apps UI during deployment, and the app's service principal gets the necessary permissions automatically.
+
+### App Resources Needed
+
+| Resource | Type | Permission | Purpose |
+|----------|------|-----------|---------|
+| Lakebase database | `postgres` | CAN_CONNECT_AND_CREATE | Read/write project data, annotations |
+| UC Volume (images) | `uc_securable` (volume) | Can read | Read source images from Volume paths |
+
+### app.yaml Configuration
+
+```yaml
+command: ['python', 'start.py']
+env:
+  - name: LAKEBASE_PROJECT_ID
+    valueFrom: lakebase-db
+  - name: DEMO_VOLUME_PATH
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
+```
+
+The `valueFrom: lakebase-db` references the Lakebase database resource configured in the Apps UI. At runtime, the app's service principal has permissions to connect to the Lakebase project and generate credentials.
+
+### Apps UI Setup
+
+When deploying, add these resources in the Databricks Apps UI:
+
+1. **Lakebase database** (key: `lakebase-db`)
+   - Select existing Lakebase project (or the app will create one)
+   - Permission: CAN_CONNECT_AND_CREATE
+   - Branch: `main` (default)
+   - Database: `databricks_postgres` (default)
+
+2. **UC Volume** (key: `source-volume`)
+   - Select the volume containing images
+   - Permission: Can read
+
+The app's service principal (`DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`) is automatically injected and used for all SDK calls including Lakebase provisioning and credential generation.
+
 ## Dependencies
 
 ### Backend (additions)
 - `psycopg2-binary` — PostgreSQL driver for Lakebase
+- `databricks-sdk >= 0.99` — for Lakebase provisioning and credential management
 
 ### Backend (removals)
 - `databricks-sql-connector` — not needed, Lakehouse Sync handles Delta output
+- SQLite backup/restore code — replaced by Lakebase
 
 ### Frontend
 - No new dependencies — React + Vite stack stays the same
 
-## One-Time Setup (Outside the App)
+## Lakehouse Sync Setup
 
-These steps are done in the Databricks workspace, not in app code:
+After the app creates tables in Lakebase, Lakehouse Sync needs to be enabled. This can be done in the Lakebase UI or potentially automated via the SDK in a future iteration.
 
-1. **Create Lakebase project** (if not already done)
-2. **Set REPLICA IDENTITY FULL** on all tables:
+### Steps (in Lakebase UI)
+
+1. Open Lakebase project → select branch (`main`)
+2. **Set REPLICA IDENTITY FULL** on all tables (via SQL Editor):
    ```sql
    ALTER TABLE labeling_projects REPLICA IDENTITY FULL;
    ALTER TABLE project_samples REPLICA IDENTITY FULL;
    ALTER TABLE annotations REPLICA IDENTITY FULL;
    ```
-3. **Enable Lakehouse Sync** in the Lakebase UI:
-   - Source: `databricks_postgres` / `public` schema
-   - Destination: chosen UC catalog and schema
-4. Verify Delta tables appear: `lb_labeling_projects_history`, `lb_project_samples_history`, `lb_annotations_history`
+3. Go to **Branch Overview → Lakehouse Sync tab**
+4. Click **Start Sync**:
+   - Database: `databricks_postgres`
+   - Schema: `public`
+   - To Catalog: target UC catalog (e.g., `brian_gen_ai`)
+   - Schema: target UC schema (e.g., `cv_explorer`)
+5. Verify Delta tables appear:
+   - `lb_labeling_projects_history`
+   - `lb_project_samples_history`
+   - `lb_annotations_history`
