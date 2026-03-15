@@ -52,7 +52,7 @@ export default function HomePage() {
             width: 44,
             height: 44,
             borderRadius: 10,
-            background: 'linear-gradient(135deg, var(--accent-teal), var(--accent-teal-dark))',
+            background: 'linear-gradient(135deg, var(--accent-blue), var(--accent-blue-dark))',
             fontSize: '1.3rem',
           }}
         >
@@ -95,7 +95,7 @@ export default function HomePage() {
               style={{
                 fontSize: '0.75rem',
                 fontWeight: 600,
-                color: 'var(--accent-teal)',
+                color: 'var(--accent-blue)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.05em',
                 marginBottom: '0.5rem',

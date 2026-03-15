@@ -92,7 +92,7 @@ export default function DatasetExplorer() {
           <>
             <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>|</span>
             <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-              <strong style={{ color: 'var(--accent-teal)' }}>{total}</strong> samples
+              <strong style={{ color: 'var(--accent-blue)' }}>{total}</strong> samples
               {(labelFilter || tagFilter || minConfidence > 0 || searchTerm) && ' (filtered)'}
             </span>
           </>
@@ -170,7 +170,7 @@ export default function DatasetExplorer() {
               min="0" max="1" step="0.05"
               value={minConfidence}
               onChange={(e) => setMinConfidence(Number(e.target.value))}
-              style={{ width: '100%', accentColor: 'var(--accent-teal)' }}
+              style={{ width: '100%', accentColor: 'var(--accent-blue)' }}
             />
 
             <div
@@ -265,7 +265,7 @@ export default function DatasetExplorer() {
                     <div style={{ marginBottom: '0.75rem' }}>
                       <strong style={{ fontSize: '0.8rem' }}>Tags: </strong>
                       {selectedSample.tags.map((t) => (
-                        <span key={t.id} className="badge badge-teal" style={{ marginRight: '0.25rem' }}>
+                        <span key={t.id} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>
                           {t.tag}
                         </span>
                       ))}

@@ -253,7 +253,7 @@ export default function LabelingView() {
                       Sample {currentIndex + 1} / {totalSamples}
                     </strong>
                     {' -- '}
-                    <code style={{ color: 'var(--accent-teal)' }}>
+                    <code style={{ color: 'var(--accent-blue)' }}>
                       {currentSample.filename}
                     </code>
                   </div>
@@ -313,12 +313,12 @@ export default function LabelingView() {
                             fontSize: '0.75rem',
                             fontWeight: 600,
                             background: ann.ann_type === 'classification'
-                              ? 'rgba(0, 180, 216, 0.2)'
+                              ? 'rgba(66, 153, 224, 0.2)'
                               : 'rgba(255, 165, 0, 0.2)',
                             color: ann.ann_type === 'classification'
-                              ? 'var(--accent-teal)'
+                              ? 'var(--accent-blue)'
                               : '#ffa500',
-                            border: `1px solid ${ann.ann_type === 'classification' ? 'var(--accent-teal)' : '#ffa500'}`,
+                            border: `1px solid ${ann.ann_type === 'classification' ? 'var(--accent-blue)' : '#ffa500'}`,
                           }}
                         >
                           {ann.label}
@@ -332,7 +332,7 @@ export default function LabelingView() {
                       {currentSample.tags?.map((t) => (
                         <span
                           key={t.id}
-                          className="badge badge-teal"
+                          className="badge badge-blue"
                         >
                           {t.tag}
                         </span>
@@ -389,7 +389,7 @@ export default function LabelingView() {
                     type="checkbox"
                     checked={autosave}
                     onChange={(e) => setAutosave(e.target.checked)}
-                    style={{ accentColor: 'var(--accent-teal)' }}
+                    style={{ accentColor: 'var(--accent-blue)' }}
                   />
                   <span>Autosave {autosave ? '(on)' : '(off)'}</span>
                 </div>
@@ -410,7 +410,7 @@ export default function LabelingView() {
                           onClick={() => handleClassify(cls)}
                           style={{ textAlign: 'left', fontSize: '0.8rem' }}
                         >
-                          <span style={{ color: 'var(--accent-teal)', marginRight: '0.5rem' }}>
+                          <span style={{ color: 'var(--accent-blue)', marginRight: '0.5rem' }}>
                             {i + 1}
                           </span>
                           {cls}

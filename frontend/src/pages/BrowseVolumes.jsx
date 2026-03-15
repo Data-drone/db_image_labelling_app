@@ -188,8 +188,8 @@ export default function BrowseVolumes() {
             padding: '0.5rem 1rem',
             borderRadius: 8,
             border: '1px solid var(--border-color)',
-            background: mode === 'direct' ? 'rgba(0, 180, 216, 0.15)' : 'var(--bg-card)',
-            color: mode === 'direct' ? 'var(--accent-teal-light)' : 'var(--text-secondary)',
+            background: mode === 'direct' ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
+            color: mode === 'direct' ? 'var(--accent-blue-light)' : 'var(--text-secondary)',
             fontWeight: mode === 'direct' ? 600 : 400,
             cursor: 'pointer',
             fontSize: '0.85rem',
@@ -203,8 +203,8 @@ export default function BrowseVolumes() {
             padding: '0.5rem 1rem',
             borderRadius: 8,
             border: '1px solid var(--border-color)',
-            background: mode === 'picker' ? 'rgba(0, 180, 216, 0.15)' : 'var(--bg-card)',
-            color: mode === 'picker' ? 'var(--accent-teal-light)' : 'var(--text-secondary)',
+            background: mode === 'picker' ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
+            color: mode === 'picker' ? 'var(--accent-blue-light)' : 'var(--text-secondary)',
             fontWeight: mode === 'picker' ? 600 : 400,
             cursor: 'pointer',
             fontSize: '0.85rem',
@@ -339,7 +339,7 @@ export default function BrowseVolumes() {
                     borderRadius: 6,
                     padding: '0.3rem 0.6rem',
                     fontSize: '0.8rem',
-                    color: 'var(--accent-teal-light)',
+                    color: 'var(--accent-blue-light)',
                     cursor: 'pointer',
                   }}
                 >
@@ -420,7 +420,7 @@ export default function BrowseVolumes() {
                         height="32"
                         viewBox="0 0 24 24"
                         fill="none"
-                        stroke={isImage ? 'var(--accent-teal)' : isJson ? 'var(--status-warning)' : 'var(--text-muted)'}
+                        stroke={isImage ? 'var(--accent-blue)' : isJson ? 'var(--status-warning)' : 'var(--text-muted)'}
                         strokeWidth="1.5"
                         strokeLinecap="round"
                         strokeLinejoin="round"

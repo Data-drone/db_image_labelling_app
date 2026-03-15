@@ -135,10 +135,10 @@ export default function SearchPage() {
                   padding: '0.5rem 1rem',
                   fontSize: '0.875rem',
                   fontWeight: activeTab === tab.id ? 600 : 400,
-                  color: activeTab === tab.id ? 'var(--accent-teal)' : 'var(--text-secondary)',
+                  color: activeTab === tab.id ? 'var(--accent-blue)' : 'var(--text-secondary)',
                   background: 'transparent',
                   border: 'none',
-                  borderBottom: activeTab === tab.id ? '2px solid var(--accent-teal)' : '2px solid transparent',
+                  borderBottom: activeTab === tab.id ? '2px solid var(--accent-blue)' : '2px solid transparent',
                   cursor: 'pointer',
                   marginBottom: -2,
                 }}

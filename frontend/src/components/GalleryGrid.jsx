@@ -35,7 +35,7 @@ export default function GalleryGrid({
           style={{
             borderColor:
               selectedId === sample.id
-                ? 'var(--accent-teal)'
+                ? 'var(--accent-blue)'
                 : undefined,
           }}
         >
@@ -51,7 +51,7 @@ export default function GalleryGrid({
                 {sample.tags.map((t) => (
                   <span
                     key={t.id}
-                    className="badge badge-teal"
+                    className="badge badge-blue"
                     style={{ marginRight: '0.25rem', fontSize: '0.65rem' }}
                   >
                     {t.tag}
@@ -67,7 +67,7 @@ export default function GalleryGrid({
                 position: 'absolute',
                 top: 6,
                 right: 6,
-                background: 'rgba(0, 180, 216, 0.85)',
+                background: 'rgba(66, 153, 224, 0.85)',
                 color: '#fff',
                 fontSize: '0.7rem',
                 fontWeight: 700,

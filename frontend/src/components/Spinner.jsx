@@ -6,7 +6,7 @@ export default function Spinner({ size = 32, label = 'Loading...' }) {
           width: size,
           height: size,
           border: '3px solid var(--border-color)',
-          borderTopColor: 'var(--accent-teal)',
+          borderTopColor: 'var(--accent-blue)',
           borderRadius: '50%',
           animation: 'spin 0.8s linear infinite',
         }}

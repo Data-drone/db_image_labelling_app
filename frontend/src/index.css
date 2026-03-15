@@ -1,42 +1,50 @@
 @import "tailwindcss";
 
 /* =========================================================================
-   CV Dataset Explorer - Databricks Dark Teal Theme
+   CV Explorer — Databricks Dark Mode Theme
+   Palette aligned with Databricks workspace dark UI
    ========================================================================= */
 
 :root {
-  /* Core palette */
-  --bg-primary: #1a2332;
-  --bg-secondary: #1e2a3a;
-  --bg-card: #243044;
-  --bg-hover: #2a3a50;
-  --bg-input: #1e2a3a;
+  /* Core backgrounds (neutral charcoal grays) */
+  --bg-primary: #1b1b1d;
+  --bg-secondary: #242526;
+  --bg-card: #1e1f21;
+  --bg-hover: #2a2b2d;
+  --bg-input: #242526;
 
-  /* Teal accents */
-  --accent-teal: #00b4d8;
-  --accent-teal-light: #48cae4;
-  --accent-teal-dark: #0096c7;
+  /* Accent — Databricks blue */
+  --accent-blue: #4299e0;
+  --accent-blue-light: #72a1ed;
+  --accent-blue-dark: #2272b4;
 
   /* Databricks brand */
   --accent-red: #eb1600;
 
   /* Text */
-  --text-primary: #e8edf3;
-  --text-secondary: #8a99ab;
-  --text-muted: #5a6a7d;
+  --text-primary: #e3e3e3;
+  --text-heading: #fafafa;
+  --text-secondary: #a1a1a1;
+  --text-muted: #686868;
 
   /* Status */
-  --status-success: #00c853;
-  --status-warning: #ffa726;
-  --status-error: #ef5350;
+  --status-success: #009400;
+  --status-warning: #e6a700;
+  --status-error: #e13238;
+  --status-info: #4cb3d4;
 
   /* Borders */
-  --border-color: #2a3a50;
-  --border-focus: #00b4d8;
+  --border-color: rgba(255, 255, 255, 0.1);
+  --border-hover: rgba(255, 255, 255, 0.2);
+  --border-focus: #4299e0;
 
   /* Sidebar */
-  --sidebar-width: 260px;
-  --sidebar-bg: #152030;
+  --sidebar-width: 220px;
+  --sidebar-bg: #171717;
+
+  /* Scrollbar */
+  --scrollbar-track: #444444;
+  --scrollbar-thumb: #686868;
 }
 
 * {
@@ -49,7 +57,8 @@ body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  line-height: 1.6;
+  line-height: 1.5;
+  font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -62,69 +71,69 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-primary);
+  background: var(--scrollbar-track);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: #7a7a7a;
 }
 
 a {
-  color: var(--accent-teal);
+  color: var(--accent-blue);
   text-decoration: none;
 }
 a:hover {
-  color: var(--accent-teal-light);
+  color: var(--accent-blue-light);
 }
 
 /* Utility classes */
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 1.25rem;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .card:hover {
-  border-color: var(--accent-teal-dark);
-  box-shadow: 0 4px 20px rgba(0, 180, 216, 0.08);
+  border-color: var(--border-hover);
+  box-shadow: 0 4px 20px rgba(66, 153, 224, 0.06);
 }
 
 .btn-primary {
-  background: var(--accent-teal);
+  background: var(--accent-blue-dark);
   color: #fff;
   border: none;
   padding: 0.5rem 1.25rem;
-  border-radius: 8px;
+  border-radius: 6px;
   font-weight: 600;
   font-size: 0.875rem;
   cursor: pointer;
   transition: background 0.2s, transform 0.1s;
 }
 .btn-primary:hover {
-  background: var(--accent-teal-dark);
+  background: var(--accent-blue);
 }
 .btn-primary:active {
   transform: scale(0.97);
 }
 
 .btn-secondary {
-  background: var(--bg-hover);
+  background: transparent;
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 0.5rem 1.25rem;
-  border-radius: 8px;
+  border-radius: 6px;
   font-weight: 500;
   font-size: 0.875rem;
   cursor: pointer;
   transition: background 0.2s, border-color 0.2s;
 }
 .btn-secondary:hover {
-  background: var(--bg-card);
-  border-color: var(--accent-teal-dark);
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
 }
 
 .btn-danger {
@@ -132,26 +141,26 @@ a:hover {
   color: #fff;
   border: none;
   padding: 0.5rem 1.25rem;
-  border-radius: 8px;
+  border-radius: 6px;
   font-weight: 600;
   font-size: 0.875rem;
   cursor: pointer;
 }
 .btn-danger:hover {
-  background: #d32f2f;
+  background: #c62828;
 }
 
 .metric-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 1.25rem;
   text-align: center;
 }
 .metric-card .metric-value {
   font-size: 2rem;
   font-weight: 700;
-  color: var(--accent-teal);
+  color: var(--accent-blue);
 }
 .metric-card .metric-label {
   font-size: 0.85rem;
@@ -161,15 +170,15 @@ a:hover {
 
 .progress-bar {
   width: 100%;
-  height: 8px;
+  height: 6px;
   background: var(--bg-secondary);
-  border-radius: 4px;
+  border-radius: 3px;
   overflow: hidden;
 }
 .progress-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-teal-dark), var(--accent-teal-light));
-  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent-blue-dark), var(--accent-blue));
+  border-radius: 3px;
   transition: width 0.3s ease;
 }
 
@@ -193,7 +202,7 @@ a:hover {
   transition: border-color 0.2s, transform 0.2s;
 }
 .gallery-item:hover {
-  border-color: var(--accent-teal);
+  border-color: var(--accent-blue);
   transform: translateY(-2px);
 }
 .gallery-item img {
@@ -224,10 +233,20 @@ a:hover {
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
 }
-.badge-teal {
-  background: rgba(0, 180, 216, 0.15);
-  color: var(--accent-teal-light);
-  border-color: rgba(0, 180, 216, 0.3);
+.badge-blue {
+  background: rgba(66, 153, 224, 0.15);
+  color: var(--accent-blue-light);
+  border-color: rgba(66, 153, 224, 0.3);
+}
+.badge-green {
+  background: rgba(0, 148, 0, 0.15);
+  color: #00c853;
+  border-color: rgba(0, 148, 0, 0.3);
+}
+.badge-yellow {
+  background: rgba(230, 167, 0, 0.15);
+  color: #ffa726;
+  border-color: rgba(230, 167, 0, 0.3);
 }
 
 /* Spinner animation */
