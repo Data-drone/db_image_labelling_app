@@ -300,14 +300,39 @@ export default function LabelingView() {
                     </div>
                   )}
 
-                  {/* Tags display */}
-                  {currentSample.tags?.length > 0 && (
-                    <div style={{ marginTop: '0.5rem' }}>
-                      {currentSample.tags.map((t) => (
+                  {/* Existing annotations + tags display */}
+                  {(currentSample.annotations?.length > 0 || currentSample.tags?.length > 0) && (
+                    <div style={{ marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
+                      {currentSample.annotations?.map((ann) => (
+                        <span
+                          key={ann.id}
+                          style={{
+                            display: 'inline-block',
+                            padding: '0.15rem 0.5rem',
+                            borderRadius: 4,
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            background: ann.ann_type === 'classification'
+                              ? 'rgba(0, 180, 216, 0.2)'
+                              : 'rgba(255, 165, 0, 0.2)',
+                            color: ann.ann_type === 'classification'
+                              ? 'var(--accent-teal)'
+                              : '#ffa500',
+                            border: `1px solid ${ann.ann_type === 'classification' ? 'var(--accent-teal)' : '#ffa500'}`,
+                          }}
+                        >
+                          {ann.label}
+                          {ann.ann_type !== 'classification' && (
+                            <span style={{ opacity: 0.6, marginLeft: '0.25rem', fontSize: '0.65rem' }}>
+                              {ann.ann_type}
+                            </span>
+                          )}
+                        </span>
+                      ))}
+                      {currentSample.tags?.map((t) => (
                         <span
                           key={t.id}
                           className="badge badge-teal"
-                          style={{ marginRight: '0.25rem' }}
                         >
                           {t.tag}
                         </span>
