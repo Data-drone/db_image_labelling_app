@@ -5,7 +5,9 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import Spinner from '../components/Spinner';
 import DatasetSelector from '../components/DatasetSelector';
+import { useDataset } from '../contexts/DatasetContext';
 import AnnotationCanvas from '../components/AnnotationCanvas';
 import {
   fetchSamples,
@@ -21,7 +23,7 @@ const DEFAULT_CLASSES = ['car', 'truck', 'person', 'bicycle', 'sign'];
 const QUICK_TAGS = ['good', 'bad', 'review', 'skip', 'flagged'];
 
 export default function LabelingView() {
-  const [dataset, setDataset] = useState(null);
+  const { dataset } = useDataset();
   const [stats, setStats] = useState(null);
   const [samples, setSamples] = useState([]);
   const [totalSamples, setTotalSamples] = useState(0);
@@ -32,6 +34,7 @@ export default function LabelingView() {
   const [newClass, setNewClass] = useState('');
   const [autosave, setAutosave] = useState(true);
   const [pendingAnnotations, setPendingAnnotations] = useState([]);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   // Load all sample IDs for navigation
   useEffect(() => {
@@ -52,6 +55,8 @@ export default function LabelingView() {
       .then(setStats)
       .catch(console.error);
   }, [dataset, currentIndex]);
+
+  useEffect(() => { setImageLoaded(false); }, [currentIndex]);
 
   const currentSample = samples[currentIndex] || null;
 
@@ -205,7 +210,7 @@ export default function LabelingView() {
 
       {/* Dataset selector */}
       <div style={{ marginBottom: '1rem' }}>
-        <DatasetSelector value={dataset?.id} onChange={setDataset} />
+        <DatasetSelector />
       </div>
 
       {dataset && (
@@ -232,9 +237,9 @@ export default function LabelingView() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '1.5rem' }}>
+          <div style={{ display: 'flex', gap: '1.5rem', height: 'calc(100vh - 200px)' }}>
             {/* Image + Canvas area */}
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               {currentSample && (
                 <>
                   <div
@@ -272,15 +277,24 @@ export default function LabelingView() {
                         border: '1px solid var(--border-color)',
                         overflow: 'hidden',
                         display: 'inline-block',
+                        position: 'relative',
                       }}
                     >
+                      {!imageLoaded && (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+                          <Spinner size={40} label="" />
+                        </div>
+                      )}
                       <img
                         src={imageUrl(currentSample.id)}
                         alt={currentSample.filename}
+                        onLoad={() => setImageLoaded(true)}
                         style={{
-                          maxWidth: 800,
-                          maxHeight: 600,
+                          maxWidth: '100%',
+                          maxHeight: 'calc(100vh - 280px)',
                           objectFit: 'contain',
+                          opacity: imageLoaded ? 1 : 0,
+                          transition: 'opacity 0.2s',
                         }}
                       />
                     </div>
@@ -313,216 +327,220 @@ export default function LabelingView() {
                 borderRadius: 12,
                 border: '1px solid var(--border-color)',
                 padding: '1rem',
-                alignSelf: 'flex-start',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
               }}
             >
-              {/* Mode selector */}
-              <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.75rem' }}>
-                Mode
-              </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', marginBottom: '1rem' }}>
-                {MODES.map((m) => (
-                  <button
-                    key={m}
-                    className={m === mode ? 'btn-primary' : 'btn-secondary'}
-                    onClick={() => setMode(m)}
-                    style={{ textAlign: 'left', fontSize: '0.8rem' }}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-
-              {/* Autosave toggle */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                  marginBottom: '1rem',
-                  fontSize: '0.8rem',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={autosave}
-                  onChange={(e) => setAutosave(e.target.checked)}
-                  style={{ accentColor: 'var(--accent-teal)' }}
-                />
-                <span>Autosave {autosave ? '(on)' : '(off)'}</span>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0' }} />
-
-              {/* Mode-specific controls */}
-              {mode === 'Classification' && (
-                <div>
-                  <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-                    Pick a class:
-                  </h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                    {classes.map((cls, i) => (
-                      <button
-                        key={cls}
-                        className="btn-secondary"
-                        onClick={() => handleClassify(cls)}
-                        style={{ textAlign: 'left', fontSize: '0.8rem' }}
-                      >
-                        <span style={{ color: 'var(--accent-teal)', marginRight: '0.5rem' }}>
-                          {i + 1}
-                        </span>
-                        {cls}
-                      </button>
-                    ))}
-                  </div>
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                {/* Mode selector */}
+                <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.75rem' }}>
+                  Mode
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', marginBottom: '1rem' }}>
+                  {MODES.map((m) => (
+                    <button
+                      key={m}
+                      className={m === mode ? 'btn-primary' : 'btn-secondary'}
+                      onClick={() => setMode(m)}
+                      style={{ textAlign: 'left', fontSize: '0.8rem' }}
+                    >
+                      {m}
+                    </button>
+                  ))}
                 </div>
-              )}
 
-              {(mode === 'Bounding Box' || mode === 'Polygon') && (
-                <div>
-                  <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-                    Active label:
-                  </h4>
-                  <select
-                    value={selectedClass}
-                    onChange={(e) => setSelectedClass(e.target.value)}
+                {/* Autosave toggle */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    marginBottom: '1rem',
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={autosave}
+                    onChange={(e) => setAutosave(e.target.checked)}
+                    style={{ accentColor: 'var(--accent-teal)' }}
+                  />
+                  <span>Autosave {autosave ? '(on)' : '(off)'}</span>
+                </div>
+
+                <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0' }} />
+
+                {/* Mode-specific controls */}
+                {mode === 'Classification' && (
+                  <div>
+                    <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                      Pick a class:
+                    </h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                      {classes.map((cls, i) => (
+                        <button
+                          key={cls}
+                          className="btn-secondary"
+                          onClick={() => handleClassify(cls)}
+                          style={{ textAlign: 'left', fontSize: '0.8rem' }}
+                        >
+                          <span style={{ color: 'var(--accent-teal)', marginRight: '0.5rem' }}>
+                            {i + 1}
+                          </span>
+                          {cls}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(mode === 'Bounding Box' || mode === 'Polygon') && (
+                  <div>
+                    <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                      Active label:
+                    </h4>
+                    <select
+                      value={selectedClass}
+                      onChange={(e) => setSelectedClass(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '0.4rem 0.6rem',
+                        background: 'var(--bg-input)',
+                        color: 'var(--text-primary)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: 6,
+                        fontSize: '0.8rem',
+                        marginBottom: '0.75rem',
+                      }}
+                    >
+                      {classes.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+
+                    {!autosave && pendingAnnotations.length > 0 && (
+                      <button
+                        className="btn-primary"
+                        onClick={savePending}
+                        style={{ width: '100%', marginBottom: '0.5rem' }}
+                      >
+                        Save {pendingAnnotations.length} annotation(s)
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {mode === 'Tagging' && (
+                  <div>
+                    <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                      Quick tags:
+                    </h4>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: '0.25rem',
+                        marginBottom: '0.75rem',
+                      }}
+                    >
+                      {QUICK_TAGS.map((tag) => (
+                        <button
+                          key={tag}
+                          className="btn-secondary"
+                          onClick={() => handleTag(tag)}
+                          style={{ fontSize: '0.75rem' }}
+                        >
+                          {tag}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0' }} />
+
+                {/* Class manager */}
+                <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Classes ({classes.length})
+                </h4>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                  {classes.join(', ')}
+                </div>
+                <div style={{ display: 'flex', gap: '0.25rem' }}>
+                  <input
+                    type="text"
+                    value={newClass}
+                    onChange={(e) => setNewClass(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && addClass()}
+                    placeholder="New class..."
                     style={{
-                      width: '100%',
-                      padding: '0.4rem 0.6rem',
+                      flex: 1,
+                      padding: '0.3rem 0.5rem',
                       background: 'var(--bg-input)',
                       color: 'var(--text-primary)',
                       border: '1px solid var(--border-color)',
                       borderRadius: 6,
-                      fontSize: '0.8rem',
-                      marginBottom: '0.75rem',
+                      fontSize: '0.75rem',
                     }}
+                  />
+                  <button
+                    className="btn-primary"
+                    onClick={addClass}
+                    style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
                   >
-                    {classes.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-
-                  {!autosave && pendingAnnotations.length > 0 && (
-                    <button
-                      className="btn-primary"
-                      onClick={savePending}
-                      style={{ width: '100%', marginBottom: '0.5rem' }}
-                    >
-                      Save {pendingAnnotations.length} annotation(s)
-                    </button>
-                  )}
+                    Add
+                  </button>
                 </div>
-              )}
-
-              {mode === 'Tagging' && (
-                <div>
-                  <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-                    Quick tags:
-                  </h4>
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr 1fr',
-                      gap: '0.25rem',
-                      marginBottom: '0.75rem',
-                    }}
-                  >
-                    {QUICK_TAGS.map((tag) => (
-                      <button
-                        key={tag}
-                        className="btn-secondary"
-                        onClick={() => handleTag(tag)}
-                        style={{ fontSize: '0.75rem' }}
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0' }} />
-
-              {/* Class manager */}
-              <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-                Classes ({classes.length})
-              </h4>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                {classes.join(', ')}
               </div>
-              <div style={{ display: 'flex', gap: '0.25rem' }}>
-                <input
-                  type="text"
-                  value={newClass}
-                  onChange={(e) => setNewClass(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addClass()}
-                  placeholder="New class..."
-                  style={{
-                    flex: 1,
-                    padding: '0.3rem 0.5rem',
-                    background: 'var(--bg-input)',
-                    color: 'var(--text-primary)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: 6,
-                    fontSize: '0.75rem',
-                  }}
-                />
-                <button
-                  className="btn-primary"
-                  onClick={addClass}
-                  style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
-                >
-                  Add
-                </button>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0' }} />
 
               {/* Navigation */}
-              <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-                Navigation
-              </h4>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.25rem' }}>
-                <button
-                  className="btn-secondary"
-                  onClick={goPrev}
-                  disabled={currentIndex === 0}
-                  style={{ fontSize: '0.8rem' }}
-                >
-                  Prev
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={goNext}
-                  disabled={currentIndex >= totalSamples - 1}
-                  style={{ fontSize: '0.8rem' }}
-                >
-                  Next
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={handleSkip}
-                  style={{ fontSize: '0.8rem' }}
-                >
-                  Skip
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={handleFlag}
-                  style={{ fontSize: '0.8rem' }}
-                >
-                  Flag
-                </button>
-              </div>
+              <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '0.75rem', marginTop: '0.75rem' }}>
+                <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Navigation
+                </h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.25rem' }}>
+                  <button
+                    className="btn-secondary"
+                    onClick={goPrev}
+                    disabled={currentIndex === 0}
+                    style={{ fontSize: '0.8rem' }}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={goNext}
+                    disabled={currentIndex >= totalSamples - 1}
+                    style={{ fontSize: '0.8rem' }}
+                  >
+                    Next
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleSkip}
+                    style={{ fontSize: '0.8rem' }}
+                  >
+                    Skip
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleFlag}
+                    style={{ fontSize: '0.8rem' }}
+                  >
+                    Flag
+                  </button>
+                </div>
 
-              <div
-                style={{
-                  marginTop: '0.75rem',
-                  fontSize: '0.7rem',
-                  color: 'var(--text-muted)',
-                }}
-              >
-                Shortcuts: [n] next, [p] prev, [s] skip, [f] flag, [1-9] classify
+                <div
+                  style={{
+                    marginTop: '0.75rem',
+                    fontSize: '0.7rem',
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  Shortcuts: [n] next, [p] prev, [s] skip, [f] flag, [1-9] classify
+                </div>
               </div>
             </div>
           </div>

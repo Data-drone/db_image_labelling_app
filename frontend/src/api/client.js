@@ -65,8 +65,16 @@ export const thumbnailUrl = (sampleId, size = 300) =>
   `/images/${sampleId}/thumbnail?size=${size}`;
 
 // ---------------------------------------------------------------------------
-// Browse
+// Browse & Volume navigation
 // ---------------------------------------------------------------------------
+export const fetchCatalogs = () => api.get('/catalogs').then(r => r.data);
+
+export const fetchSchemas = (catalog) =>
+  api.get('/schemas', { params: { catalog } }).then(r => r.data);
+
+export const fetchVolumes = (catalog, schema) =>
+  api.get('/volumes', { params: { catalog, schema } }).then(r => r.data);
+
 export const browseDirectory = (path) =>
   api.get('/browse', { params: { path } }).then(r => r.data);
 

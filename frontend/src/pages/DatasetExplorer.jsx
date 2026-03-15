@@ -4,13 +4,14 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useDataset } from '../contexts/DatasetContext';
 import DatasetSelector from '../components/DatasetSelector';
 import GalleryGrid from '../components/GalleryGrid';
 import Pagination from '../components/Pagination';
 import { fetchSamples, fetchDatasetStats, imageUrl } from '../api/client';
 
 export default function DatasetExplorer() {
-  const [dataset, setDataset] = useState(null);
+  const { dataset } = useDataset();
   const [samples, setSamples] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -85,7 +86,7 @@ export default function DatasetExplorer() {
           flexWrap: 'wrap',
         }}
       >
-        <DatasetSelector value={dataset?.id} onChange={setDataset} />
+        <DatasetSelector />
 
         {dataset && (
           <>
@@ -209,14 +210,10 @@ export default function DatasetExplorer() {
           {/* Main gallery area */}
           <div style={{ flex: 1, minWidth: 0 }}>
             {loading ? (
-              <div
-                style={{
-                  textAlign: 'center',
-                  padding: '3rem',
-                  color: 'var(--text-muted)',
-                }}
-              >
-                Loading...
+              <div className={`gallery-grid cols-${columns}`}>
+                {Array.from({ length: pageSize }).map((_, i) => (
+                  <div key={i} className="skeleton" style={{ aspectRatio: '1', borderRadius: 8 }} />
+                ))}
               </div>
             ) : (
               <>

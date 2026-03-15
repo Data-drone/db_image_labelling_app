@@ -4,12 +4,13 @@
  */
 
 import { useState, useEffect } from 'react';
+import { useDataset } from '../contexts/DatasetContext';
 import DatasetSelector from '../components/DatasetSelector';
 import GalleryGrid from '../components/GalleryGrid';
 import { fetchSamples, fetchDatasetStats } from '../api/client';
 
 export default function SearchPage() {
-  const [dataset, setDataset] = useState(null);
+  const { dataset } = useDataset();
   const [stats, setStats] = useState(null);
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -69,7 +70,7 @@ export default function SearchPage() {
       </p>
 
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', alignItems: 'center' }}>
-        <DatasetSelector value={dataset?.id} onChange={setDataset} />
+        <DatasetSelector />
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
           <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>

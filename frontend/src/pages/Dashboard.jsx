@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import DatasetSelector from '../components/DatasetSelector';
+import { useDataset } from '../contexts/DatasetContext';
 import { fetchDatasetStats } from '../api/client';
 
 const CHART_COLORS = [
@@ -19,7 +20,7 @@ const CHART_COLORS = [
 ];
 
 export default function Dashboard() {
-  const [dataset, setDataset] = useState(null);
+  const { dataset } = useDataset();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -54,7 +55,7 @@ export default function Dashboard() {
       </p>
 
       <div style={{ marginBottom: '1.5rem' }}>
-        <DatasetSelector value={dataset?.id} onChange={setDataset} />
+        <DatasetSelector />
       </div>
 
       {loading && (
