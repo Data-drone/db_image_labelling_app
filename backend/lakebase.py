@@ -1,0 +1,179 @@
+"""
+Lakebase (PostgreSQL) auto-provisioning and connection management.
+
+On startup:
+1. Find or create a Lakebase Autoscaling project via Databricks SDK
+2. Get the read-write endpoint and generate a short-lived token
+3. Build a SQLAlchemy engine with the connection string
+4. Start a background thread to refresh the token every 30 minutes
+"""
+
+import logging
+import os
+import threading
+import time
+from typing import Optional
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+LAKEBASE_PROJECT_ID = os.environ.get("LAKEBASE_PROJECT_ID", "cv-explorer")
+LAKEBASE_DISPLAY_NAME = os.environ.get("LAKEBASE_DISPLAY_NAME", "CV Explorer")
+TOKEN_REFRESH_INTERVAL = 30 * 60  # 30 minutes
+
+
+# ---------------------------------------------------------------------------
+# Module state
+# ---------------------------------------------------------------------------
+_engine: Optional[Engine] = None
+_session_factory = None
+_token_refresh_thread: Optional[threading.Thread] = None
+_current_connection_url: Optional[str] = None
+_lock = threading.Lock()
+
+
+def _get_workspace_client():
+    """Get a WorkspaceClient using the auto-injected service principal credentials."""
+    from databricks.sdk import WorkspaceClient
+    return WorkspaceClient()
+
+
+def ensure_lakebase_project():
+    """Find or create the Lakebase Autoscaling project. Returns the project object."""
+    from databricks.sdk.service.postgres import Project, ProjectSpec
+
+    w = _get_workspace_client()
+    project_name = f"projects/{LAKEBASE_PROJECT_ID}"
+
+    try:
+        project = w.postgres.get_project(name=project_name)
+        log.info("Connected to existing Lakebase project: %s", project.name)
+        return project
+    except Exception:
+        log.info("Lakebase project not found, creating: %s", LAKEBASE_PROJECT_ID)
+
+    op = w.postgres.create_project(
+        project=Project(spec=ProjectSpec(display_name=LAKEBASE_DISPLAY_NAME)),
+        project_id=LAKEBASE_PROJECT_ID,
+    )
+    project = op.wait()
+    log.info("Created Lakebase project: %s", project.name)
+    return project
+
+
+def get_endpoint(project):
+    """Find the read-write endpoint for the project."""
+    w = _get_workspace_client()
+    endpoints = list(w.postgres.list_endpoints(parent=project.name))
+    if not endpoints:
+        raise RuntimeError(f"No endpoints found for Lakebase project {project.name}")
+
+    # Prefer read-write endpoint
+    for ep in endpoints:
+        if hasattr(ep, 'spec') and hasattr(ep.spec, 'endpoint_type'):
+            from databricks.sdk.service.postgres import EndpointType
+            if ep.spec.endpoint_type == EndpointType.READ_WRITE:
+                return ep
+    # Fallback to first endpoint
+    return endpoints[0]
+
+
+def generate_connection_string(endpoint) -> str:
+    """Generate a PostgreSQL connection string using a fresh token."""
+    w = _get_workspace_client()
+    cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+    token = cred.token
+    host = endpoint.status.hosts.host
+    return f"postgresql://token:{token}@{host}:5432/databricks_postgres"
+
+
+def _build_engine(connection_url: str) -> Engine:
+    """Create a SQLAlchemy engine from the connection URL."""
+    return create_engine(
+        connection_url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+    )
+
+
+def _refresh_token_loop(endpoint):
+    """Background thread that refreshes the database token periodically."""
+    global _engine, _current_connection_url, _session_factory
+
+    while True:
+        time.sleep(TOKEN_REFRESH_INTERVAL)
+        try:
+            new_url = generate_connection_string(endpoint)
+            with _lock:
+                old_engine = _engine
+                _engine = _build_engine(new_url)
+                _session_factory = sessionmaker(bind=_engine)
+                _current_connection_url = new_url
+                if old_engine:
+                    old_engine.dispose()
+            log.info("Lakebase token refreshed successfully")
+        except Exception:
+            log.exception("Failed to refresh Lakebase token, will retry")
+
+
+def setup_replica_identity(engine: Engine, table_names: list[str]):
+    """Set REPLICA IDENTITY FULL on each table (required for Lakehouse Sync)."""
+    with engine.connect() as conn:
+        for table in table_names:
+            try:
+                conn.execute(text(f'ALTER TABLE "{table}" REPLICA IDENTITY FULL'))
+                conn.commit()
+                log.info("Set REPLICA IDENTITY FULL on %s", table)
+            except Exception:
+                log.warning("Could not set REPLICA IDENTITY on %s (may already be set)", table)
+
+
+def init_lakebase() -> Engine:
+    """
+    Initialize the Lakebase connection. Call this on app startup.
+
+    Returns the SQLAlchemy engine.
+    """
+    global _engine, _session_factory, _token_refresh_thread, _current_connection_url
+
+    project = ensure_lakebase_project()
+    endpoint = get_endpoint(project)
+    connection_url = generate_connection_string(endpoint)
+
+    with _lock:
+        _current_connection_url = connection_url
+        _engine = _build_engine(connection_url)
+        _session_factory = sessionmaker(bind=_engine)
+
+    # Start background token refresh
+    _token_refresh_thread = threading.Thread(
+        target=_refresh_token_loop,
+        args=(endpoint,),
+        daemon=True,
+    )
+    _token_refresh_thread.start()
+    log.info("Lakebase initialized, token refresh thread started")
+
+    return _engine
+
+
+def get_engine() -> Engine:
+    """Return the current SQLAlchemy engine. Call init_lakebase() first."""
+    if _engine is None:
+        raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
+    return _engine
+
+
+def get_session():
+    """Return a new database session."""
+    if _session_factory is None:
+        raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
+    return _session_factory()

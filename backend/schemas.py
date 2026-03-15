@@ -1,5 +1,5 @@
 """
-Pydantic schemas for API request/response models.
+Pydantic schemas for the CV Explorer API.
 """
 
 from datetime import datetime
@@ -8,23 +8,37 @@ from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
-# Dataset
+# Project
 # ---------------------------------------------------------------------------
-class DatasetCreate(BaseModel):
+class ProjectCreate(BaseModel):
     name: str
     description: str = ""
-    image_dir: str = ""
+    task_type: str  # 'classification' or 'detection'
+    class_list: list[str]
+    source_volume: str  # UC Volume path
 
 
-class DatasetOut(BaseModel):
+class ProjectOut(BaseModel):
     id: int
     name: str
     description: str
-    image_dir: str
+    task_type: str
+    class_list: list[str]
+    source_volume: str
+    created_by: str
     created_at: datetime
     sample_count: int = 0
+    labeled_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class ProjectStats(BaseModel):
+    total: int
+    labeled: int
+    unlabeled: int
+    skipped: int
+    per_user: list[dict]  # [{"user": "...", "labeled": N, "skipped": N}]
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +46,13 @@ class DatasetOut(BaseModel):
 # ---------------------------------------------------------------------------
 class SampleOut(BaseModel):
     id: int
-    dataset_id: int
+    project_id: int
     filepath: str
     filename: str
-    metadata_json: str = "{}"
-    created_at: datetime
+    status: str
+    locked_by: Optional[str] = None
+    locked_at: Optional[datetime] = None
     annotations: list["AnnotationOut"] = []
-    tags: list["TagOut"] = []
 
     model_config = {"from_attributes": True}
 
@@ -54,53 +68,19 @@ class SamplePage(BaseModel):
 # Annotation
 # ---------------------------------------------------------------------------
 class AnnotationCreate(BaseModel):
-    sample_id: int
-    ann_type: str  # "classification", "detection", "segmentation"
     label: str
-    bbox_json: Optional[str] = None
-    polygon_json: Optional[str] = None
-    confidence: Optional[float] = None
+    ann_type: str  # 'classification' or 'bbox'
+    bbox_json: Optional[dict] = None  # {"x":..,"y":..,"w":..,"h":..}
 
 
 class AnnotationOut(BaseModel):
     id: int
     sample_id: int
-    ann_type: str
+    project_id: int
     label: str
-    bbox_json: Optional[str] = None
-    polygon_json: Optional[str] = None
-    confidence: Optional[float] = None
+    ann_type: str
+    bbox_json: Optional[dict] = None
+    created_by: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-# ---------------------------------------------------------------------------
-# Tag
-# ---------------------------------------------------------------------------
-class TagCreate(BaseModel):
-    sample_id: int
-    tag: str
-
-
-class TagOut(BaseModel):
-    id: int
-    sample_id: int
-    tag: str
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# ---------------------------------------------------------------------------
-# Stats
-# ---------------------------------------------------------------------------
-class DatasetStats(BaseModel):
-    total_samples: int
-    labeled_count: int
-    unlabeled_count: int
-    class_count: int
-    classes: list[str]
-    tags: list[str]
-    class_distribution: dict[str, int]
-    tag_distribution: dict[str, int]
