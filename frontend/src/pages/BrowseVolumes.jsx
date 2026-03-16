@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Spinner from '../components/Spinner';
+import FilterableSelect from '../components/FilterableSelect';
 import {
   fetchCatalogs,
   fetchSchemas,
@@ -217,47 +218,35 @@ export default function BrowseVolumes() {
                 Loading catalogs...
               </div>
             ) : (
-              <select
+              <FilterableSelect
+                options={catalogs}
                 value={catalog}
-                onChange={(e) => setCatalog(e.target.value)}
-                style={inputStyle}
-              >
-                <option value="">Select catalog...</option>
-                {catalogs.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
+                onChange={setCatalog}
+                placeholder="Select catalog..."
+              />
             )}
           </div>
 
           <div style={{ flex: 1, minWidth: 180 }}>
             <label style={labelStyle}>Schema</label>
-            <select
+            <FilterableSelect
+              options={schemas}
               value={schema}
-              onChange={(e) => setSchema(e.target.value)}
-              style={inputStyle}
+              onChange={setSchema}
+              placeholder="Select schema..."
               disabled={!catalog}
-            >
-              <option value="">Select schema...</option>
-              {schemas.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
+            />
           </div>
 
           <div style={{ flex: 1, minWidth: 180 }}>
             <label style={labelStyle}>Volume</label>
-            <select
+            <FilterableSelect
+              options={volumes}
               value={volume}
-              onChange={(e) => setVolume(e.target.value)}
-              style={inputStyle}
+              onChange={setVolume}
+              placeholder="Select volume..."
               disabled={!catalog || !schema}
-            >
-              <option value="">Select volume...</option>
-              {volumes.map((v) => (
-                <option key={v} value={v}>{v}</option>
-              ))}
-            </select>
+            />
           </div>
         </div>
       )}

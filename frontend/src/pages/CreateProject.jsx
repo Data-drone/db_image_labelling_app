@@ -12,6 +12,7 @@ import {
   browseDirectory,
 } from '../api/client';
 import Spinner from '../components/Spinner';
+import FilterableSelect from '../components/FilterableSelect';
 
 export default function CreateProject() {
   const navigate = useNavigate();
@@ -276,18 +277,32 @@ export default function CreateProject() {
             />
           ) : (
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-              <select value={catalog} onChange={(e) => setCatalog(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 120 }}>
-                <option value="">Catalog...</option>
-                {catalogs.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <select value={schema} onChange={(e) => setSchema(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 120 }} disabled={!catalog}>
-                <option value="">Schema...</option>
-                {schemas.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <select value={volume} onChange={(e) => setVolume(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 120 }} disabled={!schema}>
-                <option value="">Volume...</option>
-                {volumesList.map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={catalogs}
+                  value={catalog}
+                  onChange={setCatalog}
+                  placeholder="Catalog..."
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={schemas}
+                  value={schema}
+                  onChange={setSchema}
+                  placeholder="Schema..."
+                  disabled={!catalog}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={volumesList}
+                  value={volume}
+                  onChange={setVolume}
+                  placeholder="Volume..."
+                  disabled={!schema}
+                />
+              </div>
             </div>
           )}
 
