@@ -66,4 +66,17 @@ export const fetchVolumes = (catalog, schema) =>
 export const browseDirectory = (path) =>
   api.get('/browse', { params: { path } }).then(r => r.data);
 
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+export const fetchDbStatus = () => api.get('/admin/db-status').then(r => r.data);
+
+export const fetchLakebaseStatus = () => api.get('/admin/lakebase-status').then(r => r.data);
+
+export const provisionLakebase = (projectId, displayName) =>
+  api.post('/admin/provision-lakebase', { project_id: projectId, display_name: displayName }).then(r => r.data);
+
+export const connectLakebase = (projectId) =>
+  api.post('/admin/connect-lakebase', { project_id: projectId }).then(r => r.data);
+
 export default api;

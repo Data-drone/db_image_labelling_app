@@ -134,6 +134,168 @@ def health():
 
 
 # ---------------------------------------------------------------------------
+# Admin — database status and Lakebase provisioning
+# ---------------------------------------------------------------------------
+@app.get("/api/admin/db-status")
+def admin_db_status():
+    """Return current database backend info."""
+    engine_url = str(_engine.url) if _engine else "none"
+    is_sqlite = "sqlite" in engine_url
+    is_lakebase = "postgresql" in engine_url and "databricks" in engine_url
+
+    result = {
+        "backend": "sqlite" if is_sqlite else ("lakebase" if is_lakebase else "postgresql"),
+        "connected": _engine is not None,
+    }
+
+    if is_sqlite:
+        result["detail"] = "Using local SQLite (data lost on redeploy). Provision Lakebase for persistent storage."
+        result["path"] = engine_url.replace("sqlite:///", "")
+    elif is_lakebase:
+        result["detail"] = "Connected to Lakebase (PostgreSQL). Data persists across redeploys."
+        host = _engine.url.host if _engine else ""
+        result["host"] = host
+
+    # Table row counts
+    if _engine:
+        from sqlalchemy.orm import Session
+        db = _session_factory()
+        try:
+            result["tables"] = {
+                "projects": db.query(LabelingProject).count(),
+                "samples": db.query(ProjectSample).count(),
+                "annotations": db.query(Annotation).count(),
+            }
+        finally:
+            db.close()
+
+    return result
+
+
+@app.get("/api/admin/lakebase-status")
+def admin_lakebase_status():
+    """Check if Lakebase projects exist and return their status."""
+    try:
+        w = _get_workspace_client()
+        projects = []
+        for p in w.postgres.list_projects():
+            proj = {
+                "name": p.name,
+                "display_name": p.spec.display_name if p.spec else "",
+                "state": str(p.status.state) if p.status else "unknown",
+            }
+            # Try to get endpoints
+            try:
+                endpoints = list(w.postgres.list_endpoints(parent=p.name))
+                proj["endpoints"] = len(endpoints)
+                if endpoints:
+                    ep = endpoints[0]
+                    proj["host"] = ep.status.hosts.host if ep.status and ep.status.hosts else ""
+            except Exception:
+                proj["endpoints"] = 0
+            projects.append(proj)
+        return {"available": True, "projects": projects}
+    except Exception as e:
+        return {"available": False, "error": str(e), "projects": []}
+
+
+@app.post("/api/admin/provision-lakebase")
+def admin_provision_lakebase(body: dict):
+    """Provision a new Lakebase project or connect to an existing one."""
+    project_id = (body.get("project_id") or "cv-explorer").strip()
+    display_name = (body.get("display_name") or "CV Explorer").strip()
+
+    try:
+        w = _get_workspace_client()
+        from databricks.sdk.service.postgres import Project, ProjectSpec
+
+        # Check if exists
+        full_name = f"projects/{project_id}"
+        try:
+            existing = w.postgres.get_project(name=full_name)
+            return {
+                "status": "exists",
+                "message": f"Lakebase project '{project_id}' already exists.",
+                "project_name": existing.name,
+                "state": str(existing.status.state) if existing.status else "unknown",
+            }
+        except Exception:
+            pass
+
+        # Create new
+        op = w.postgres.create_project(
+            project=Project(spec=ProjectSpec(display_name=display_name)),
+            project_id=project_id,
+        )
+        return {
+            "status": "creating",
+            "message": f"Lakebase project '{project_id}' is being created. This may take a few minutes.",
+            "project_id": project_id,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/admin/connect-lakebase")
+def admin_connect_lakebase(body: dict):
+    """Switch the app's database backend to an existing Lakebase project."""
+    global _engine, _session_factory
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+
+    try:
+        w = _get_workspace_client()
+        from databricks.sdk.service.postgres import EndpointType
+
+        full_name = f"projects/{project_id}"
+        project = w.postgres.get_project(name=full_name)
+
+        # Get endpoint
+        endpoints = list(w.postgres.list_endpoints(parent=project.name))
+        if not endpoints:
+            raise HTTPException(status_code=400, detail="No endpoints found for this project.")
+        endpoint = endpoints[0]
+
+        # Generate credentials
+        cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+        host = endpoint.status.hosts.host
+        conn_url = f"postgresql://token:{cred.token}@{host}:5432/databricks_postgres"
+
+        # Build new engine
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        new_engine = create_engine(conn_url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
+
+        # Create tables on new engine
+        Base.metadata.create_all(new_engine)
+
+        # Set replica identity
+        try:
+            from .lakebase import setup_replica_identity
+            setup_replica_identity(new_engine, ["labeling_projects", "project_samples", "annotations"])
+        except Exception as e:
+            log.warning("Replica identity setup: %s", e)
+
+        # Swap engine
+        old_engine = _engine
+        _engine = new_engine
+        _session_factory = sessionmaker(bind=_engine)
+        if old_engine:
+            old_engine.dispose()
+
+        return {
+            "status": "connected",
+            "message": f"Connected to Lakebase project '{project_id}'. Tables created.",
+            "host": host,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Projects CRUD (Step 4)
 # ---------------------------------------------------------------------------
 @app.post("/api/projects", response_model=ProjectOut)
