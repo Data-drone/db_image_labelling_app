@@ -29,6 +29,8 @@ class ProjectOut(BaseModel):
     created_at: datetime
     sample_count: int = 0
     labeled_count: int = 0
+    version: int = 1
+    parent_project_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

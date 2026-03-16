@@ -33,6 +33,8 @@ class LabelingProject(Base):
     source_volume = Column(Text, nullable=False)  # UC Volume path
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    version = Column(Integer, default=1, nullable=False)
+    parent_project_id = Column(Integer, nullable=True)  # FK to parent version (null = original)
 
     samples = relationship(
         "ProjectSample", back_populates="project", cascade="all, delete-orphan",

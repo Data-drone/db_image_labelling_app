@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats } from '../api/client';
+import { fetchProject, fetchProjectStats, cloneProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -14,6 +14,7 @@ export default function ProjectDashboard() {
   const [project, setProject] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [cloning, setCloning] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -27,6 +28,20 @@ export default function ProjectDashboard() {
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
   }, [projectId, navigate]);
+
+  const handleClone = async () => {
+    if (cloning) return;
+    setCloning(true);
+    try {
+      const newProj = await cloneProject(projectId);
+      navigate(`/projects/${newProj.id}`);
+    } catch (err) {
+      console.error('Clone failed:', err);
+      alert('Failed to create new version: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setCloning(false);
+    }
+  };
 
   if (loading) return <Spinner label="Loading project..." />;
   if (!project) return null;
@@ -60,6 +75,11 @@ export default function ProjectDashboard() {
             <span className={`badge ${project.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
               {project.task_type}
             </span>
+            {project.version > 1 && (
+              <span className="badge" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
+                v{project.version}
+              </span>
+            )}
           </div>
           {project.description && (
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginLeft: '2.5rem' }}>
@@ -70,13 +90,23 @@ export default function ProjectDashboard() {
             Created by {project.created_by || 'unknown'} on {new Date(project.created_at).toLocaleDateString()}
           </div>
         </div>
-        <button
-          className="btn-primary"
-          onClick={() => navigate(`/projects/${projectId}/label`)}
-          style={{ padding: '0.6rem 1.5rem' }}
-        >
-          Start Labeling
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            className="btn-secondary"
+            onClick={handleClone}
+            disabled={cloning}
+            style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+          >
+            {cloning ? 'Creating...' : 'New Version'}
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => navigate(`/projects/${projectId}/label`)}
+            style={{ padding: '0.6rem 1.5rem' }}
+          >
+            Start Labeling
+          </button>
+        </div>
       </div>
 
       {/* Stats cards */}
@@ -169,6 +199,26 @@ export default function ProjectDashboard() {
                 {project.class_list.map((c) => (
                   <span key={c} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>{c}</span>
                 ))}
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>Version</span>
+              <span>
+                v{project.version || 1}
+                {project.parent_project_id && (
+                  <button
+                    onClick={() => navigate(`/projects/${project.parent_project_id}`)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--accent-blue)',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                      marginLeft: '0.5rem',
+                      textDecoration: 'underline',
+                    }}
+                  >
+                    View parent project
+                  </button>
+                )}
               </span>
             </div>
           </div>

@@ -354,17 +354,24 @@ def create_project(
     db.commit()
     db.refresh(project)
 
+    return _project_out(project, sample_count, 0)
+
+
+def _project_out(p, total=None, labeled=None):
+    """Build a ProjectOut from a LabelingProject model instance."""
     return ProjectOut(
-        id=project.id,
-        name=project.name,
-        description=project.description or "",
-        task_type=project.task_type,
-        class_list=project.class_list,
-        source_volume=project.source_volume,
-        created_by=project.created_by,
-        created_at=project.created_at,
-        sample_count=sample_count,
-        labeled_count=0,
+        id=p.id,
+        name=p.name,
+        description=p.description or "",
+        task_type=p.task_type,
+        class_list=p.class_list,
+        source_volume=p.source_volume,
+        created_by=p.created_by,
+        created_at=p.created_at,
+        sample_count=total if total is not None else 0,
+        labeled_count=labeled if labeled is not None else 0,
+        version=p.version or 1,
+        parent_project_id=p.parent_project_id,
     )
 
 
@@ -376,18 +383,7 @@ def list_projects(db: Session = Depends(get_db)):
     for p in projects:
         total = db.query(ProjectSample).filter_by(project_id=p.id).count()
         labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-        result.append(ProjectOut(
-            id=p.id,
-            name=p.name,
-            description=p.description or "",
-            task_type=p.task_type,
-            class_list=p.class_list,
-            source_volume=p.source_volume,
-            created_by=p.created_by,
-            created_at=p.created_at,
-            sample_count=total,
-            labeled_count=labeled,
-        ))
+        result.append(_project_out(p, total, labeled))
     return result
 
 
@@ -399,18 +395,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found.")
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-    return ProjectOut(
-        id=p.id,
-        name=p.name,
-        description=p.description or "",
-        task_type=p.task_type,
-        class_list=p.class_list,
-        source_volume=p.source_volume,
-        created_by=p.created_by,
-        created_at=p.created_at,
-        sample_count=total,
-        labeled_count=labeled,
-    )
+    return _project_out(p, total, labeled)
 
 
 @app.post("/api/projects/{project_id}/classes")
@@ -441,6 +426,68 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     db.delete(p)
     db.commit()
     return {"detail": "Deleted."}
+
+
+@app.post("/api/projects/{project_id}/clone", response_model=ProjectOut)
+def clone_project(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Clone a project as a new version with fresh empty annotations."""
+    parent = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    # Determine next version number across the lineage
+    root_id = parent.parent_project_id or parent.id
+    max_version = db.query(func.max(LabelingProject.version)).filter(
+        (LabelingProject.id == root_id) |
+        (LabelingProject.parent_project_id == root_id)
+    ).scalar() or 1
+    new_version = max_version + 1
+
+    # Strip existing version suffix from name, add new one
+    base_name = parent.name
+    for suffix in [f" v{v}" for v in range(new_version - 1, 0, -1)]:
+        if base_name.endswith(suffix):
+            base_name = base_name[: -len(suffix)]
+            break
+    new_name = f"{base_name} v{new_version}"
+
+    # Ensure name is unique
+    if db.query(LabelingProject).filter_by(name=new_name).first():
+        raise HTTPException(status_code=409, detail=f"Project '{new_name}' already exists.")
+
+    user_email = _get_user_email(request)
+    new_project = LabelingProject(
+        name=new_name,
+        description=parent.description,
+        task_type=parent.task_type,
+        class_list=list(parent.class_list),
+        source_volume=parent.source_volume,
+        created_by=user_email,
+        version=new_version,
+        parent_project_id=root_id,
+    )
+    db.add(new_project)
+    db.flush()
+
+    # Copy sample file references (no annotations, all unlabeled)
+    parent_samples = db.query(ProjectSample).filter_by(project_id=parent.id).all()
+    sample_count = 0
+    for s in parent_samples:
+        db.add(ProjectSample(
+            project_id=new_project.id,
+            filepath=s.filepath,
+            filename=s.filename,
+        ))
+        sample_count += 1
+
+    db.commit()
+    db.refresh(new_project)
+
+    return _project_out(new_project, sample_count, 0)
 
 
 @app.get("/api/projects/{project_id}/stats", response_model=ProjectStats)

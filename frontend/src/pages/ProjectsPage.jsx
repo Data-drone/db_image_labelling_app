@@ -109,9 +109,16 @@ export default function ProjectsPage() {
                       </p>
                     )}
                   </div>
-                  <span className={`badge ${p.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
-                    {p.task_type}
-                  </span>
+                  <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
+                    <span className={`badge ${p.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
+                      {p.task_type}
+                    </span>
+                    {p.version > 1 && (
+                      <span className="badge" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
+                        v{p.version}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Progress bar */}

@@ -25,6 +25,8 @@ export const addProjectClass = (id, className) =>
 
 export const fetchProjectStats = (id) => api.get(`/projects/${id}/stats`).then(r => r.data);
 
+export const cloneProject = (id) => api.post(`/projects/${id}/clone`).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // Samples
 // ---------------------------------------------------------------------------
