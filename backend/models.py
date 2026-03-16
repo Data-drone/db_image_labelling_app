@@ -11,9 +11,8 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Index,
+    Column, Integer, String, Text, DateTime, ForeignKey, Index, JSON,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 log = logging.getLogger(__name__)
@@ -30,7 +29,7 @@ class LabelingProject(Base):
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, default="")
     task_type = Column(String(50), nullable=False)  # 'classification' or 'detection'
-    class_list = Column(JSONB, nullable=False)  # e.g. ["cat", "dog", "car"]
+    class_list = Column(JSON, nullable=False)  # e.g. ["cat", "dog", "car"]
     source_volume = Column(Text, nullable=False)  # UC Volume path
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -72,7 +71,7 @@ class Annotation(Base):
     project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
     label = Column(String(255), nullable=False)
     ann_type = Column(String(50), nullable=False)  # 'classification' or 'bbox'
-    bbox_json = Column(JSONB, nullable=True)  # {"x":..,"y":..,"w":..,"h":..}
+    bbox_json = Column(JSON, nullable=True)  # {"x":..,"y":..,"w":..,"h":..}
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -93,9 +92,11 @@ TABLE_NAMES = ["labeling_projects", "project_samples", "annotations"]
 
 def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
-    from backend.lakebase import setup_replica_identity
-
     Base.metadata.create_all(engine)
     log.info("Database tables created")
 
-    setup_replica_identity(engine, TABLE_NAMES)
+    try:
+        from .lakebase import setup_replica_identity
+        setup_replica_identity(engine, TABLE_NAMES)
+    except Exception as e:
+        log.warning("Replica identity setup skipped: %s", e)
