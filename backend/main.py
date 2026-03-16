@@ -511,11 +511,7 @@ def serve_sample_thumbnail(
 def list_catalogs():
     try:
         w = _get_workspace_client()
-        names = []
-        for c in w.catalogs.list():
-            names.append(c.name)
-            if len(names) >= 200:
-                break
+        names = [c.name for c in w.catalogs.list()]
         return sorted(names)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
