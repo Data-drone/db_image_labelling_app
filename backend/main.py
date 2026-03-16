@@ -596,7 +596,10 @@ if STATIC_DIR.exists():
         file_path = STATIC_DIR / path
         if file_path.exists() and file_path.is_file():
             return FileResponse(str(file_path))
-        return HTMLResponse(content=(STATIC_DIR / "index.html").read_text())
+        return HTMLResponse(
+            content=(STATIC_DIR / "index.html").read_text(),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 else:
     @app.get("/")
     def root():

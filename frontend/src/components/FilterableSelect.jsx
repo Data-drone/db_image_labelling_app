@@ -3,7 +3,7 @@
  * Replaces plain <select> for catalog/schema/volume pickers.
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 
 export default function FilterableSelect({
   options = [],
@@ -19,12 +19,13 @@ export default function FilterableSelect({
 
   const MAX_DISPLAY = 50;
 
-  const filtered = filter
-    ? options.filter((o) => o.toLowerCase().includes(filter.toLowerCase()))
-    : options;
+  const filtered = useMemo(() => {
+    if (!filter) return options;
+    const lc = filter.toLowerCase();
+    return options.filter((o) => o.toLowerCase().includes(lc));
+  }, [options, filter]);
 
-  const truncated = filtered.length > MAX_DISPLAY;
-  const displayed = truncated ? filtered.slice(0, MAX_DISPLAY) : filtered;
+  const displayed = filtered.length > MAX_DISPLAY ? filtered.slice(0, MAX_DISPLAY) : filtered;
 
   // Close on outside click
   useEffect(() => {
@@ -59,6 +60,20 @@ export default function FilterableSelect({
     }
   };
 
+  // Highlight the matching portion of text
+  const highlight = (text) => {
+    if (!filter) return text;
+    const idx = text.toLowerCase().indexOf(filter.toLowerCase());
+    if (idx === -1) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>{text.slice(idx, idx + filter.length)}</span>
+        {text.slice(idx + filter.length)}
+      </>
+    );
+  };
+
   return (
     <div ref={containerRef} style={{ position: 'relative' }}>
       {/* Display button / input */}
@@ -69,7 +84,7 @@ export default function FilterableSelect({
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={`Filter ${options.length} items...`}
+          placeholder={`Type to filter ${options.length} items...`}
           style={{
             width: '100%',
             padding: '0.5rem 0.75rem',
@@ -120,7 +135,7 @@ export default function FilterableSelect({
             left: 0,
             right: 0,
             marginTop: 2,
-            maxHeight: 220,
+            maxHeight: 260,
             overflowY: 'auto',
             background: 'var(--bg-card)',
             border: '1px solid var(--border-color)',
@@ -129,9 +144,22 @@ export default function FilterableSelect({
             boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
           }}
         >
+          {/* Count header */}
+          <div style={{
+            padding: '0.35rem 0.75rem',
+            fontSize: '0.7rem',
+            color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-color)',
+            background: 'rgba(255,255,255,0.02)',
+          }}>
+            {filter
+              ? `${filtered.length} match${filtered.length !== 1 ? 'es' : ''} of ${options.length}`
+              : `${options.length} items — type to filter`}
+          </div>
+
           {filtered.length === 0 ? (
-            <div style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              {filter ? 'No matches' : 'No options'}
+            <div style={{ padding: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+              No matches for "{filter}"
             </div>
           ) : (
             <>
@@ -155,12 +183,12 @@ export default function FilterableSelect({
                   onMouseEnter={(e) => { e.target.style.background = 'rgba(255,255,255,0.05)'; }}
                   onMouseLeave={(e) => { e.target.style.background = opt === value ? 'rgba(66,153,224,0.15)' : 'transparent'; }}
                 >
-                  {opt}
+                  {highlight(opt)}
                 </button>
               ))}
-              {truncated && (
-                <div style={{ padding: '0.4rem 0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)', borderTop: '1px solid var(--border-color)' }}>
-                  Showing {MAX_DISPLAY} of {filtered.length} — type to narrow down
+              {filtered.length > MAX_DISPLAY && (
+                <div style={{ padding: '0.4rem 0.75rem', fontSize: '0.7rem', color: 'var(--text-muted)', borderTop: '1px solid var(--border-color)' }}>
+                  Showing {MAX_DISPLAY} of {filtered.length} — keep typing to narrow down
                 </div>
               )}
             </>
