@@ -17,9 +17,14 @@ export default function FilterableSelect({
   const inputRef = useRef(null);
   const containerRef = useRef(null);
 
+  const MAX_DISPLAY = 50;
+
   const filtered = filter
     ? options.filter((o) => o.toLowerCase().includes(filter.toLowerCase()))
     : options;
+
+  const truncated = filtered.length > MAX_DISPLAY;
+  const displayed = truncated ? filtered.slice(0, MAX_DISPLAY) : filtered;
 
   // Close on outside click
   useEffect(() => {
@@ -129,29 +134,36 @@ export default function FilterableSelect({
               {filter ? 'No matches' : 'No options'}
             </div>
           ) : (
-            filtered.map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => handleSelect(opt)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  padding: '0.4rem 0.75rem',
-                  background: opt === value ? 'rgba(66, 153, 224, 0.15)' : 'transparent',
-                  color: opt === value ? 'var(--accent-blue)' : 'var(--text-primary)',
-                  border: 'none',
-                  fontSize: '0.85rem',
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  fontWeight: opt === value ? 600 : 400,
-                }}
-                onMouseEnter={(e) => { e.target.style.background = 'rgba(255,255,255,0.05)'; }}
-                onMouseLeave={(e) => { e.target.style.background = opt === value ? 'rgba(66,153,224,0.15)' : 'transparent'; }}
-              >
-                {opt}
-              </button>
-            ))
+            <>
+              {displayed.map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => handleSelect(opt)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    padding: '0.4rem 0.75rem',
+                    background: opt === value ? 'rgba(66, 153, 224, 0.15)' : 'transparent',
+                    color: opt === value ? 'var(--accent-blue)' : 'var(--text-primary)',
+                    border: 'none',
+                    fontSize: '0.85rem',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    fontWeight: opt === value ? 600 : 400,
+                  }}
+                  onMouseEnter={(e) => { e.target.style.background = 'rgba(255,255,255,0.05)'; }}
+                  onMouseLeave={(e) => { e.target.style.background = opt === value ? 'rgba(66,153,224,0.15)' : 'transparent'; }}
+                >
+                  {opt}
+                </button>
+              ))}
+              {truncated && (
+                <div style={{ padding: '0.4rem 0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)', borderTop: '1px solid var(--border-color)' }}>
+                  Showing {MAX_DISPLAY} of {filtered.length} — type to narrow down
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
