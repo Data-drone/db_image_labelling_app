@@ -251,6 +251,25 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     )
 
 
+@app.post("/api/projects/{project_id}/classes")
+def add_project_class(project_id: int, body: dict, db: Session = Depends(get_db)):
+    """Add a new class to a project's class_list."""
+    class_name = (body.get("class_name") or "").strip()
+    if not class_name:
+        raise HTTPException(status_code=400, detail="class_name is required.")
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    current = list(p.class_list or [])
+    if class_name in current:
+        raise HTTPException(status_code=409, detail=f"Class '{class_name}' already exists.")
+    current.append(class_name)
+    p.class_list = current
+    db.commit()
+    db.refresh(p)
+    return {"class_list": p.class_list}
+
+
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
     """Delete a project and all associated samples/annotations."""

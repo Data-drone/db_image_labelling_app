@@ -14,6 +14,7 @@ import {
   annotateSample,
   skipSample,
   sampleImageUrl,
+  addProjectClass,
 } from '../api/client';
 
 export default function LabelingView() {
@@ -27,6 +28,8 @@ export default function LabelingView() {
   const [imageLoaded, setImageLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const [newClassName, setNewClassName] = useState('');
+  const [addingClass, setAddingClass] = useState(false);
 
   // Load project info
   useEffect(() => {
@@ -94,6 +97,26 @@ export default function LabelingView() {
       console.error('Skip failed:', err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Add new class
+  const handleAddClass = async () => {
+    const trimmed = newClassName.trim();
+    if (!trimmed || addingClass) return;
+    if (project.class_list.includes(trimmed)) {
+      setNewClassName('');
+      return;
+    }
+    setAddingClass(true);
+    try {
+      const result = await addProjectClass(projectId, trimmed);
+      setProject({ ...project, class_list: result.class_list });
+      setNewClassName('');
+    } catch (err) {
+      console.error('Failed to add class:', err);
+    } finally {
+      setAddingClass(false);
     }
   };
 
@@ -306,7 +329,36 @@ export default function LabelingView() {
                   </div>
                 </div>
 
-                <div style={{ borderTop: '1px solid var(--border-color)', margin: '1rem 0 0.75rem' }} />
+                {/* Add class input */}
+                <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={newClassName}
+                    onChange={(e) => setNewClassName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddClass(); } }}
+                    placeholder="New class..."
+                    style={{
+                      flex: 1,
+                      padding: '0.35rem 0.5rem',
+                      background: 'var(--bg-input)',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--border-color)',
+                      borderRadius: 4,
+                      fontSize: '0.75rem',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddClass}
+                    disabled={addingClass || !newClassName.trim()}
+                    className="btn-secondary"
+                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                  >
+                    + Add
+                  </button>
+                </div>
+
+                <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0 0.75rem' }} />
 
                 {/* Skip + shortcuts */}
                 <button

@@ -20,6 +20,9 @@ export const createProject = (data) => api.post('/projects', data).then(r => r.d
 
 export const deleteProject = (id) => api.delete(`/projects/${id}`).then(r => r.data);
 
+export const addProjectClass = (id, className) =>
+  api.post(`/projects/${id}/classes`, { class_name: className }).then(r => r.data);
+
 export const fetchProjectStats = (id) => api.get(`/projects/${id}/stats`).then(r => r.data);
 
 // ---------------------------------------------------------------------------
