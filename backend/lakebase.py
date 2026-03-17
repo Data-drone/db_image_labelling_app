@@ -68,20 +68,27 @@ def ensure_lakebase_project():
 
 
 def get_endpoint(project):
-    """Find the read-write endpoint for the project."""
+    """Find the read-write endpoint for the project via branches."""
+    from databricks.sdk.service.postgres import EndpointType
     w = _get_workspace_client()
-    endpoints = list(w.postgres.list_endpoints(parent=project.name))
-    if not endpoints:
+
+    branches = list(w.postgres.list_branches(parent=project.name))
+    if not branches:
+        raise RuntimeError(f"No branches found for Lakebase project {project.name}")
+
+    all_endpoints = []
+    for branch in branches:
+        all_endpoints.extend(w.postgres.list_endpoints(parent=branch.name))
+
+    if not all_endpoints:
         raise RuntimeError(f"No endpoints found for Lakebase project {project.name}")
 
     # Prefer read-write endpoint
-    for ep in endpoints:
-        if hasattr(ep, 'spec') and hasattr(ep.spec, 'endpoint_type'):
-            from databricks.sdk.service.postgres import EndpointType
-            if ep.spec.endpoint_type == EndpointType.READ_WRITE:
-                return ep
+    for ep in all_endpoints:
+        if ep.status and ep.status.endpoint_type == EndpointType.ENDPOINT_TYPE_READ_WRITE:
+            return ep
     # Fallback to first endpoint
-    return endpoints[0]
+    return all_endpoints[0]
 
 
 def generate_connection_string(endpoint) -> str:

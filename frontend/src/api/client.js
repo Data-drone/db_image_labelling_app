@@ -81,4 +81,7 @@ export const provisionLakebase = (projectId, displayName) =>
 export const connectLakebase = (projectId) =>
   api.post('/admin/connect-lakebase', { project_id: projectId }).then(r => r.data);
 
+export const fetchLakebaseProjectDetail = (projectId) =>
+  api.get(`/admin/lakebase-project/${projectId}`).then(r => r.data);
+
 export default api;

@@ -179,24 +179,43 @@ def admin_lakebase_status():
         w = _get_workspace_client()
         projects = []
         for p in w.postgres.list_projects():
-            proj = {
+            proj_id = p.name.replace("projects/", "")
+            display = p.status.display_name if p.status else (p.spec.display_name if p.spec else proj_id)
+            owner = p.status.owner if p.status else ""
+            projects.append({
                 "name": p.name,
-                "display_name": p.spec.display_name if p.spec else "",
-                "state": str(p.status.state) if p.status else "unknown",
-            }
-            # Try to get endpoints
-            try:
-                endpoints = list(w.postgres.list_endpoints(parent=p.name))
-                proj["endpoints"] = len(endpoints)
-                if endpoints:
-                    ep = endpoints[0]
-                    proj["host"] = ep.status.hosts.host if ep.status and ep.status.hosts else ""
-            except Exception:
-                proj["endpoints"] = 0
-            projects.append(proj)
+                "display_name": display,
+                "owner": owner,
+                "state": "ACTIVE",
+            })
         return {"available": True, "projects": projects}
     except Exception as e:
         return {"available": False, "error": str(e), "projects": []}
+
+
+@app.get("/api/admin/lakebase-project/{project_id}")
+def admin_lakebase_project_detail(project_id: str):
+    """Get endpoint details for a specific Lakebase project."""
+    try:
+        w = _get_workspace_client()
+        full_name = f"projects/{project_id}"
+        branches = list(w.postgres.list_branches(parent=full_name))
+        endpoints_info = []
+        for branch in branches:
+            for ep in w.postgres.list_endpoints(parent=branch.name):
+                info = {
+                    "name": ep.name,
+                    "branch": branch.name,
+                }
+                if ep.status:
+                    info["state"] = str(ep.status.current_state).replace("EndpointStatusState.", "")
+                    info["type"] = str(ep.status.endpoint_type).replace("EndpointType.", "")
+                    if ep.status.hosts:
+                        info["host"] = ep.status.hosts.host
+                endpoints_info.append(info)
+        return {"project_id": project_id, "endpoints": endpoints_info}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/admin/provision-lakebase")
@@ -251,11 +270,18 @@ def admin_connect_lakebase(body: dict):
         full_name = f"projects/{project_id}"
         project = w.postgres.get_project(name=full_name)
 
-        # Get endpoint
-        endpoints = list(w.postgres.list_endpoints(parent=project.name))
-        if not endpoints:
+        # Get endpoint via branches
+        branches = list(w.postgres.list_branches(parent=project.name))
+        if not branches:
+            raise HTTPException(status_code=400, detail="No branches found for this project.")
+        endpoint = None
+        for branch in branches:
+            endpoints = list(w.postgres.list_endpoints(parent=branch.name))
+            if endpoints:
+                endpoint = endpoints[0]
+                break
+        if not endpoint:
             raise HTTPException(status_code=400, detail="No endpoints found for this project.")
-        endpoint = endpoints[0]
 
         # Generate credentials
         cred = w.postgres.generate_database_credential(endpoint=endpoint.name)

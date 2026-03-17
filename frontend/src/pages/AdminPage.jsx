@@ -27,6 +27,9 @@ export default function AdminPage() {
   const [connecting, setConnecting] = useState('');
   const [connectMsg, setConnectMsg] = useState('');
 
+  // Lakebase project filter
+  const [lbFilter, setLbFilter] = useState('');
+
   const loadStatus = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -138,48 +141,52 @@ export default function AdminPage() {
         ) : (
           <>
             {lakebaseStatus?.projects?.length > 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                {lakebaseStatus.projects.map((proj) => {
-                  const projId = proj.name?.replace('projects/', '') || '';
-                  const isActive = proj.state?.includes('ACTIVE');
-                  const isCurrentBackend = dbStatus?.backend === 'lakebase' && dbStatus?.host === proj.host;
-
-                  return (
-                    <div key={proj.name} style={projectRow}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                          {proj.display_name || projId}
+              <>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                  {lakebaseStatus.projects.length} projects on this workspace
+                </div>
+                <input
+                  type="text"
+                  value={lbFilter}
+                  onChange={(e) => setLbFilter(e.target.value)}
+                  placeholder="Filter projects..."
+                  style={{ ...inputStyle, marginBottom: '0.75rem' }}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.5rem', maxHeight: 300, overflowY: 'auto' }}>
+                  {lakebaseStatus.projects
+                    .filter((proj) => {
+                      if (!lbFilter) return true;
+                      const lc = lbFilter.toLowerCase();
+                      const projId = proj.name?.replace('projects/', '') || '';
+                      return projId.toLowerCase().includes(lc) || (proj.display_name || '').toLowerCase().includes(lc);
+                    })
+                    .slice(0, 50)
+                    .map((proj) => {
+                      const projId = proj.name?.replace('projects/', '') || '';
+                      return (
+                        <div key={proj.name} style={projectRow}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                              {proj.display_name || projId}
+                            </div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              {projId}
+                              {proj.owner && ` · ${proj.owner}`}
+                            </div>
+                          </div>
+                          <button
+                            className="btn-primary"
+                            onClick={() => handleConnect(projId)}
+                            disabled={connecting === projId}
+                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                          >
+                            {connecting === projId ? 'Connecting...' : 'Connect'}
+                          </button>
                         </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          {projId} &middot; {proj.endpoints || 0} endpoint{proj.endpoints !== 1 ? 's' : ''}
-                          {proj.host && ` · ${proj.host}`}
-                        </div>
-                      </div>
-                      <span style={{
-                        ...badgeStyle,
-                        background: isActive ? 'rgba(0,148,0,0.15)' : 'rgba(230,167,0,0.15)',
-                        color: isActive ? '#00c853' : '#ffa726',
-                      }}>
-                        {proj.state?.replace('ProjectState.', '') || 'unknown'}
-                      </span>
-                      {isCurrentBackend ? (
-                        <span style={{ ...badgeStyle, background: 'rgba(66,153,224,0.15)', color: 'var(--accent-blue)' }}>
-                          Active
-                        </span>
-                      ) : isActive ? (
-                        <button
-                          className="btn-primary"
-                          onClick={() => handleConnect(projId)}
-                          disabled={connecting === projId}
-                          style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
-                        >
-                          {connecting === projId ? 'Connecting...' : 'Connect'}
-                        </button>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                </div>
+              </>
             ) : (
               <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
                 No Lakebase projects found.
