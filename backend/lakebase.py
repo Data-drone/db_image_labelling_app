@@ -91,13 +91,32 @@ def get_endpoint(project):
     return all_endpoints[0]
 
 
-def generate_connection_string(endpoint) -> str:
+def _get_pg_username(endpoint) -> str:
+    """Determine the PostgreSQL username from the Lakebase role mapping."""
+    import base64, json
+    w = _get_workspace_client()
+    # Get the branch from the endpoint name (e.g. projects/x/branches/y/endpoints/z -> projects/x/branches/y)
+    branch_name = "/".join(endpoint.name.split("/")[:4])
+    roles = list(w.postgres.list_roles(parent=branch_name))
+    if roles:
+        return roles[0].status.postgres_role
+    # Fallback: decode JWT sub claim from a generated credential
+    cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+    parts = cred.token.split(".")
+    payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    return claims.get("sub", "token")
+
+
+def generate_connection_string(endpoint, pg_username: str = None) -> str:
     """Generate a PostgreSQL connection string using a fresh token."""
     w = _get_workspace_client()
     cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
     token = cred.token
     host = endpoint.status.hosts.host
-    return f"postgresql://token:{token}@{host}:5432/databricks_postgres"
+    user = pg_username or "token"
+    from urllib.parse import quote
+    return f"postgresql://{quote(user, safe='')}:{quote(token, safe='')}@{host}:5432/databricks_postgres?sslmode=require"
 
 
 def _build_engine(connection_url: str) -> Engine:
@@ -111,14 +130,14 @@ def _build_engine(connection_url: str) -> Engine:
     )
 
 
-def _refresh_token_loop(endpoint):
+def _refresh_token_loop(endpoint, pg_username):
     """Background thread that refreshes the database token periodically."""
     global _engine, _current_connection_url, _session_factory
 
     while True:
         time.sleep(TOKEN_REFRESH_INTERVAL)
         try:
-            new_url = generate_connection_string(endpoint)
+            new_url = generate_connection_string(endpoint, pg_username)
             with _lock:
                 old_engine = _engine
                 _engine = _build_engine(new_url)
@@ -151,19 +170,34 @@ def init_lakebase() -> Engine:
     """
     global _engine, _session_factory, _token_refresh_thread, _current_connection_url
 
+    print("[LAKEBASE] Finding project...", flush=True)
     project = ensure_lakebase_project()
+    print(f"[LAKEBASE] Project: {project.name}", flush=True)
+    print("[LAKEBASE] Finding endpoint...", flush=True)
     endpoint = get_endpoint(project)
-    connection_url = generate_connection_string(endpoint)
+    print(f"[LAKEBASE] Endpoint: {endpoint.name}", flush=True)
+    print("[LAKEBASE] Resolving PostgreSQL username...", flush=True)
+    pg_username = _get_pg_username(endpoint)
+    print(f"[LAKEBASE] PG username: {pg_username}", flush=True)
+    print("[LAKEBASE] Generating connection string...", flush=True)
+    connection_url = generate_connection_string(endpoint, pg_username)
+    print(f"[LAKEBASE] Got connection string (host: {endpoint.status.hosts.host})", flush=True)
 
     with _lock:
         _current_connection_url = connection_url
         _engine = _build_engine(connection_url)
         _session_factory = sessionmaker(bind=_engine)
 
+    # Verify the connection actually works before returning
+    print("[LAKEBASE] Testing connection...", flush=True)
+    with _engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    print("[LAKEBASE] Connection test passed", flush=True)
+
     # Start background token refresh
     _token_refresh_thread = threading.Thread(
         target=_refresh_token_loop,
-        args=(endpoint,),
+        args=(endpoint, pg_username),
         daemon=True,
     )
     _token_refresh_thread.start()

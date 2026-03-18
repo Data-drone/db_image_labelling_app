@@ -4,9 +4,11 @@ FastAPI backend for CV Explorer — Phase 1.
 Project-centric labeling API with Lakebase backend.
 """
 
+import collections
 import io
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +29,22 @@ from .schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# In-memory log ring buffer (last 500 lines) for /api/debug/logs
+# ---------------------------------------------------------------------------
+_log_ring = collections.deque(maxlen=500)
+
+
+class _RingHandler(logging.Handler):
+    def emit(self, record):
+        _log_ring.append(self.format(record))
+
+
+_ring_handler = _RingHandler()
+_ring_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.root.addHandler(_ring_handler)
+logging.root.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -103,13 +121,25 @@ def get_db():
 def startup():
     global _engine, _session_factory
 
-    # Try Lakebase first, fallback to SQLite for local dev
-    try:
-        from .lakebase import init_lakebase
-        _engine = init_lakebase()
-        log.info("Connected to Lakebase")
-    except Exception as e:
-        log.warning("Lakebase init failed (%s), falling back to SQLite", e)
+    print("[STARTUP] Beginning app startup...", flush=True)
+
+    # Try Lakebase first, fallback to SQLite (set USE_LAKEBASE=false to skip)
+    use_lakebase = os.environ.get("USE_LAKEBASE", "true").lower() != "false"
+
+    if use_lakebase:
+        try:
+            print("[STARTUP] Attempting Lakebase init...", flush=True)
+            from .lakebase import init_lakebase
+            _engine = init_lakebase()
+            print("[STARTUP] Lakebase init succeeded", flush=True)
+            log.info("Connected to Lakebase")
+        except Exception as e:
+            print(f"[STARTUP] Lakebase init failed: {e}", flush=True)
+            log.warning("Lakebase init failed (%s), falling back to SQLite", e)
+            use_lakebase = False
+
+    if not use_lakebase:
+        print("[STARTUP] Using SQLite backend", flush=True)
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         db_url = os.environ.get("DATABASE_URL", "sqlite:////tmp/cv_explorer.db")
@@ -121,8 +151,15 @@ def startup():
         _session_factory = sessionmaker(bind=_engine)
 
     # Create tables
-    Base.metadata.create_all(_engine)
+    print("[STARTUP] Creating tables...", flush=True)
+    try:
+        Base.metadata.create_all(_engine)
+        print("[STARTUP] Tables created OK", flush=True)
+    except Exception as e:
+        print(f"[STARTUP] create_all failed: {e}", flush=True)
+        raise
     log.info("Database tables ready")
+    print("[STARTUP] Startup complete!", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +168,13 @@ def startup():
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/debug/logs")
+def debug_logs(n: int = 200):
+    """Return last N log lines from the in-memory ring buffer."""
+    lines = list(_log_ring)[-n:]
+    return {"lines": lines, "count": len(lines), "total_buffered": len(_log_ring)}
 
 
 # ---------------------------------------------------------------------------
