@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, cloneProject } from '../api/client';
+import { fetchProject, fetchProjectStats, cloneProject, updateProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -15,6 +15,10 @@ export default function ProjectDashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [cloning, setCloning] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editForm, setEditForm] = useState({});
+  const [newClass, setNewClass] = useState('');
 
   useEffect(() => {
     Promise.all([
@@ -41,6 +45,75 @@ export default function ProjectDashboard() {
     } finally {
       setCloning(false);
     }
+  };
+
+  const startEditing = () => {
+    setEditForm({
+      name: project.name,
+      description: project.description || '',
+      source_volume: project.source_volume,
+      class_list: [...project.class_list],
+    });
+    setNewClass('');
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setEditing(false);
+    setEditForm({});
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const patch = {};
+      if (editForm.name !== project.name) patch.name = editForm.name;
+      if (editForm.description !== (project.description || '')) patch.description = editForm.description;
+      if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
+
+      const sourceChanged = editForm.source_volume !== project.source_volume;
+      if (sourceChanged) {
+        if (!confirm(
+          'Changing the source volume will DELETE all existing samples and annotations for this project. This cannot be undone.\n\nAre you sure?'
+        )) {
+          setSaving(false);
+          return;
+        }
+        patch.source_volume = editForm.source_volume;
+        patch.confirm_source_change = true;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        setEditing(false);
+        setSaving(false);
+        return;
+      }
+
+      const updated = await updateProject(projectId, patch);
+      setProject(updated);
+      // Refresh stats if source changed (sample counts may differ)
+      if (sourceChanged) {
+        const st = await fetchProjectStats(projectId);
+        setStats(st);
+      }
+      setEditing(false);
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addClassToList = () => {
+    const cls = newClass.trim();
+    if (!cls) return;
+    if (editForm.class_list.includes(cls)) return;
+    setEditForm({ ...editForm, class_list: [...editForm.class_list, cls] });
+    setNewClass('');
+  };
+
+  const removeClassFromList = (cls) => {
+    setEditForm({ ...editForm, class_list: editForm.class_list.filter(c => c !== cls) });
   };
 
   if (loading) return <Spinner label="Loading project..." />;
@@ -188,39 +261,155 @@ export default function ProjectDashboard() {
 
           {/* Project info */}
           <div className="card" style={{ marginTop: '1.5rem' }}>
-            <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem' }}>
-              Project Info
-            </h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '0.4rem', fontSize: '0.85rem' }}>
-              <span style={{ color: 'var(--text-muted)' }}>Source</span>
-              <span style={{ wordBreak: 'break-all' }}>{project.source_volume}</span>
-              <span style={{ color: 'var(--text-muted)' }}>Classes</span>
-              <span>
-                {project.class_list.map((c) => (
-                  <span key={c} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>{c}</span>
-                ))}
-              </span>
-              <span style={{ color: 'var(--text-muted)' }}>Version</span>
-              <span>
-                v{project.version || 1}
-                {project.parent_project_id && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
+                Project Info
+              </h3>
+              {!editing ? (
+                <button
+                  className="btn-secondary"
+                  onClick={startEditing}
+                  style={{ padding: '0.3rem 0.75rem', fontSize: '0.8rem' }}
+                >
+                  Edit
+                </button>
+              ) : (
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
-                    onClick={() => navigate(`/projects/${project.parent_project_id}`)}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--accent-blue)',
-                      cursor: 'pointer',
-                      fontSize: '0.85rem',
-                      marginLeft: '0.5rem',
-                      textDecoration: 'underline',
-                    }}
+                    className="btn-secondary"
+                    onClick={cancelEditing}
+                    disabled={saving}
+                    style={{ padding: '0.3rem 0.75rem', fontSize: '0.8rem' }}
                   >
-                    View parent project
+                    Cancel
                   </button>
-                )}
-              </span>
+                  <button
+                    className="btn-primary"
+                    onClick={handleSave}
+                    disabled={saving}
+                    style={{ padding: '0.3rem 0.75rem', fontSize: '0.8rem' }}
+                  >
+                    {saving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              )}
             </div>
+
+            {!editing ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '0.4rem', fontSize: '0.85rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Name</span>
+                <span>{project.name}</span>
+                <span style={{ color: 'var(--text-muted)' }}>Description</span>
+                <span style={{ color: project.description ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                  {project.description || '(none)'}
+                </span>
+                <span style={{ color: 'var(--text-muted)' }}>Source</span>
+                <span style={{ wordBreak: 'break-all' }}>{project.source_volume}</span>
+                <span style={{ color: 'var(--text-muted)' }}>Classes</span>
+                <span>
+                  {project.class_list.map((c) => (
+                    <span key={c} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>{c}</span>
+                  ))}
+                </span>
+                <span style={{ color: 'var(--text-muted)' }}>Version</span>
+                <span>
+                  v{project.version || 1}
+                  {project.parent_project_id && (
+                    <button
+                      onClick={() => navigate(`/projects/${project.parent_project_id}`)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--accent-blue)',
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        marginLeft: '0.5rem',
+                        textDecoration: 'underline',
+                      }}
+                    >
+                      View parent project
+                    </button>
+                  )}
+                </span>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '0.6rem', fontSize: '0.85rem', alignItems: 'start' }}>
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Name</span>
+                <input
+                  type="text"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  className="input"
+                  style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem' }}
+                />
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Description</span>
+                <textarea
+                  value={editForm.description}
+                  onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+                  className="input"
+                  rows={2}
+                  style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', resize: 'vertical' }}
+                />
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Source</span>
+                <div>
+                  <input
+                    type="text"
+                    value={editForm.source_volume}
+                    onChange={(e) => setEditForm({ ...editForm, source_volume: e.target.value })}
+                    className="input"
+                    style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
+                  />
+                  {editForm.source_volume !== project.source_volume && (
+                    <div style={{
+                      fontSize: '0.75rem',
+                      color: '#ff6b6b',
+                      marginTop: '0.25rem',
+                    }}>
+                      Warning: changing the source will delete all samples and annotations.
+                    </div>
+                  )}
+                </div>
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Classes</span>
+                <div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginBottom: '0.5rem' }}>
+                    {editForm.class_list.map((c) => (
+                      <span key={c} className="badge badge-blue" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        {c}
+                        <button
+                          onClick={() => removeClassFromList(c)}
+                          style={{
+                            background: 'none', border: 'none', color: 'inherit',
+                            cursor: 'pointer', padding: 0, fontSize: '0.7rem', lineHeight: 1, opacity: 0.7,
+                          }}
+                        >
+                          &#x2715;
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text"
+                      value={newClass}
+                      onChange={(e) => setNewClass(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addClassToList())}
+                      placeholder="Add class..."
+                      className="input"
+                      style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem', flex: 1 }}
+                    />
+                    <button
+                      className="btn-secondary"
+                      onClick={addClassToList}
+                      style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem' }}
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+                <span style={{ color: 'var(--text-muted)' }}>Version</span>
+                <span style={{ color: 'var(--text-muted)' }}>v{project.version || 1} (not editable)</span>
+              </div>
+            )}
           </div>
         </>
       )}

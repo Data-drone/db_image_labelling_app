@@ -18,6 +18,14 @@ class ProjectCreate(BaseModel):
     source_volume: str  # UC Volume path
 
 
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    source_volume: Optional[str] = None
+    class_list: Optional[list[str]] = None
+    confirm_source_change: bool = False
+
+
 class ProjectOut(BaseModel):
     id: int
     name: str

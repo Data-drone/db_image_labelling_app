@@ -23,7 +23,7 @@ from .models import (
     Base, LabelingProject, ProjectSample, Annotation, init_db,
 )
 from .schemas import (
-    ProjectCreate, ProjectOut, ProjectStats,
+    ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats,
     SampleOut, SamplePage,
     AnnotationCreate, AnnotationOut,
 )
@@ -485,6 +485,85 @@ def add_project_class(project_id: int, body: dict, db: Session = Depends(get_db)
     db.commit()
     db.refresh(p)
     return {"class_list": p.class_list}
+
+
+@app.patch("/api/projects/{project_id}", response_model=ProjectOut)
+def update_project(
+    project_id: int,
+    payload: ProjectUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update editable fields on a project.
+
+    If source_volume changes, all existing samples and annotations are deleted
+    and the new volume is re-scanned. Requires confirm_source_change=true.
+    """
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    # Source volume change — destructive, needs confirmation
+    if payload.source_volume is not None and payload.source_volume != p.source_volume:
+        if not payload.confirm_source_change:
+            raise HTTPException(
+                status_code=400,
+                detail="Changing source volume will delete all samples and annotations. "
+                       "Set confirm_source_change=true to proceed.",
+            )
+        # Delete existing samples (cascade deletes annotations)
+        db.query(Annotation).filter_by(project_id=project_id).delete()
+        db.query(ProjectSample).filter_by(project_id=project_id).delete()
+        p.source_volume = payload.source_volume
+
+        # Re-scan new volume
+        volume_path = payload.source_volume.rstrip("/")
+        if _is_volume_path(volume_path):
+            try:
+                w = _get_workspace_client()
+                for entry in w.files.list_directory_contents(volume_path + "/"):
+                    if not entry.is_directory:
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in IMAGE_EXTENSIONS:
+                            fpath = volume_path + "/" + entry.name
+                            db.add(ProjectSample(
+                                project_id=p.id,
+                                filepath=fpath,
+                                filename=entry.name,
+                            ))
+            except Exception as e:
+                log.warning("Volume scan failed during source change: %s", e)
+        elif os.path.isdir(volume_path):
+            for fname in sorted(os.listdir(volume_path)):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in IMAGE_EXTENSIONS:
+                    db.add(ProjectSample(
+                        project_id=p.id,
+                        filepath=os.path.join(volume_path, fname),
+                        filename=fname,
+                    ))
+
+    if payload.name is not None:
+        # Check uniqueness
+        existing = db.query(LabelingProject).filter(
+            LabelingProject.name == payload.name,
+            LabelingProject.id != project_id,
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Project '{payload.name}' already exists.")
+        p.name = payload.name
+
+    if payload.description is not None:
+        p.description = payload.description
+
+    if payload.class_list is not None:
+        p.class_list = payload.class_list
+
+    db.commit()
+    db.refresh(p)
+
+    total = db.query(ProjectSample).filter_by(project_id=p.id).count()
+    labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
+    return _project_out(p, total, labeled)
 
 
 @app.delete("/api/projects/{project_id}")

@@ -1,5 +1,5 @@
 /**
- * Projects list page — shows all labeling projects grouped by version lineage.
+ * Projects list page — collapsible project groups with version rows.
  */
 
 import { useState, useEffect, useMemo } from 'react';
@@ -7,76 +7,177 @@ import { useNavigate } from 'react-router-dom';
 import { fetchProjects, deleteProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
-function ProjectCard({ p, navigate, onDelete, indent = false }) {
+/**
+ * A single version row inside an expanded project group.
+ */
+function VersionRow({ p, navigate, onDelete }) {
   const pct = p.sample_count > 0
     ? Math.round((p.labeled_count / p.sample_count) * 100)
     : 0;
 
   return (
     <div
-      className="card"
       onClick={() => navigate(`/projects/${p.id}`)}
       style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.75rem',
+        padding: '0.6rem 1rem',
         cursor: 'pointer',
-        position: 'relative',
-        ...(indent ? { marginLeft: '1.5rem', borderLeft: '2px solid var(--border-color)' } : {}),
+        borderRadius: 6,
+        background: 'rgba(255,255,255,0.02)',
+        transition: 'background 0.15s',
       }}
+      onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+      onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.25rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {p.name}
-          </h3>
-          {p.description && (
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {p.description}
-            </p>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
-          <span className={`badge ${p.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
-            {p.task_type}
-          </span>
-          <span className="badge" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
-            v{p.version}
-          </span>
-        </div>
-      </div>
-
-      {/* Progress bar */}
-      <div style={{ marginBottom: '0.75rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
-          <span>{p.labeled_count} / {p.sample_count} labeled</span>
-          <span>{pct}%</span>
-        </div>
-        <div className="progress-bar">
+      <span className="badge" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)', flexShrink: 0 }}>
+        v{p.version}
+      </span>
+      <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {p.name}
+      </span>
+      <div style={{ flex: '0 0 120px' }}>
+        <div className="progress-bar" style={{ height: 4 }}>
           <div className="progress-fill" style={{ width: `${pct}%` }} />
         </div>
       </div>
+      <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', flexShrink: 0, width: '5rem', textAlign: 'right' }}>
+        {p.labeled_count}/{p.sample_count}
+      </span>
+      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', flexShrink: 0, width: '2.5rem', textAlign: 'right' }}>
+        {pct}%
+      </span>
+      <button
+        onClick={(e) => { e.stopPropagation(); onDelete(e, p.id, p.name); }}
+        title="Delete version"
+        style={{
+          background: 'none', border: 'none', color: 'var(--text-muted)',
+          cursor: 'pointer', padding: '0.2rem', fontSize: '0.75rem', lineHeight: 1, flexShrink: 0,
+          opacity: 0.5,
+        }}
+      >
+        &#x2715;
+      </button>
+    </div>
+  );
+}
 
-      {/* Footer */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-        <span>{p.created_by || 'unknown'}</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <span>{new Date(p.created_at).toLocaleDateString()}</span>
-          <button
-            onClick={(e) => onDelete(e, p.id, p.name)}
-            title="Delete project"
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-muted)',
-              cursor: 'pointer',
-              padding: '0.2rem',
-              fontSize: '0.85rem',
-              lineHeight: 1,
-            }}
-          >
-            &#x2715;
-          </button>
+/**
+ * Collapsible project group — shows aggregate stats when collapsed,
+ * version rows when expanded.
+ */
+function ProjectGroup({ root, allVersions, navigate, onDelete }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // All versions including root, sorted by version number
+  const all = useMemo(() => {
+    const combined = [root, ...allVersions];
+    combined.sort((a, b) => a.version - b.version);
+    return combined;
+  }, [root, allVersions]);
+
+  const versionCount = all.length;
+  const latestVersion = all[all.length - 1];
+
+  // Aggregate stats
+  const totalSamples = all.reduce((s, p) => s + (p.sample_count || 0), 0);
+  const totalLabeled = all.reduce((s, p) => s + (p.labeled_count || 0), 0);
+  const aggPct = totalSamples > 0 ? Math.round((totalLabeled / totalSamples) * 100) : 0;
+
+  // Use the root's base name (strip version suffix if present)
+  const baseName = root.name.replace(/\s*\(v\d+\)\s*$/, '');
+
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      {/* Clickable header — always visible */}
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          padding: '1rem 1.25rem',
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+      >
+        {/* Chevron */}
+        <span style={{
+          fontSize: '0.7rem',
+          color: 'var(--text-muted)',
+          transition: 'transform 0.2s',
+          transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+          flexShrink: 0,
+        }}>
+          &#x25B6;
+        </span>
+
+        {/* Name + description */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {baseName}
+            </h3>
+            <span className={`badge ${root.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
+              {root.task_type}
+            </span>
+          </div>
+          {root.description && !expanded && (
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0.15rem 0 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {root.description}
+            </p>
+          )}
         </div>
+
+        {/* Summary badges (visible when collapsed) */}
+        {!expanded && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexShrink: 0 }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              {versionCount} version{versionCount !== 1 ? 's' : ''}
+            </span>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+              latest: v{latestVersion.version}
+            </span>
+            <div style={{ width: 80 }}>
+              <div className="progress-bar" style={{ height: 4 }}>
+                <div className="progress-fill" style={{ width: `${aggPct}%` }} />
+              </div>
+            </div>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', width: '5rem', textAlign: 'right' }}>
+              {totalLabeled}/{totalSamples}
+            </span>
+          </div>
+        )}
       </div>
+
+      {/* Expanded: version rows */}
+      {expanded && (
+        <div style={{
+          borderTop: '1px solid var(--border-color)',
+          padding: '0.5rem 1rem 0.75rem 1rem',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.25rem',
+        }}>
+          {/* Column header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '0.75rem',
+            padding: '0.25rem 1rem',
+            fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em',
+          }}>
+            <span style={{ flexShrink: 0, width: '2.5rem' }}>Ver</span>
+            <span style={{ flex: 1 }}>Name</span>
+            <span style={{ flex: '0 0 120px' }}>Progress</span>
+            <span style={{ width: '5rem', textAlign: 'right' }}>Labeled</span>
+            <span style={{ width: '2.5rem', textAlign: 'right' }}>%</span>
+            <span style={{ width: '1rem' }}></span>
+          </div>
+          {all.map((v) => (
+            <VersionRow key={v.id} p={v} navigate={navigate} onDelete={onDelete} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -105,7 +206,7 @@ export default function ProjectsPage() {
     }
   };
 
-  // Group projects: root projects (no parent) with their versions nested below
+  // Group projects by lineage: root + its cloned versions
   const grouped = useMemo(() => {
     const byId = Object.fromEntries(projects.map((p) => [p.id, p]));
     const childrenOf = {};
@@ -113,7 +214,6 @@ export default function ProjectsPage() {
 
     for (const p of projects) {
       if (p.parent_project_id && byId[p.parent_project_id]) {
-        // Find the ultimate root of the lineage
         let rootId = p.parent_project_id;
         while (byId[rootId]?.parent_project_id && byId[byId[rootId].parent_project_id]) {
           rootId = byId[rootId].parent_project_id;
@@ -123,17 +223,14 @@ export default function ProjectsPage() {
       } else if (!p.parent_project_id) {
         roots.push(p);
       } else {
-        // Parent not in list (deleted?) — treat as root
         roots.push(p);
       }
     }
 
-    // Sort children by version
     for (const id of Object.keys(childrenOf)) {
       childrenOf[id].sort((a, b) => a.version - b.version);
     }
 
-    // Sort roots by creation date (newest first)
     roots.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
     return roots.map((root) => ({
@@ -192,18 +289,15 @@ export default function ProjectsPage() {
           </button>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
           {grouped.map(({ root, versions }) => (
-            <div key={root.id}>
-              <ProjectCard p={root} navigate={navigate} onDelete={handleDelete} />
-              {versions.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
-                  {versions.map((v) => (
-                    <ProjectCard key={v.id} p={v} navigate={navigate} onDelete={handleDelete} indent />
-                  ))}
-                </div>
-              )}
-            </div>
+            <ProjectGroup
+              key={root.id}
+              root={root}
+              allVersions={versions}
+              navigate={navigate}
+              onDelete={handleDelete}
+            />
           ))}
         </div>
       )}
