@@ -44,6 +44,9 @@ export const fetchNextSample = (projectId) =>
 export const annotateSample = (projectId, sampleId, data) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/annotate`, data).then(r => r.data);
 
+export const annotateSampleBatch = (projectId, sampleId, annotations) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/annotate-batch`, { annotations }).then(r => r.data);
+
 export const skipSample = (projectId, sampleId) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/skip`).then(r => r.data);
 

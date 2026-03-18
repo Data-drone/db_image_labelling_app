@@ -83,6 +83,10 @@ class AnnotationCreate(BaseModel):
     bbox_json: Optional[dict] = None  # {"x":..,"y":..,"w":..,"h":..}
 
 
+class AnnotationBatchCreate(BaseModel):
+    annotations: list[AnnotationCreate]
+
+
 class AnnotationOut(BaseModel):
     id: int
     sample_id: int

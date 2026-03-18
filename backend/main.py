@@ -25,7 +25,7 @@ from .models import (
 from .schemas import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats,
     SampleOut, SamplePage,
-    AnnotationCreate, AnnotationOut,
+    AnnotationCreate, AnnotationBatchCreate, AnnotationOut,
 )
 
 log = logging.getLogger(__name__)
@@ -772,6 +772,57 @@ def annotate_sample(
     db.commit()
     db.refresh(ann)
     return AnnotationOut.model_validate(ann)
+
+
+@app.post(
+    "/api/projects/{project_id}/samples/{sample_id}/annotate-batch",
+    response_model=list[AnnotationOut],
+)
+def annotate_sample_batch(
+    project_id: int,
+    sample_id: int,
+    payload: AnnotationBatchCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Save multiple annotations (bboxes) for a sample in one transaction."""
+    sample = (
+        db.query(ProjectSample)
+        .filter_by(id=sample_id, project_id=project_id)
+        .first()
+    )
+    if not sample:
+        raise HTTPException(status_code=404, detail="Sample not found.")
+
+    if not payload.annotations:
+        raise HTTPException(status_code=400, detail="At least one annotation is required.")
+
+    # Delete existing annotations for this sample (supports re-labeling)
+    db.query(Annotation).filter_by(sample_id=sample_id, project_id=project_id).delete()
+
+    user_email = _get_user_email(request)
+    created = []
+    for ann in payload.annotations:
+        a = Annotation(
+            sample_id=sample_id,
+            project_id=project_id,
+            label=ann.label,
+            ann_type=ann.ann_type,
+            bbox_json=ann.bbox_json,
+            created_by=user_email,
+        )
+        db.add(a)
+        created.append(a)
+
+    sample.status = "labeled"
+    sample.locked_by = None
+    sample.locked_at = None
+
+    db.commit()
+    for a in created:
+        db.refresh(a)
+
+    return [AnnotationOut.model_validate(a) for a in created]
 
 
 @app.post("/api/projects/{project_id}/samples/{sample_id}/skip")
