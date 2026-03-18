@@ -847,6 +847,23 @@ def skip_sample(
     return {"detail": "Skipped."}
 
 
+@app.get("/api/projects/{project_id}/samples/{sample_id}", response_model=SampleOut)
+def get_sample(
+    project_id: int,
+    sample_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get a single sample by ID with its annotations."""
+    sample = (
+        db.query(ProjectSample)
+        .filter_by(id=sample_id, project_id=project_id)
+        .first()
+    )
+    if not sample:
+        raise HTTPException(status_code=404, detail="Sample not found.")
+    return SampleOut.model_validate(sample)
+
+
 @app.get("/api/projects/{project_id}/samples", response_model=SamplePage)
 def list_project_samples(
     project_id: int,

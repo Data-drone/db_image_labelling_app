@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, cloneProject, updateProject } from '../api/client';
+import { fetchProject, fetchProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -19,6 +19,13 @@ export default function ProjectDashboard() {
   const [saving, setSaving] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [newClass, setNewClass] = useState('');
+
+  // Gallery state
+  const [gallerySamples, setGallerySamples] = useState([]);
+  const [galleryTotal, setGalleryTotal] = useState(0);
+  const [galleryPage, setGalleryPage] = useState(0);
+  const [galleryFilter, setGalleryFilter] = useState(''); // '' = all, 'labeled', 'unlabeled', 'skipped'
+  const galleryPageSize = 24;
 
   useEffect(() => {
     Promise.all([
@@ -46,6 +53,21 @@ export default function ProjectDashboard() {
       setCloning(false);
     }
   };
+
+  // Load gallery
+  useEffect(() => {
+    if (!project) return;
+    const params = { page: galleryPage, page_size: galleryPageSize };
+    if (galleryFilter) params.status = galleryFilter;
+    fetchSamples(projectId, params)
+      .then((page) => {
+        setGallerySamples(page.items);
+        setGalleryTotal(page.total);
+      })
+      .catch(console.error);
+  }, [project, projectId, galleryPage, galleryFilter]);
+
+  const galleryTotalPages = Math.ceil(galleryTotal / galleryPageSize);
 
   const startEditing = () => {
     setEditForm({
@@ -220,6 +242,132 @@ export default function ProjectDashboard() {
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
               {stats.labeled} labeled, {stats.skipped} skipped, {stats.unlabeled} remaining
             </div>
+          </div>
+
+          {/* Sample Gallery */}
+          <div className="card" style={{ marginBottom: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
+                Samples
+              </h3>
+              <div style={{ display: 'flex', gap: '0.3rem' }}>
+                {['', 'unlabeled', 'labeled', 'skipped'].map((f) => (
+                  <button
+                    key={f}
+                    className="btn-secondary"
+                    onClick={() => { setGalleryFilter(f); setGalleryPage(0); }}
+                    style={{
+                      padding: '0.25rem 0.6rem',
+                      fontSize: '0.75rem',
+                      background: galleryFilter === f ? 'var(--accent-blue)' : undefined,
+                      color: galleryFilter === f ? '#fff' : undefined,
+                      border: galleryFilter === f ? '1px solid var(--accent-blue)' : undefined,
+                    }}
+                  >
+                    {f || 'All'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {gallerySamples.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
+                No samples found
+              </div>
+            ) : (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+                gap: '0.5rem',
+              }}>
+                {gallerySamples.map((s) => (
+                  <div
+                    key={s.id}
+                    onClick={() => navigate(`/projects/${projectId}/label?sample=${s.id}`)}
+                    style={{
+                      cursor: 'pointer',
+                      borderRadius: 6,
+                      border: '1px solid var(--border-color)',
+                      overflow: 'hidden',
+                      background: 'var(--bg-secondary)',
+                      transition: 'border-color 0.15s',
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-blue)'}
+                    onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                  >
+                    <div style={{ position: 'relative', paddingTop: '100%' }}>
+                      <img
+                        src={sampleThumbnailUrl(projectId, s.id, 200)}
+                        alt={s.filename}
+                        loading="lazy"
+                        style={{
+                          position: 'absolute',
+                          top: 0, left: 0,
+                          width: '100%', height: '100%',
+                          objectFit: 'cover',
+                        }}
+                      />
+                      <span style={{
+                        position: 'absolute',
+                        top: 4, right: 4,
+                        padding: '0.1rem 0.35rem',
+                        borderRadius: 3,
+                        fontSize: '0.6rem',
+                        fontWeight: 600,
+                        background: s.status === 'labeled' ? 'var(--status-success)'
+                          : s.status === 'skipped' ? 'var(--status-warning)'
+                          : 'rgba(255,255,255,0.15)',
+                        color: s.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
+                      }}>
+                        {s.status}
+                      </span>
+                    </div>
+                    <div style={{
+                      padding: '0.3rem 0.4rem',
+                      fontSize: '0.65rem',
+                      color: 'var(--text-secondary)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}>
+                      {s.filename}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Pagination */}
+            {galleryTotalPages > 1 && (
+              <div style={{
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                gap: '0.5rem',
+                marginTop: '0.75rem',
+                fontSize: '0.8rem',
+              }}>
+                <button
+                  className="btn-secondary"
+                  onClick={() => setGalleryPage(p => Math.max(0, p - 1))}
+                  disabled={galleryPage === 0}
+                  style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                >
+                  Prev
+                </button>
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  Page {galleryPage + 1} / {galleryTotalPages}
+                </span>
+                <button
+                  className="btn-secondary"
+                  onClick={() => setGalleryPage(p => Math.min(galleryTotalPages - 1, p + 1))}
+                  disabled={galleryPage >= galleryTotalPages - 1}
+                  style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Per-user breakdown */}

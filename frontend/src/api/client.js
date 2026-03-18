@@ -35,6 +35,9 @@ export const cloneProject = (id) => api.post(`/projects/${id}/clone`).then(r => 
 export const fetchSamples = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/samples`, { params }).then(r => r.data);
 
+export const fetchSample = (projectId, sampleId) =>
+  api.get(`/projects/${projectId}/samples/${sampleId}`).then(r => r.data);
+
 export const fetchNextSample = (projectId) =>
   api.get(`/projects/${projectId}/next`).then(r => r.data);
 
