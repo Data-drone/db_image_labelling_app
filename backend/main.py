@@ -667,39 +667,30 @@ def export_project(
     """
     from PIL import Image as PILImage
 
-    export_volume = (body.get("export_volume") or "").strip().rstrip("/")
-    if not export_volume:
+    export_path = (body.get("export_volume") or "").strip().rstrip("/")
+    if not export_path:
         raise HTTPException(status_code=400, detail="export_volume is required.")
 
-    # Validate volume path format and ensure it exists
-    if not _is_volume_path(export_volume):
-        raise HTTPException(status_code=400, detail="export_volume must be a UC Volume path (/Volumes/catalog/schema/volume).")
+    # Validate volume path format: /Volumes/catalog/schema/volume[/optional/subdirs]
+    if not _is_volume_path(export_path):
+        raise HTTPException(status_code=400, detail="export_volume must be a UC Volume path (/Volumes/catalog/schema/volume/...).")
 
-    parts = export_volume.strip("/").split("/")
+    parts = export_path.strip("/").split("/")
     if len(parts) < 4:
-        raise HTTPException(status_code=400, detail="export_volume must be /Volumes/catalog/schema/volume.")
+        raise HTTPException(status_code=400, detail="export_volume must be at least /Volumes/catalog/schema/volume.")
 
-    # Try to ensure the volume exists, create if needed
+    # Verify the volume root exists by listing it
     w = _get_workspace_client()
-    catalog_name, schema_name, volume_name = parts[1], parts[2], parts[3]
+    volume_root = "/" + "/".join(parts[:4])
     try:
-        w.files.list_directory_contents(export_volume + "/")
+        next(iter(w.files.list_directory_contents(volume_root + "/")), None)
     except Exception:
-        # Volume doesn't exist — try to create it
-        try:
-            w.volumes.create(
-                catalog_name=catalog_name,
-                schema_name=schema_name,
-                name=volume_name,
-                volume_type="MANAGED",
-            )
-            log.info("Created export volume: %s.%s.%s", catalog_name, schema_name, volume_name)
-        except Exception as vol_err:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Export volume does not exist and could not be created: {vol_err}. "
-                       f"Please create the volume first: CREATE VOLUME {catalog_name}.{schema_name}.{volume_name}",
-            )
+        catalog_name, schema_name, volume_name = parts[1], parts[2], parts[3]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Volume {catalog_name}.{schema_name}.{volume_name} does not exist. "
+                   f"Please create it first: CREATE VOLUME {catalog_name}.{schema_name}.{volume_name}",
+        )
 
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
@@ -728,7 +719,7 @@ def export_project(
     # Build export directory name
     safe_name = p.name.replace(" ", "_").replace("/", "_")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    export_dir = f"{export_volume}/{safe_name}_v{p.version}_{ts}"
+    export_dir = f"{export_path}/{safe_name}_v{p.version}_{ts}"
 
     is_detection = p.task_type == "detection"
     image_count = 0

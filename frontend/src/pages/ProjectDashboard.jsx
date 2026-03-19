@@ -63,16 +63,10 @@ export default function ProjectDashboard() {
   };
 
   const openExportModal = () => {
-    // Derive default export volume from source_volume
-    // e.g. /Volumes/catalog/schema/volume -> /Volumes/catalog/schema/exports
+    // Default export path: same source volume with /exports subdirectory
+    // e.g. /Volumes/catalog/schema/volume -> /Volumes/catalog/schema/volume/exports
     if (project?.source_volume) {
-      const parts = project.source_volume.split('/');
-      if (parts.length >= 5) {
-        parts[parts.length - 1] = 'exports';
-        setExportVolume(parts.join('/'));
-      } else {
-        setExportVolume(project.source_volume + '_exports');
-      }
+      setExportVolume(project.source_volume.replace(/\/+$/, '') + '/exports');
     }
     setExportResult(null);
     setExportError('');
