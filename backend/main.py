@@ -6,6 +6,7 @@ Project-centric labeling API with Lakebase backend.
 
 import collections
 import io
+import json
 import logging
 import os
 import sys
@@ -647,6 +648,185 @@ def clone_project(
     db.refresh(new_project)
 
     return _project_out(new_project, sample_count, 0)
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+@app.post("/api/projects/{project_id}/export")
+def export_project(
+    project_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Export labeled dataset to a UC Volume in COCO or CSV format.
+
+    Body: {"export_volume": "/Volumes/catalog/schema/volume"}
+    Returns: {"export_path": "...", "format": "...", "images": N, "annotations": N}
+    """
+    from PIL import Image as PILImage
+
+    export_volume = (body.get("export_volume") or "").strip().rstrip("/")
+    if not export_volume:
+        raise HTTPException(status_code=400, detail="export_volume is required.")
+
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    # Gather labeled samples with annotations
+    samples = (
+        db.query(ProjectSample)
+        .filter_by(project_id=project_id, status="labeled")
+        .all()
+    )
+    if not samples:
+        raise HTTPException(status_code=400, detail="No labeled samples to export.")
+
+    annotations = (
+        db.query(Annotation)
+        .filter_by(project_id=project_id)
+        .all()
+    )
+
+    # Group annotations by sample_id
+    ann_by_sample = {}
+    for a in annotations:
+        ann_by_sample.setdefault(a.sample_id, []).append(a)
+
+    # Build export directory name
+    safe_name = p.name.replace(" ", "_").replace("/", "_")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    export_dir = f"{export_volume}/{safe_name}_v{p.version}_{ts}"
+
+    w = _get_workspace_client()
+    is_detection = p.task_type == "detection"
+    image_count = 0
+    annotation_count = 0
+
+    # COCO structure (used for detection)
+    coco = {
+        "info": {
+            "description": f"CV Explorer export: {p.name} v{p.version}",
+            "version": "1.0",
+            "year": datetime.now().year,
+        },
+        "images": [],
+        "annotations": [],
+        "categories": [{"id": i, "name": c} for i, c in enumerate(p.class_list)],
+    }
+    class_to_id = {c: i for i, c in enumerate(p.class_list)}
+
+    # CSV rows (used for classification)
+    csv_rows = []
+
+    for sample in samples:
+        # Copy image to export dir and get dimensions
+        try:
+            if _is_volume_path(sample.filepath):
+                img_data = _download_volume_file(sample.filepath)
+                if img_data is None:
+                    log.warning("Skipping missing image: %s", sample.filepath)
+                    continue
+            else:
+                if not os.path.exists(sample.filepath):
+                    log.warning("Skipping missing image: %s", sample.filepath)
+                    continue
+                with open(sample.filepath, "rb") as f:
+                    img_data = f.read()
+
+            # Get dimensions
+            img = PILImage.open(io.BytesIO(img_data))
+            img_w, img_h = img.size
+
+            # Upload image to export volume
+            dest_path = f"{export_dir}/images/{sample.filename}"
+            w.files.upload(dest_path, io.BytesIO(img_data), overwrite=True)
+            image_count += 1
+        except Exception:
+            log.exception("Failed to copy image %s", sample.filename)
+            continue
+
+        sample_anns = ann_by_sample.get(sample.id, [])
+
+        if is_detection:
+            # COCO image entry
+            coco_img_id = image_count  # 1-based
+            coco["images"].append({
+                "id": coco_img_id,
+                "file_name": sample.filename,
+                "width": img_w,
+                "height": img_h,
+            })
+
+            for a in sample_anns:
+                if a.ann_type == "bbox" and a.bbox_json:
+                    # Convert normalized (0-1) to absolute pixels
+                    bx = a.bbox_json["x"] * img_w
+                    by = a.bbox_json["y"] * img_h
+                    bw = a.bbox_json["w"] * img_w
+                    bh = a.bbox_json["h"] * img_h
+                    annotation_count += 1
+                    coco["annotations"].append({
+                        "id": annotation_count,
+                        "image_id": coco_img_id,
+                        "category_id": class_to_id.get(a.label, 0),
+                        "bbox": [round(bx, 2), round(by, 2), round(bw, 2), round(bh, 2)],
+                        "area": round(bw * bh, 2),
+                        "iscrowd": 0,
+                    })
+        else:
+            # Classification: take first annotation's label
+            label = sample_anns[0].label if sample_anns else "unknown"
+            csv_rows.append(f"{sample.filename},{label}")
+            annotation_count += 1
+
+    if image_count == 0:
+        raise HTTPException(status_code=400, detail="No images could be exported.")
+
+    # Write annotation files
+    if is_detection:
+        coco_bytes = json.dumps(coco, indent=2).encode("utf-8")
+        w.files.upload(
+            f"{export_dir}/annotations.json",
+            io.BytesIO(coco_bytes),
+            overwrite=True,
+        )
+    else:
+        csv_content = "filename,label\n" + "\n".join(csv_rows) + "\n"
+        w.files.upload(
+            f"{export_dir}/labels.csv",
+            io.BytesIO(csv_content.encode("utf-8")),
+            overwrite=True,
+        )
+
+    # Write metadata
+    metadata = {
+        "project_id": p.id,
+        "project_name": p.name,
+        "version": p.version,
+        "task_type": p.task_type,
+        "class_list": p.class_list,
+        "source_volume": p.source_volume,
+        "image_count": image_count,
+        "annotation_count": annotation_count,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_by": _get_user_email(request),
+        "format": "coco" if is_detection else "csv",
+    }
+    w.files.upload(
+        f"{export_dir}/metadata.json",
+        io.BytesIO(json.dumps(metadata, indent=2).encode("utf-8")),
+        overwrite=True,
+    )
+
+    return {
+        "export_path": export_dir,
+        "format": "coco" if is_detection else "csv",
+        "images": image_count,
+        "annotations": annotation_count,
+    }
 
 
 @app.get("/api/projects/{project_id}/stats", response_model=ProjectStats)

@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl } from '../api/client';
+import { fetchProject, fetchProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -20,8 +20,16 @@ export default function ProjectDashboard() {
   const [editForm, setEditForm] = useState({});
   const [newClass, setNewClass] = useState('');
 
+  // Export state
+  const [showExport, setShowExport] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportVolume, setExportVolume] = useState('');
+  const [exportResult, setExportResult] = useState(null);
+  const [exportError, setExportError] = useState('');
+
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
+
   const [galleryTotal, setGalleryTotal] = useState(0);
   const [galleryPage, setGalleryPage] = useState(0);
   const [galleryFilter, setGalleryFilter] = useState(''); // '' = all, 'labeled', 'unlabeled', 'skipped'
@@ -51,6 +59,38 @@ export default function ProjectDashboard() {
       alert('Failed to create new version: ' + (err.response?.data?.detail || err.message));
     } finally {
       setCloning(false);
+    }
+  };
+
+  const openExportModal = () => {
+    // Derive default export volume from source_volume
+    // e.g. /Volumes/catalog/schema/volume -> /Volumes/catalog/schema/exports
+    if (project?.source_volume) {
+      const parts = project.source_volume.split('/');
+      if (parts.length >= 5) {
+        parts[parts.length - 1] = 'exports';
+        setExportVolume(parts.join('/'));
+      } else {
+        setExportVolume(project.source_volume + '_exports');
+      }
+    }
+    setExportResult(null);
+    setExportError('');
+    setShowExport(true);
+  };
+
+  const handleExport = async () => {
+    if (exporting || !exportVolume.trim()) return;
+    setExporting(true);
+    setExportError('');
+    setExportResult(null);
+    try {
+      const result = await exportProject(projectId, exportVolume.trim());
+      setExportResult(result);
+    } catch (err) {
+      setExportError(err.response?.data?.detail || err.message);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -188,6 +228,14 @@ export default function ProjectDashboard() {
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button
             className="btn-secondary"
+            onClick={openExportModal}
+            disabled={!stats || stats.labeled === 0}
+            style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+          >
+            Export Dataset
+          </button>
+          <button
+            className="btn-secondary"
             onClick={handleClone}
             disabled={cloning}
             style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
@@ -203,6 +251,114 @@ export default function ProjectDashboard() {
           </button>
         </div>
       </div>
+
+      {/* Export Modal */}
+      {showExport && (
+        <div className="card" style={{ marginBottom: '1.5rem', border: '1px solid var(--accent-blue)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
+              Export Dataset
+            </h3>
+            <button
+              onClick={() => setShowExport(false)}
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.1rem' }}
+            >
+              &#x2715;
+            </button>
+          </div>
+
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+            Export {stats?.labeled || 0} labeled samples as {project.task_type === 'detection' ? 'COCO JSON' : 'CSV + images'} to a UC Volume.
+          </div>
+
+          <div style={{ marginBottom: '0.75rem' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.3rem' }}>
+              Export Volume Path
+            </label>
+            <input
+              type="text"
+              value={exportVolume}
+              onChange={(e) => setExportVolume(e.target.value)}
+              placeholder="/Volumes/catalog/schema/volume"
+              disabled={exporting}
+              style={{
+                width: '100%',
+                padding: '0.5rem 0.75rem',
+                background: 'var(--bg-input)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 4,
+                fontSize: '0.85rem',
+              }}
+            />
+          </div>
+
+          {exportError && (
+            <div style={{
+              padding: '0.5rem 0.75rem',
+              borderRadius: 4,
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              color: '#ef4444',
+              fontSize: '0.8rem',
+              marginBottom: '0.75rem',
+            }}>
+              {exportError}
+            </div>
+          )}
+
+          {exportResult && (
+            <div style={{
+              padding: '0.75rem',
+              borderRadius: 4,
+              background: 'rgba(34, 197, 94, 0.1)',
+              border: '1px solid rgba(34, 197, 94, 0.3)',
+              fontSize: '0.8rem',
+              marginBottom: '0.75rem',
+            }}>
+              <div style={{ color: 'var(--status-success)', fontWeight: 600, marginBottom: '0.3rem' }}>
+                Export complete!
+              </div>
+              <div style={{ color: 'var(--text-secondary)' }}>
+                <strong>{exportResult.images}</strong> images, <strong>{exportResult.annotations}</strong> annotations
+              </div>
+              <div style={{
+                marginTop: '0.4rem',
+                padding: '0.3rem 0.5rem',
+                background: 'var(--bg-secondary)',
+                borderRadius: 3,
+                fontFamily: 'monospace',
+                fontSize: '0.75rem',
+                color: 'var(--text-primary)',
+                wordBreak: 'break-all',
+              }}>
+                {exportResult.export_path}
+              </div>
+              <div style={{ color: 'var(--text-muted)', marginTop: '0.3rem', fontSize: '0.75rem' }}>
+                Format: {exportResult.format === 'coco' ? 'COCO JSON (annotations.json + images/)' : 'CSV (labels.csv + images/)'}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              className="btn-primary"
+              onClick={handleExport}
+              disabled={exporting || !exportVolume.trim() || !!exportResult}
+              style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
+            >
+              {exporting ? 'Exporting...' : 'Export'}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => setShowExport(false)}
+              style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+            >
+              {exportResult ? 'Done' : 'Cancel'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Stats cards */}
       {stats && (
