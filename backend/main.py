@@ -668,6 +668,7 @@ def export_project(
     from PIL import Image as PILImage
 
     export_path = (body.get("export_volume") or "").strip().rstrip("/")
+    log.info("Export requested: project=%s, export_path=%r", project_id, export_path)
     if not export_path:
         raise HTTPException(status_code=400, detail="export_volume is required.")
 
@@ -682,10 +683,13 @@ def export_project(
     # Verify the volume root exists by listing it
     w = _get_workspace_client()
     volume_root = "/" + "/".join(parts[:4])
+    log.info("Checking volume root: %s", volume_root)
     try:
         next(iter(w.files.list_directory_contents(volume_root + "/")), None)
-    except Exception:
+        log.info("Volume root OK")
+    except Exception as vol_err:
         catalog_name, schema_name, volume_name = parts[1], parts[2], parts[3]
+        log.error("Volume check failed: %s", vol_err)
         raise HTTPException(
             status_code=400,
             detail=f"Volume {catalog_name}.{schema_name}.{volume_name} does not exist. "
@@ -702,6 +706,7 @@ def export_project(
         .filter_by(project_id=project_id, status="labeled")
         .all()
     )
+    log.info("Found %d labeled samples for project %d", len(samples), project_id)
     if not samples:
         raise HTTPException(status_code=400, detail="No labeled samples to export.")
 
@@ -741,6 +746,7 @@ def export_project(
     # CSV rows (used for classification)
     csv_rows = []
 
+    first_error = None
     for sample in samples:
         # Copy image to export dir and get dimensions
         try:
@@ -764,8 +770,10 @@ def export_project(
             dest_path = f"{export_dir}/images/{sample.filename}"
             w.files.upload(dest_path, io.BytesIO(img_data), overwrite=True)
             image_count += 1
-        except Exception:
+        except Exception as e:
             log.exception("Failed to copy image %s", sample.filename)
+            if first_error is None:
+                first_error = str(e)
             continue
 
         sample_anns = ann_by_sample.get(sample.id, [])
@@ -803,7 +811,10 @@ def export_project(
             annotation_count += 1
 
     if image_count == 0:
-        raise HTTPException(status_code=400, detail="No images could be exported.")
+        detail = "No images could be exported."
+        if first_error:
+            detail += f" First error: {first_error}"
+        raise HTTPException(status_code=400, detail=detail)
 
     # Write annotation files
     if is_detection:
