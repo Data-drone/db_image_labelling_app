@@ -671,6 +671,36 @@ def export_project(
     if not export_volume:
         raise HTTPException(status_code=400, detail="export_volume is required.")
 
+    # Validate volume path format and ensure it exists
+    if not _is_volume_path(export_volume):
+        raise HTTPException(status_code=400, detail="export_volume must be a UC Volume path (/Volumes/catalog/schema/volume).")
+
+    parts = export_volume.strip("/").split("/")
+    if len(parts) < 4:
+        raise HTTPException(status_code=400, detail="export_volume must be /Volumes/catalog/schema/volume.")
+
+    # Try to ensure the volume exists, create if needed
+    w = _get_workspace_client()
+    catalog_name, schema_name, volume_name = parts[1], parts[2], parts[3]
+    try:
+        w.files.list_directory_contents(export_volume + "/")
+    except Exception:
+        # Volume doesn't exist — try to create it
+        try:
+            w.volumes.create(
+                catalog_name=catalog_name,
+                schema_name=schema_name,
+                name=volume_name,
+                volume_type="MANAGED",
+            )
+            log.info("Created export volume: %s.%s.%s", catalog_name, schema_name, volume_name)
+        except Exception as vol_err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Export volume does not exist and could not be created: {vol_err}. "
+                       f"Please create the volume first: CREATE VOLUME {catalog_name}.{schema_name}.{volume_name}",
+            )
+
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -700,7 +730,6 @@ def export_project(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     export_dir = f"{export_volume}/{safe_name}_v{p.version}_{ts}"
 
-    w = _get_workspace_client()
     is_detection = p.task_type == "detection"
     image_count = 0
     annotation_count = 0

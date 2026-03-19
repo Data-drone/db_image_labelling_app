@@ -46,6 +46,10 @@ export default function LabelingView() {
   const [activeClassIndex, setActiveClassIndex] = useState(0);
   const nextBoxId = useRef(0);
 
+  // Flash feedback for keyboard class selection
+  const [flashIndex, setFlashIndex] = useState(null);
+  const flashTimeout = useRef(null);
+
   const isDetection = project?.task_type === 'detection';
   const total = sampleList.length;
 
@@ -298,6 +302,11 @@ export default function LabelingView() {
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key) - 1;
         if (idx < project.class_list.length) {
+          // Flash feedback
+          if (flashTimeout.current) clearTimeout(flashTimeout.current);
+          setFlashIndex(idx);
+          flashTimeout.current = setTimeout(() => setFlashIndex(null), 250);
+
           if (isDetection) {
             setActiveClassIndex(idx);
           } else {
@@ -538,7 +547,10 @@ export default function LabelingView() {
                             alignItems: 'center',
                             gap: '0.5rem',
                             border: i === activeClassIndex ? `2px solid ${getClassColor(i)}` : undefined,
-                            background: i === activeClassIndex ? getClassColor(i) + '20' : undefined,
+                            background: i === flashIndex ? getClassColor(i) + '60'
+                              : i === activeClassIndex ? getClassColor(i) + '20' : undefined,
+                            transition: 'background 0.15s ease-out',
+                            transform: i === flashIndex ? 'scale(1.03)' : undefined,
                           }}
                         >
                           <span style={{
@@ -691,6 +703,9 @@ export default function LabelingView() {
                             display: 'flex',
                             alignItems: 'center',
                             gap: '0.5rem',
+                            background: i === flashIndex ? 'rgba(66, 153, 224, 0.35)' : undefined,
+                            transition: 'background 0.15s ease-out',
+                            transform: i === flashIndex ? 'scale(1.03)' : undefined,
                           }}
                         >
                           <span style={{
