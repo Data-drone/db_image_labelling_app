@@ -103,11 +103,20 @@ def _get_user_email(request: Request) -> str:
 # ---------------------------------------------------------------------------
 _engine = None
 _session_factory = None
+_use_lakebase = False
 
 
 def get_db():
-    """Yield a database session."""
-    db = _session_factory()
+    """Yield a database session.
+
+    When using Lakebase, delegates to the lakebase module so the refresh
+    thread's engine swap is always picked up.
+    """
+    if _use_lakebase:
+        from .lakebase import get_session
+        db = get_session()
+    else:
+        db = _session_factory()
     try:
         yield db
     finally:
@@ -119,7 +128,7 @@ def get_db():
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 def startup():
-    global _engine, _session_factory
+    global _engine, _session_factory, _use_lakebase
 
     print("[STARTUP] Beginning app startup...", flush=True)
 
@@ -131,6 +140,7 @@ def startup():
             print("[STARTUP] Attempting Lakebase init...", flush=True)
             from .lakebase import init_lakebase
             _engine = init_lakebase()
+            _use_lakebase = True
             print("[STARTUP] Lakebase init succeeded", flush=True)
             log.info("Connected to Lakebase")
         except Exception as e:

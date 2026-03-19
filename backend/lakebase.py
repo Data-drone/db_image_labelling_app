@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 LAKEBASE_PROJECT_ID = os.environ.get("LAKEBASE_PROJECT_ID", "cv-explorer")
 LAKEBASE_DISPLAY_NAME = os.environ.get("LAKEBASE_DISPLAY_NAME", "CV Explorer")
-TOKEN_REFRESH_INTERVAL = 30 * 60  # 30 minutes
+TOKEN_REFRESH_INTERVAL = 20 * 60  # 20 minutes (tokens typically expire in ~1 hour)
 
 
 # ---------------------------------------------------------------------------
@@ -131,23 +131,42 @@ def _build_engine(connection_url: str) -> Engine:
 
 
 def _refresh_token_loop(endpoint, pg_username):
-    """Background thread that refreshes the database token periodically."""
+    """Background thread that refreshes the database token periodically.
+
+    Uses exponential backoff on failure (30s, 60s, 120s, max 5min) and
+    resets to normal interval after a successful refresh.
+    """
     global _engine, _current_connection_url, _session_factory
 
+    consecutive_failures = 0
+    MAX_BACKOFF = 5 * 60  # 5 minutes
+
     while True:
-        time.sleep(TOKEN_REFRESH_INTERVAL)
+        if consecutive_failures == 0:
+            time.sleep(TOKEN_REFRESH_INTERVAL)
+        else:
+            backoff = min(30 * (2 ** (consecutive_failures - 1)), MAX_BACKOFF)
+            log.warning("Lakebase token refresh retry in %ds (attempt %d)", backoff, consecutive_failures + 1)
+            time.sleep(backoff)
+
         try:
             new_url = generate_connection_string(endpoint, pg_username)
+            new_engine = _build_engine(new_url)
+            # Verify the new connection actually works before swapping
+            with new_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
             with _lock:
                 old_engine = _engine
-                _engine = _build_engine(new_url)
+                _engine = new_engine
                 _session_factory = sessionmaker(bind=_engine)
                 _current_connection_url = new_url
                 if old_engine:
                     old_engine.dispose()
+            consecutive_failures = 0
             log.info("Lakebase token refreshed successfully")
         except Exception:
-            log.exception("Failed to refresh Lakebase token, will retry")
+            consecutive_failures += 1
+            log.exception("Failed to refresh Lakebase token (attempt %d)", consecutive_failures)
 
 
 def setup_replica_identity(engine: Engine, table_names: list[str]):
