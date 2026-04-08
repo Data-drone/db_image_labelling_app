@@ -92,15 +92,15 @@ def get_endpoint(project):
 
 
 def _get_pg_username(endpoint) -> str:
-    """Determine the PostgreSQL username from the Lakebase role mapping."""
+    """Determine the PostgreSQL username by decoding the JWT credential.
+
+    We always derive the username from the generated token's 'sub' claim,
+    which correctly reflects the current service principal's identity
+    (rather than picking the first role from the list, which may belong
+    to a different SP).
+    """
     import base64, json
     w = _get_workspace_client()
-    # Get the branch from the endpoint name (e.g. projects/x/branches/y/endpoints/z -> projects/x/branches/y)
-    branch_name = "/".join(endpoint.name.split("/")[:4])
-    roles = list(w.postgres.list_roles(parent=branch_name))
-    if roles:
-        return roles[0].status.postgres_role
-    # Fallback: decode JWT sub claim from a generated credential
     cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
     parts = cred.token.split(".")
     payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
