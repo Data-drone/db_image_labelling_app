@@ -16,6 +16,23 @@ Built on **Lakebase** (managed PostgreSQL) for persistent storage with automatic
 - **Lakebase integration**: auto-provisioned PostgreSQL with token refresh and Lakehouse Sync to Delta
 - **Multi-user support**: user identity via Databricks SSO, per-user labeling stats
 
+## Demo
+
+### Project Creation
+Browse UC Volumes, select a task type, define your class list, and create a labeling project.
+
+![Project Creation](docs/media/project-creation.gif)
+
+### Classification Labeling
+Single-click labeling with keyboard shortcuts — press a number key to assign a class and auto-advance.
+
+![Classification Labeling](docs/media/classification-labeling.gif)
+
+### Detection Labeling
+Draw bounding boxes on images and assign classes. Navigate between samples to review and re-label.
+
+![Detection Labeling](docs/media/detection-labeling.gif)
+
 ## Architecture
 
 ```
@@ -71,10 +88,18 @@ cv-explorer/
 ├── start.py                        # Uvicorn entrypoint
 ├── requirements.txt                # Python dependencies
 ├── backend/
-│   ├── main.py                     # FastAPI app, all API endpoints
+│   ├── main.py                     # FastAPI app entry point + startup
 │   ├── models.py                   # SQLAlchemy models (Project, Sample, Annotation)
 │   ├── schemas.py                  # Pydantic request/response schemas
-│   └── lakebase.py                 # Lakebase auto-provisioning + token refresh
+│   ├── deps.py                     # Shared dependencies (DB session, workspace client)
+│   ├── lakebase.py                 # Lakebase auto-provisioning + token refresh
+│   ├── volumes.py                  # UC Volume helper functions
+│   └── routes/
+│       ├── projects.py             # Project CRUD endpoints
+│       ├── labeling.py             # Annotation + sample endpoints
+│       ├── export.py               # Dataset export to UC Volumes
+│       ├── browse.py               # Volume browsing endpoints
+│       └── admin.py                # Admin + Lakebase status endpoints
 ├── frontend/
 │   ├── src/
 │   │   ├── api/client.js           # Axios API client
