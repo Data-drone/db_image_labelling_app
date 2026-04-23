@@ -8,9 +8,13 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
 dist-ssr
 *.local
+
+# dist/ is intentionally tracked so Databricks Apps can deploy directly from Git
+# (package.json is nested under frontend/ so Databricks won't auto-run npm build).
+# Rebuild before committing when frontend source changes: `npm run build`
+
 
 # Editor directories and files
 .vscode/*
