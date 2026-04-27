@@ -46,6 +46,10 @@ export default function LabelingView() {
   const [activeClassIndex, setActiveClassIndex] = useState(0);
   const nextBoxId = useRef(0);
 
+  // Undo stack for detection box operations (max 20)
+  const undoStack = useRef([]);
+  const MAX_UNDO = 20;
+
   // Flash feedback for keyboard class selection
   const [flashIndex, setFlashIndex] = useState(null);
   const flashTimeout = useRef(null);
@@ -126,6 +130,7 @@ export default function LabelingView() {
         setBoxes([]);
       }
       setSelectedBoxId(null);
+      undoStack.current = [];
     } catch (err) {
       console.error('Failed to load sample:', err);
     } finally {
@@ -242,13 +247,18 @@ export default function LabelingView() {
   // Detection: box CRUD
   const handleBoxCreated = (rect) => {
     const id = `box-${nextBoxId.current++}`;
-    setBoxes(prev => [...prev, {
+    const newBox = {
       id,
       label: project.class_list[activeClassIndex] || '',
       classIndex: activeClassIndex,
       ...rect,
-    }]);
+    };
+    setBoxes(prev => [...prev, newBox]);
     setSelectedBoxId(id);
+    undoStack.current = [
+      ...undoStack.current.slice(-MAX_UNDO + 1),
+      { action: 'create', box: newBox },
+    ];
   };
 
   const handleBoxUpdated = (id, updates) => {
@@ -256,9 +266,41 @@ export default function LabelingView() {
   };
 
   const handleBoxDeleted = useCallback((id) => {
+    const box = boxes.find(b => b.id === id);
+    if (box) {
+      undoStack.current = [
+        ...undoStack.current.slice(-MAX_UNDO + 1),
+        { action: 'delete', box },
+      ];
+    }
     setBoxes(prev => prev.filter(b => b.id !== id));
     setSelectedBoxId(prev => prev === id ? null : prev);
+  }, [boxes]);
+
+  const handleUndo = useCallback(() => {
+    const entry = undoStack.current.pop();
+    if (!entry) return;
+    if (entry.action === 'create') {
+      setBoxes(prev => prev.filter(b => b.id !== entry.box.id));
+      setSelectedBoxId(prev => prev === entry.box.id ? null : prev);
+    } else if (entry.action === 'delete') {
+      setBoxes(prev => [...prev, entry.box]);
+      setSelectedBoxId(entry.box.id);
+    }
   }, []);
+
+  const cycleSelectedBox = useCallback((reverse) => {
+    if (boxes.length === 0) return;
+    if (!selectedBoxId) {
+      setSelectedBoxId(reverse ? boxes[boxes.length - 1].id : boxes[0].id);
+      return;
+    }
+    const idx = boxes.findIndex(b => b.id === selectedBoxId);
+    const next = reverse
+      ? (idx - 1 + boxes.length) % boxes.length
+      : (idx + 1) % boxes.length;
+    setSelectedBoxId(boxes[next].id);
+  }, [boxes, selectedBoxId]);
 
   // Detection: Save & Next
   const handleSaveBoxes = async () => {
@@ -286,6 +328,22 @@ export default function LabelingView() {
     const handler = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
+      const isMod = e.ctrlKey || e.metaKey;
+
+      // Ctrl/Cmd+Z (without Shift): undo last box operation (detection only)
+      if (isMod && e.key === 'z' && !e.shiftKey && isDetection) {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+
+      // [ / ]: cycle box selection (detection only)
+      if ((e.key === '[' || e.key === ']') && isDetection) {
+        e.preventDefault();
+        cycleSelectedBox(e.key === '[');
+        return;
+      }
+
       // Arrow keys: navigate samples
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
@@ -302,7 +360,6 @@ export default function LabelingView() {
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key) - 1;
         if (idx < project.class_list.length) {
-          // Flash feedback
           if (flashTimeout.current) clearTimeout(flashTimeout.current);
           setFlashIndex(idx);
           flashTimeout.current = setTimeout(() => setFlashIndex(null), 250);
@@ -315,6 +372,14 @@ export default function LabelingView() {
         }
         return;
       }
+
+      // N: jump to next unlabeled sample
+      if ((e.key === 'n' || e.key === 'N') && !isMod) {
+        e.preventDefault();
+        goNextUnlabeled();
+        return;
+      }
+
       if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         handleSkip();
@@ -331,7 +396,7 @@ export default function LabelingView() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList]);
+  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -374,6 +439,27 @@ export default function LabelingView() {
         <span className={`badge ${isDetection ? 'badge-yellow' : 'badge-blue'}`}>
           {project.task_type}
         </span>
+
+        {isDetection && project.class_list[activeClassIndex] && (
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.35rem',
+            fontSize: '0.8rem',
+            fontWeight: 600,
+            color: getClassColor(activeClassIndex),
+            padding: '0.2rem 0.6rem',
+            borderRadius: 6,
+            background: getClassColor(activeClassIndex) + '18',
+            border: `1.5px solid ${getClassColor(activeClassIndex)}50`,
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: getClassColor(activeClassIndex),
+            }} />
+            Active: {project.class_list[activeClassIndex]}
+          </span>
+        )}
 
         <div style={{ flex: 1 }} />
 
@@ -546,11 +632,15 @@ export default function LabelingView() {
                             display: 'flex',
                             alignItems: 'center',
                             gap: '0.5rem',
+                            borderLeft: i === activeClassIndex ? `4px solid ${getClassColor(i)}` : '4px solid transparent',
                             border: i === activeClassIndex ? `2px solid ${getClassColor(i)}` : undefined,
+                            borderLeftWidth: i === activeClassIndex ? 4 : 4,
+                            borderLeftColor: i === activeClassIndex ? getClassColor(i) : 'transparent',
                             background: i === flashIndex ? getClassColor(i) + '60'
                               : i === activeClassIndex ? getClassColor(i) + '20' : undefined,
-                            transition: 'background 0.15s ease-out',
+                            transition: 'background 0.15s ease-out, border-color 0.15s ease-out',
                             transform: i === flashIndex ? 'scale(1.03)' : undefined,
+                            fontWeight: i === activeClassIndex ? 600 : 400,
                           }}
                         >
                           <span style={{
@@ -678,9 +768,7 @@ export default function LabelingView() {
                     Skip (S)
                   </button>
 
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                    [1-{Math.min(9, project.class_list.length)}] class &middot; [S] skip &middot; [Enter] save &middot; [Del] remove &middot; [&larr;&rarr;] nav &middot; [Esc] back
-                  </div>
+                  <KeyboardShortcutLegend maxClassKey={Math.min(9, project.class_list.length)} />
                 </>
               ) : (
                 /* ===== CLASSIFICATION MODE ===== */
@@ -778,6 +866,62 @@ export default function LabelingView() {
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+const kbdStyle = {
+  display: 'inline-block',
+  padding: '1px 5px',
+  borderRadius: 3,
+  background: 'var(--bg-secondary, #2a2a2a)',
+  border: '1px solid var(--border-color, #444)',
+  fontSize: '0.65rem',
+  fontFamily: 'ui-monospace, monospace',
+  fontWeight: 600,
+  lineHeight: '1.4',
+  color: 'var(--text-primary)',
+  minWidth: 18,
+  textAlign: 'center',
+};
+
+function KeyboardShortcutLegend({ maxClassKey }) {
+  const shortcuts = [
+    { keys: [`1-${maxClassKey}`], desc: 'Select class' },
+    { keys: ['Enter'], desc: 'Save & next' },
+    { keys: ['Del'], desc: 'Delete box' },
+    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
+    { keys: [']'], desc: 'Next box' },
+    { keys: ['['], desc: 'Prev box' },
+    { keys: ['N'], desc: 'Next unlabeled' },
+    { keys: ['S'], desc: 'Skip' },
+    { keys: ['\u2190 \u2192'], desc: 'Navigate' },
+    { keys: ['Esc'], desc: 'Deselect / Back' },
+  ];
+
+  return (
+    <div style={{
+      borderTop: '1px solid var(--border-color)',
+      paddingTop: '0.5rem',
+    }}>
+      <div style={{
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        color: 'var(--text-secondary)',
+        marginBottom: '0.35rem',
+      }}>
+        Shortcuts
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+        {shortcuts.map(({ keys, desc }) => (
+          <div key={desc} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem' }}>
+            <span style={{ display: 'flex', gap: 2 }}>
+              {keys.map(k => <kbd key={k} style={kbdStyle}>{k}</kbd>)}
+            </span>
+            <span style={{ color: 'var(--text-muted)' }}>{desc}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
