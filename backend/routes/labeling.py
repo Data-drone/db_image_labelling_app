@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
 from ..models import ProjectSample, Annotation
@@ -175,18 +175,44 @@ def list_project_samples(
     page: int = Query(0, ge=0),
     page_size: int = Query(24, ge=1, le=10000),
     status: Optional[str] = None,
+    label: Optional[str] = None,
+    filename: Optional[str] = None,
+    labeler: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Paginated sample list with optional status filter."""
+    """Paginated sample list with optional filters (AND logic)."""
     query = db.query(ProjectSample).filter(ProjectSample.project_id == project_id)
+
     if status:
         query = query.filter(ProjectSample.status == status)
+    if filename:
+        escaped = filename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(ProjectSample.filename.ilike(f"%{escaped}%", escape="\\"))
+
+    needs_join = label or labeler
+    if needs_join:
+        query = query.join(Annotation, Annotation.sample_id == ProjectSample.id)
+        if label:
+            query = query.filter(Annotation.label == label)
+        if labeler:
+            query = query.filter(Annotation.created_by == labeler)
+        query = query.distinct()
+
+    if needs_join:
+        query = query.options(subqueryload(ProjectSample.annotations))
+    else:
+        query = query.options(joinedload(ProjectSample.annotations))
 
     total = query.count()
     items = query.order_by(ProjectSample.id).offset(page * page_size).limit(page_size).all()
 
+    def to_out(s):
+        out = SampleOut.model_validate(s)
+        out.labels = list({a.label for a in s.annotations})
+        return out
+
     return SamplePage(
-        items=[SampleOut.model_validate(s) for s in items],
+        items=[to_out(s) for s in items],
         total=total, page=page, page_size=page_size,
     )
 

@@ -85,6 +85,7 @@ class SampleOut(BaseModel):
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
     annotations: list["AnnotationOut"] = []
+    labels: list[str] = []
 
     model_config = {"from_attributes": True}
 
