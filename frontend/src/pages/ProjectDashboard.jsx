@@ -2,7 +2,7 @@
  * Project Dashboard — per-project stats, progress, and per-user breakdown.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { fetchProject, fetchProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
 import Spinner from '../components/Spinner';
@@ -29,11 +29,24 @@ export default function ProjectDashboard() {
 
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
-
   const [galleryTotal, setGalleryTotal] = useState(0);
   const [galleryPage, setGalleryPage] = useState(0);
-  const [galleryFilter, setGalleryFilter] = useState(''); // '' = all, 'labeled', 'unlabeled', 'skipped'
+  const [galleryFilter, setGalleryFilter] = useState('');
+  const [filterLabel, setFilterLabel] = useState('');
+  const [filterLabeler, setFilterLabeler] = useState('');
+  const [filterFilename, setFilterFilename] = useState('');
+  const [filenameInput, setFilenameInput] = useState('');
   const galleryPageSize = 24;
+  const debounceRef = useRef(null);
+
+  const onFilenameInputChange = useCallback((value) => {
+    setFilenameInput(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      setFilterFilename(value);
+      setGalleryPage(0);
+    }, 300);
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -93,13 +106,16 @@ export default function ProjectDashboard() {
     if (!project) return;
     const params = { page: galleryPage, page_size: galleryPageSize };
     if (galleryFilter) params.status = galleryFilter;
+    if (filterLabel) params.label = filterLabel;
+    if (filterLabeler) params.labeler = filterLabeler;
+    if (filterFilename) params.filename = filterFilename;
     fetchSamples(projectId, params)
       .then((page) => {
         setGallerySamples(page.items);
         setGalleryTotal(page.total);
       })
       .catch(console.error);
-  }, [project, projectId, galleryPage, galleryFilter]);
+  }, [project, projectId, galleryPage, galleryFilter, filterLabel, filterLabeler, filterFilename]);
 
   const galleryTotalPages = Math.ceil(galleryTotal / galleryPageSize);
 
@@ -420,6 +436,78 @@ export default function ProjectDashboard() {
               </div>
             </div>
 
+            {/* Search & filter bar */}
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: '0.5rem',
+              alignItems: 'center', marginBottom: '0.75rem',
+            }}>
+              <input
+                type="text"
+                value={filenameInput}
+                onChange={(e) => onFilenameInputChange(e.target.value)}
+                placeholder="Search filename..."
+                style={{
+                  flex: '1 1 160px', minWidth: 120,
+                  padding: '0.35rem 0.6rem',
+                  background: 'var(--bg-input)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 4,
+                  fontSize: '0.8rem',
+                }}
+              />
+              <select
+                value={filterLabel}
+                onChange={(e) => { setFilterLabel(e.target.value); setGalleryPage(0); }}
+                style={{
+                  padding: '0.35rem 0.6rem',
+                  background: 'var(--bg-input)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 4,
+                  fontSize: '0.8rem',
+                }}
+              >
+                <option value="">All labels</option>
+                {(project.class_list || []).map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <select
+                value={filterLabeler}
+                onChange={(e) => { setFilterLabeler(e.target.value); setGalleryPage(0); }}
+                style={{
+                  padding: '0.35rem 0.6rem',
+                  background: 'var(--bg-input)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 4,
+                  fontSize: '0.8rem',
+                }}
+              >
+                <option value="">All labelers</option>
+                {(stats?.per_user || []).map((u) => (
+                  <option key={u.user} value={u.user}>{u.user}</option>
+                ))}
+              </select>
+              {(filterLabel || filterLabeler || filterFilename || galleryFilter) && (
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    setGalleryFilter('');
+                    setFilterLabel('');
+                    setFilterLabeler('');
+                    setFilterFilename('');
+                    setFilenameInput('');
+                    setGalleryPage(0);
+                  }}
+                  style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+
             {gallerySamples.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
                 No samples found
@@ -472,15 +560,35 @@ export default function ProjectDashboard() {
                         {s.status}
                       </span>
                     </div>
-                    <div style={{
-                      padding: '0.3rem 0.4rem',
-                      fontSize: '0.65rem',
-                      color: 'var(--text-secondary)',
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}>
-                      {s.filename}
+                    <div style={{ padding: '0.3rem 0.4rem' }}>
+                      <div style={{
+                        fontSize: '0.65rem',
+                        color: 'var(--text-secondary)',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}>
+                        {s.filename}
+                      </div>
+                      {s.labels && s.labels.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.15rem', marginTop: '0.2rem' }}>
+                          {s.labels.map((lbl) => (
+                            <span
+                              key={lbl}
+                              style={{
+                                padding: '0.05rem 0.3rem',
+                                borderRadius: 3,
+                                fontSize: '0.55rem',
+                                fontWeight: 600,
+                                background: 'rgba(59,130,246,0.15)',
+                                color: 'var(--accent-blue)',
+                              }}
+                            >
+                              {lbl}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
