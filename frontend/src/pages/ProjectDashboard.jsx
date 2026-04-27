@@ -484,7 +484,7 @@ export default function ProjectDashboard() {
                       Avg. Daily Rate (7d)
                     </div>
                     <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--accent-blue)' }}>
-                      ~{detailedStats.avg_daily_rate} labels/day
+                      ~{detailedStats.avg_daily_rate} samples/day
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>

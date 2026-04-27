@@ -2,10 +2,11 @@
 Project CRUD routes.
 """
 
+import math
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func
+from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
@@ -294,10 +295,13 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
         for cls in (p.class_list or [])
     ]
 
-    # Daily velocity — last 30 days (func.date works on both Postgres and SQLite)
+    # Daily velocity — last 30 days, counting distinct samples per day
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     vel_rows = (
-        db.query(func.date(Annotation.created_at), func.count(Annotation.id))
+        db.query(
+            func.date(Annotation.created_at).label("day"),
+            func.count(distinct(Annotation.sample_id)).label("cnt"),
+        )
         .filter(
             Annotation.project_id == project_id,
             Annotation.created_at >= cutoff,
@@ -307,7 +311,7 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
         .all()
     )
     daily_velocity = [
-        DailyVelocity(date=str(row[0]), count=row[1])
+        DailyVelocity(date=str(row.day), count=row.cnt)
         for row in vel_rows
     ]
 
@@ -337,22 +341,31 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
         if user and user not in seen_users:
             per_user.append({"user": user, "labeled": 0, "skipped": count})
 
-    # Average daily rate (last 7 days) and estimated completion
+    # Average daily rate (last 7 days) — count distinct samples, not annotation rows
     week_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     week_count = (
-        db.query(func.count(Annotation.id))
+        db.query(func.count(distinct(Annotation.sample_id)))
         .filter(
             Annotation.project_id == project_id,
             Annotation.created_at >= week_cutoff,
         )
         .scalar()
     ) or 0
-    avg_daily_rate = round(week_count / 7.0, 1)
+
+    first_ann = (
+        db.query(func.min(Annotation.created_at))
+        .filter(Annotation.project_id == project_id)
+        .scalar()
+    )
+    days_active = 7
+    if first_ann is not None:
+        days_active = max(1, min(7, (date.today() - first_ann.date()).days))
+    avg_daily_rate = round(week_count / days_active, 1) if week_count else 0.0
 
     estimated_completion_date = None
     if avg_daily_rate > 0 and unlabeled > 0:
         days_remaining = unlabeled / avg_daily_rate
-        est = date.today() + timedelta(days=int(days_remaining) + 1)
+        est = date.today() + timedelta(days=math.ceil(days_remaining))
         estimated_completion_date = est.isoformat()
 
     return DetailedProjectStats(
