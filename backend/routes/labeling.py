@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
 from ..models import ProjectSample, Annotation
@@ -186,7 +186,8 @@ def list_project_samples(
     if status:
         query = query.filter(ProjectSample.status == status)
     if filename:
-        query = query.filter(ProjectSample.filename.ilike(f"%{filename}%"))
+        escaped = filename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(ProjectSample.filename.ilike(f"%{escaped}%", escape="\\"))
 
     needs_join = label or labeler
     if needs_join:
@@ -196,6 +197,11 @@ def list_project_samples(
         if labeler:
             query = query.filter(Annotation.created_by == labeler)
         query = query.distinct()
+
+    if needs_join:
+        query = query.options(subqueryload(ProjectSample.annotations))
+    else:
+        query = query.options(joinedload(ProjectSample.annotations))
 
     total = query.count()
     items = query.order_by(ProjectSample.id).offset(page * page_size).limit(page_size).all()

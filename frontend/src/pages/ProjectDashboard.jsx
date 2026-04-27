@@ -49,6 +49,12 @@ export default function ProjectDashboard() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
     Promise.all([
       fetchProject(projectId),
       fetchProjectStats(projectId),
