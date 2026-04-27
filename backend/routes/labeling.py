@@ -81,7 +81,7 @@ def annotate_sample(
 
     existing = (
         db.query(Annotation)
-        .filter_by(sample_id=sample_id, project_id=project_id)
+        .filter_by(sample_id=sample_id, project_id=project_id, ann_type="classification")
         .all()
     )
 
@@ -100,7 +100,7 @@ def annotate_sample(
                 changed_by=user_email,
             ))
         db.query(Annotation).filter_by(
-            sample_id=sample_id, project_id=project_id
+            sample_id=sample_id, project_id=project_id, ann_type="classification"
         ).delete()
     else:
         db.add(AnnotationHistory(

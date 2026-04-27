@@ -148,12 +148,19 @@ export default function LabelingView() {
   // Load history when sample changes or panel is opened
   const loadHistory = useCallback(async () => {
     if (!sample) return;
+    const requestedId = sample.id;
     setHistoryLoading(true);
     try {
-      const h = await fetchSampleHistory(projectId, sample.id);
-      setHistory(h);
+      const h = await fetchSampleHistory(projectId, requestedId);
+      setSample(cur => {
+        if (cur?.id === requestedId) setHistory(h);
+        return cur;
+      });
     } catch {
-      setHistory([]);
+      setSample(cur => {
+        if (cur?.id === requestedId) setHistory([]);
+        return cur;
+      });
     } finally {
       setHistoryLoading(false);
     }

@@ -90,8 +90,8 @@ class AnnotationHistory(Base):
     __tablename__ = "annotation_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    sample_id = Column(Integer, ForeignKey("project_samples.id"), nullable=False)
-    project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
+    sample_id = Column(Integer, ForeignKey("project_samples.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id", ondelete="CASCADE"), nullable=False)
     action = Column(String(50), nullable=False)  # 'create', 'update', 'delete'
     old_label = Column(String(255), nullable=True)
     new_label = Column(String(255), nullable=True)
