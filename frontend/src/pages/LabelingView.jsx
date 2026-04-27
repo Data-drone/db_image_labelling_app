@@ -15,7 +15,6 @@ import {
   fetchSamples,
   fetchSample,
   fetchNextSample,
-  annotateSample,
   annotateSampleBatch,
   skipSample,
   sampleImageUrl,
@@ -49,6 +48,9 @@ export default function LabelingView() {
   // Undo stack for detection box operations (max 20)
   const undoStack = useRef([]);
   const MAX_UNDO = 20;
+
+  // Multi-label classification state
+  const [selectedLabels, setSelectedLabels] = useState(new Set());
 
   // Flash feedback for keyboard class selection
   const [flashIndex, setFlashIndex] = useState(null);
@@ -115,7 +117,7 @@ export default function LabelingView() {
       const s = await fetchSample(projectId, sampleList[idx].id);
       setSample(s);
 
-      // Load existing annotations for detection re-labeling
+      // Load existing annotations for re-labeling
       if (s.annotations && s.annotations.length > 0) {
         const existingBoxes = s.annotations
           .filter(a => a.ann_type === 'bbox' && a.bbox_json)
@@ -126,8 +128,16 @@ export default function LabelingView() {
             ...a.bbox_json,
           }));
         setBoxes(existingBoxes);
+
+        const existingLabels = new Set(
+          s.annotations
+            .filter(a => a.ann_type === 'classification')
+            .map(a => a.label)
+        );
+        setSelectedLabels(existingLabels);
       } else {
         setBoxes([]);
+        setSelectedLabels(new Set());
       }
       setSelectedBoxId(null);
       undoStack.current = [];
@@ -167,19 +177,17 @@ export default function LabelingView() {
   };
 
   // After annotating, update local sample list status and advance
-  const markCurrentAndAdvance = () => {
+  const markCurrentAndAdvance = useCallback(() => {
     setSampleList(prev => prev.map((s, i) =>
       i === currentIndex ? { ...s, status: 'labeled' } : s
     ));
     loadStats();
-    // Go to next unlabeled
     const nextUnlabeled = sampleList.findIndex((s, i) =>
       i > currentIndex && s.status === 'unlabeled'
     );
     if (nextUnlabeled >= 0) {
       goTo(nextUnlabeled);
     } else {
-      // Wrap around
       const wrapped = sampleList.findIndex(s => s.status === 'unlabeled');
       if (wrapped >= 0 && wrapped !== currentIndex) {
         goTo(wrapped);
@@ -187,24 +195,35 @@ export default function LabelingView() {
         goTo(currentIndex + 1);
       }
     }
-  };
+  }, [currentIndex, sampleList, loadStats]);
 
-  // Classify (classification mode)
-  const handleClassify = async (label) => {
-    if (!sample || saving) return;
+  // Multi-label classification: toggle a label on/off
+  const toggleLabel = useCallback((label) => {
+    setSelectedLabels(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }, []);
+
+  // Multi-label classification: save all selected labels and advance
+  const handleSaveClassification = useCallback(async () => {
+    if (!sample || saving || selectedLabels.size === 0) return;
     setSaving(true);
     try {
-      await annotateSample(projectId, sample.id, {
+      const annotations = [...selectedLabels].map(label => ({
         label,
         ann_type: 'classification',
-      });
+      }));
+      await annotateSampleBatch(projectId, sample.id, annotations);
       markCurrentAndAdvance();
     } catch (err) {
       console.error('Annotation failed:', err);
     } finally {
       setSaving(false);
     }
-  };
+  }, [sample, saving, selectedLabels, projectId, markCurrentAndAdvance]);
 
   // Skip
   const handleSkip = async () => {
@@ -356,7 +375,7 @@ export default function LabelingView() {
         return;
       }
 
-      // Number keys 1-9: class selection
+      // Number keys 1-9: class selection (detection) or label toggle (classification)
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key) - 1;
         if (idx < project.class_list.length) {
@@ -367,7 +386,7 @@ export default function LabelingView() {
           if (isDetection) {
             setActiveClassIndex(idx);
           } else {
-            handleClassify(project.class_list[idx]);
+            toggleLabel(project.class_list[idx]);
           }
         }
         return;
@@ -383,9 +402,13 @@ export default function LabelingView() {
       if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         handleSkip();
-      } else if (e.key === 'Enter' && isDetection) {
+      } else if (e.key === 'Enter') {
         e.preventDefault();
-        handleSaveBoxes();
+        if (isDetection) {
+          handleSaveBoxes();
+        } else {
+          handleSaveClassification();
+        }
       } else if (e.key === 'Escape') {
         if (isDetection && selectedBoxId) {
           setSelectedBoxId(null);
@@ -396,7 +419,7 @@ export default function LabelingView() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox]);
+  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels, handleSaveClassification, toggleLabel]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -771,49 +794,62 @@ export default function LabelingView() {
                   <KeyboardShortcutLegend maxClassKey={Math.min(9, project.class_list.length)} />
                 </>
               ) : (
-                /* ===== CLASSIFICATION MODE ===== */
+                /* ===== CLASSIFICATION MODE (multi-label) ===== */
                 <>
-                  <div style={{ flex: 1, overflowY: 'auto' }}>
-                    <h4 style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>
-                      Classify as:
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <h4 style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--text-secondary)' }}>
+                      Select labels:
                     </h4>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                      {selectedLabels.size} of {project.class_list.length} selected
+                    </span>
+                  </div>
+                  <div style={{ flex: 1, overflowY: 'auto' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-                      {project.class_list.map((cls, i) => (
-                        <button
-                          key={cls}
-                          className="btn-secondary"
-                          onClick={() => handleClassify(cls)}
-                          disabled={saving}
-                          style={{
-                            textAlign: 'left',
-                            fontSize: '0.85rem',
-                            padding: '0.5rem 0.75rem',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5rem',
-                            background: i === flashIndex ? 'rgba(66, 153, 224, 0.35)' : undefined,
-                            transition: 'background 0.15s ease-out',
-                            transform: i === flashIndex ? 'scale(1.03)' : undefined,
-                          }}
-                        >
-                          <span style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: 22,
-                            height: 22,
-                            borderRadius: 4,
-                            background: 'rgba(66, 153, 224, 0.2)',
-                            color: 'var(--accent-blue)',
-                            fontSize: '0.75rem',
-                            fontWeight: 700,
-                            flexShrink: 0,
-                          }}>
-                            {i + 1}
-                          </span>
-                          {cls}
-                        </button>
-                      ))}
+                      {project.class_list.map((cls, i) => {
+                        const isSelected = selectedLabels.has(cls);
+                        return (
+                          <button
+                            key={cls}
+                            className="btn-secondary"
+                            onClick={() => toggleLabel(cls)}
+                            disabled={saving}
+                            style={{
+                              textAlign: 'left',
+                              fontSize: '0.85rem',
+                              padding: '0.5rem 0.75rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.5rem',
+                              border: isSelected ? '2px solid var(--accent-blue)' : undefined,
+                              background: i === flashIndex
+                                ? 'rgba(66, 153, 224, 0.35)'
+                                : isSelected
+                                  ? 'rgba(66, 153, 224, 0.15)'
+                                  : undefined,
+                              transition: 'background 0.15s ease-out',
+                              transform: i === flashIndex ? 'scale(1.03)' : undefined,
+                            }}
+                          >
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              width: 22,
+                              height: 22,
+                              borderRadius: 4,
+                              background: isSelected ? 'var(--accent-blue)' : 'rgba(66, 153, 224, 0.2)',
+                              color: isSelected ? '#fff' : 'var(--accent-blue)',
+                              fontSize: '0.75rem',
+                              fontWeight: 700,
+                              flexShrink: 0,
+                            }}>
+                              {isSelected ? '\u2713' : i + 1}
+                            </span>
+                            {cls}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -848,7 +884,26 @@ export default function LabelingView() {
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0 0.75rem' }} />
 
-                  {/* Skip + shortcuts */}
+                  {/* Save & Next + Skip */}
+                  <button
+                    className="btn-primary"
+                    onClick={handleSaveClassification}
+                    disabled={saving || selectedLabels.size === 0}
+                    style={{ width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem' }}
+                  >
+                    {saving
+                      ? 'Saving...'
+                      : selectedLabels.size === 0
+                        ? 'Save & Next'
+                        : (() => {
+                            const labels = [...selectedLabels];
+                            const summary = labels.length <= 2
+                              ? labels.join(', ')
+                              : `${labels.slice(0, 2).join(', ')}, +${labels.length - 2} more`;
+                            return `Save & Next (${summary})`;
+                          })()}
+                  </button>
+
                   <button
                     className="btn-secondary"
                     onClick={handleSkip}
@@ -859,7 +914,7 @@ export default function LabelingView() {
                   </button>
 
                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                    [1-{Math.min(9, project.class_list.length)}] label &middot; [S] skip &middot; [&larr;&rarr;] nav &middot; [Esc] back
+                    [1-{Math.min(9, project.class_list.length)}] toggle &middot; [Enter] save &middot; [S] skip &middot; [&larr;&rarr;] nav &middot; [Esc] back
                   </div>
                 </>
               )}
