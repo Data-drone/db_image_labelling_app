@@ -51,6 +51,28 @@ class ProjectStats(BaseModel):
     per_user: list[dict]  # [{"user": "...", "labeled": N, "skipped": N}]
 
 
+class ClassCount(BaseModel):
+    label: str
+    count: int
+
+
+class DailyVelocity(BaseModel):
+    date: str
+    count: int
+
+
+class DetailedProjectStats(BaseModel):
+    total: int
+    labeled: int
+    unlabeled: int
+    skipped: int
+    per_class: list[ClassCount]
+    daily_velocity: list[DailyVelocity]
+    per_user: list[dict]
+    avg_daily_rate: float
+    estimated_completion_date: Optional[str]
+
+
 # ---------------------------------------------------------------------------
 # Sample
 # ---------------------------------------------------------------------------
