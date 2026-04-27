@@ -266,18 +266,16 @@ export default function LabelingView() {
   };
 
   const handleBoxDeleted = useCallback((id) => {
-    setBoxes(prev => {
-      const box = prev.find(b => b.id === id);
-      if (box) {
-        undoStack.current = [
-          ...undoStack.current.slice(-MAX_UNDO + 1),
-          { action: 'delete', box },
-        ];
-      }
-      return prev.filter(b => b.id !== id);
-    });
+    const box = boxes.find(b => b.id === id);
+    if (box) {
+      undoStack.current = [
+        ...undoStack.current.slice(-MAX_UNDO + 1),
+        { action: 'delete', box },
+      ];
+    }
+    setBoxes(prev => prev.filter(b => b.id !== id));
     setSelectedBoxId(prev => prev === id ? null : prev);
-  }, []);
+  }, [boxes]);
 
   const handleUndo = useCallback(() => {
     const entry = undoStack.current.pop();
@@ -332,17 +330,17 @@ export default function LabelingView() {
 
       const isMod = e.ctrlKey || e.metaKey;
 
-      // Ctrl/Cmd+Z: undo last box operation (detection only)
-      if (isMod && e.key === 'z' && isDetection) {
+      // Ctrl/Cmd+Z (without Shift): undo last box operation (detection only)
+      if (isMod && e.key === 'z' && !e.shiftKey && isDetection) {
         e.preventDefault();
         handleUndo();
         return;
       }
 
-      // Tab / Shift+Tab: cycle box selection (detection only)
-      if (e.key === 'Tab' && isDetection) {
+      // [ / ]: cycle box selection (detection only)
+      if ((e.key === '[' || e.key === ']') && isDetection) {
         e.preventDefault();
-        cycleSelectedBox(e.shiftKey);
+        cycleSelectedBox(e.key === '[');
         return;
       }
 
@@ -894,8 +892,8 @@ function KeyboardShortcutLegend({ maxClassKey }) {
     { keys: ['Enter'], desc: 'Save & next' },
     { keys: ['Del'], desc: 'Delete box' },
     { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
-    { keys: ['Tab'], desc: 'Next box' },
-    { keys: ['Shift', 'Tab'], desc: 'Prev box' },
+    { keys: [']'], desc: 'Next box' },
+    { keys: ['['], desc: 'Prev box' },
     { keys: ['N'], desc: 'Next unlabeled' },
     { keys: ['S'], desc: 'Skip' },
     { keys: ['\u2190 \u2192'], desc: 'Navigate' },
