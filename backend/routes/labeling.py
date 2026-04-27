@@ -11,10 +11,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
-from ..models import ProjectSample, Annotation
+from ..models import ProjectSample, Annotation, AnnotationHistory
 from ..schemas import (
     SampleOut, SamplePage,
     AnnotationCreate, AnnotationBatchCreate, AnnotationOut,
+    AnnotationHistoryOut,
 )
 from ..volumes import read_image_bytes
 
@@ -67,12 +68,54 @@ def annotate_sample(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Save an annotation and mark the sample as labeled."""
+    """Save an annotation and mark the sample as labeled.
+
+    For classification, replaces the existing annotation (if any) so
+    re-labeling works naturally.  History is recorded for every change.
+    """
     sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
 
     user_email = get_user_email(request)
+
+    existing = (
+        db.query(Annotation)
+        .filter_by(sample_id=sample_id, project_id=project_id, ann_type="classification")
+        .all()
+    )
+
+    if existing:
+        for old in existing:
+            db.add(AnnotationHistory(
+                sample_id=sample_id,
+                project_id=project_id,
+                action="update",
+                old_label=old.label,
+                new_label=payload.label,
+                old_ann_type=old.ann_type,
+                new_ann_type=payload.ann_type,
+                old_bbox_json=old.bbox_json,
+                new_bbox_json=payload.bbox_json,
+                changed_by=user_email,
+            ))
+        db.query(Annotation).filter_by(
+            sample_id=sample_id, project_id=project_id, ann_type="classification"
+        ).delete()
+    else:
+        db.add(AnnotationHistory(
+            sample_id=sample_id,
+            project_id=project_id,
+            action="create",
+            old_label=None,
+            new_label=payload.label,
+            old_ann_type=None,
+            new_ann_type=payload.ann_type,
+            old_bbox_json=None,
+            new_bbox_json=payload.bbox_json,
+            changed_by=user_email,
+        ))
+
     ann = Annotation(
         sample_id=sample_id,
         project_id=project_id,
@@ -111,11 +154,43 @@ def annotate_sample_batch(
     if not payload.annotations:
         raise HTTPException(status_code=400, detail="At least one annotation is required.")
 
-    db.query(Annotation).filter_by(sample_id=sample_id, project_id=project_id).delete()
-
     user_email = get_user_email(request)
+
+    old_annotations = (
+        db.query(Annotation)
+        .filter_by(sample_id=sample_id, project_id=project_id)
+        .all()
+    )
+    if old_annotations:
+        for old in old_annotations:
+            db.add(AnnotationHistory(
+                sample_id=sample_id,
+                project_id=project_id,
+                action="delete",
+                old_label=old.label,
+                new_label=None,
+                old_ann_type=old.ann_type,
+                new_ann_type=None,
+                old_bbox_json=old.bbox_json,
+                new_bbox_json=None,
+                changed_by=user_email,
+            ))
+        db.query(Annotation).filter_by(sample_id=sample_id, project_id=project_id).delete()
+
     created = []
     for ann in payload.annotations:
+        db.add(AnnotationHistory(
+            sample_id=sample_id,
+            project_id=project_id,
+            action="create",
+            old_label=None,
+            new_label=ann.label,
+            old_ann_type=None,
+            new_ann_type=ann.ann_type,
+            old_bbox_json=None,
+            new_bbox_json=ann.bbox_json,
+            changed_by=user_email,
+        ))
         a = Annotation(
             sample_id=sample_id,
             project_id=project_id,
@@ -154,6 +229,25 @@ def skip_sample(
     sample.locked_at = None
     db.commit()
     return {"detail": "Skipped."}
+
+
+@router.get(
+    "/samples/{sample_id}/history",
+    response_model=list[AnnotationHistoryOut],
+)
+def get_sample_history(
+    project_id: int,
+    sample_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return annotation history for a sample, newest first."""
+    rows = (
+        db.query(AnnotationHistory)
+        .filter_by(sample_id=sample_id, project_id=project_id)
+        .order_by(AnnotationHistory.changed_at.desc())
+        .all()
+    )
+    return [AnnotationHistoryOut.model_validate(r) for r in rows]
 
 
 @router.get("/samples/{sample_id}", response_model=SampleOut)

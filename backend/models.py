@@ -86,10 +86,32 @@ class Annotation(Base):
     )
 
 
+class AnnotationHistory(Base):
+    __tablename__ = "annotation_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sample_id = Column(Integer, ForeignKey("project_samples.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id", ondelete="CASCADE"), nullable=False)
+    action = Column(String(50), nullable=False)  # 'create', 'update', 'delete'
+    old_label = Column(String(255), nullable=True)
+    new_label = Column(String(255), nullable=True)
+    old_ann_type = Column(String(50), nullable=True)
+    new_ann_type = Column(String(50), nullable=True)
+    old_bbox_json = Column(JSON, nullable=True)
+    new_bbox_json = Column(JSON, nullable=True)
+    changed_by = Column(String(255), default="")
+    changed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_annotation_history_sample", "sample_id"),
+        Index("ix_annotation_history_project", "project_id"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Table management
 # ---------------------------------------------------------------------------
-TABLE_NAMES = ["labeling_projects", "project_samples", "annotations"]
+TABLE_NAMES = ["labeling_projects", "project_samples", "annotations", "annotation_history"]
 
 
 def init_db(engine):

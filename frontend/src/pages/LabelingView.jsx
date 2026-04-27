@@ -19,6 +19,7 @@ import {
   skipSample,
   sampleImageUrl,
   addProjectClass,
+  fetchSampleHistory,
 } from '../api/client';
 
 export default function LabelingView() {
@@ -55,6 +56,11 @@ export default function LabelingView() {
   // Flash feedback for keyboard class selection
   const [flashIndex, setFlashIndex] = useState(null);
   const flashTimeout = useRef(null);
+
+  // History panel
+  const [history, setHistory] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const isDetection = project?.task_type === 'detection';
   const total = sampleList.length;
@@ -154,6 +160,33 @@ export default function LabelingView() {
     }
   }, [currentIndex, loadSampleAtIndex]);
 
+  // Load history when sample changes or panel is opened
+  const loadHistory = useCallback(async () => {
+    if (!sample) return;
+    const requestedId = sample.id;
+    setHistoryLoading(true);
+    try {
+      const h = await fetchSampleHistory(projectId, requestedId);
+      setSample(cur => {
+        if (cur?.id === requestedId) setHistory(h);
+        return cur;
+      });
+    } catch {
+      setSample(cur => {
+        if (cur?.id === requestedId) setHistory([]);
+        return cur;
+      });
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [projectId, sample]);
+
+  useEffect(() => {
+    if (historyOpen && sample) {
+      loadHistory();
+    }
+  }, [historyOpen, sample, loadHistory]);
+
   // Navigation
   const goTo = (idx) => {
     if (idx >= 0 && idx < sampleList.length && idx !== currentIndex) {
@@ -182,6 +215,8 @@ export default function LabelingView() {
       i === currentIndex ? { ...s, status: 'labeled' } : s
     ));
     loadStats();
+    if (historyOpen) loadHistory();
+    // Go to next unlabeled
     const nextUnlabeled = sampleList.findIndex((s, i) =>
       i > currentIndex && s.status === 'unlabeled'
     );
@@ -195,7 +230,7 @@ export default function LabelingView() {
         goTo(currentIndex + 1);
       }
     }
-  }, [currentIndex, sampleList, loadStats]);
+  }, [currentIndex, sampleList, loadStats, historyOpen, loadHistory]);
 
   // Multi-label classification: toggle a label on/off
   const toggleLabel = useCallback((label) => {
@@ -533,6 +568,19 @@ export default function LabelingView() {
             : 'badge-muted'
           }`} style={{ fontSize: '0.7rem' }}>
             {currentStatus}
+          </span>
+        )}
+        {currentStatus === 'labeled' && (
+          <span style={{
+            fontSize: '0.7rem',
+            color: '#f59e0b',
+            fontWeight: 600,
+            padding: '0.15rem 0.4rem',
+            borderRadius: 4,
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+          }}>
+            Re-labeling
           </span>
         )}
 
@@ -918,6 +966,90 @@ export default function LabelingView() {
                   </div>
                 </>
               )}
+
+              {/* History panel */}
+              <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '0.75rem', paddingTop: '0.5rem' }}>
+                <button
+                  onClick={() => setHistoryOpen(prev => !prev)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    padding: '0.25rem 0',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    width: '100%',
+                  }}
+                >
+                  <span style={{
+                    display: 'inline-block',
+                    transition: 'transform 0.15s',
+                    transform: historyOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                    fontSize: '0.7rem',
+                  }}>&#x25B6;</span>
+                  History
+                </button>
+                {historyOpen && (
+                  <div style={{ marginTop: '0.4rem', maxHeight: 180, overflowY: 'auto' }}>
+                    {historyLoading ? (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading...</div>
+                    ) : history.length === 0 ? (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No history yet</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                        {history.map((h) => (
+                          <div
+                            key={h.id}
+                            style={{
+                              fontSize: '0.72rem',
+                              padding: '0.35rem 0.5rem',
+                              borderRadius: 4,
+                              background: 'var(--bg-secondary)',
+                              border: '1px solid var(--border-color)',
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.15rem' }}>
+                              <span style={{
+                                fontWeight: 600,
+                                color: h.action === 'create' ? '#22c55e'
+                                  : h.action === 'update' ? '#f59e0b'
+                                  : '#ef4444',
+                                textTransform: 'uppercase',
+                                fontSize: '0.65rem',
+                              }}>
+                                {h.action}
+                              </span>
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem' }}>
+                                {new Date(h.changed_at).toLocaleString(undefined, {
+                                  month: 'short', day: 'numeric',
+                                  hour: '2-digit', minute: '2-digit',
+                                })}
+                              </span>
+                            </div>
+                            <div style={{ color: 'var(--text-secondary)' }}>
+                              {h.old_label && h.new_label ? (
+                                <span>{h.old_label} <span style={{ color: 'var(--text-muted)' }}>&rarr;</span> {h.new_label}</span>
+                              ) : h.new_label ? (
+                                <span>{h.new_label}</span>
+                              ) : h.old_label ? (
+                                <span style={{ textDecoration: 'line-through' }}>{h.old_label}</span>
+                              ) : null}
+                            </div>
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.65rem' }}>
+                              {h.changed_by}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
