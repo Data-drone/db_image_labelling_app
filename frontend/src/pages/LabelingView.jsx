@@ -172,19 +172,17 @@ export default function LabelingView() {
   };
 
   // After annotating, update local sample list status and advance
-  const markCurrentAndAdvance = () => {
+  const markCurrentAndAdvance = useCallback(() => {
     setSampleList(prev => prev.map((s, i) =>
       i === currentIndex ? { ...s, status: 'labeled' } : s
     ));
     loadStats();
-    // Go to next unlabeled
     const nextUnlabeled = sampleList.findIndex((s, i) =>
       i > currentIndex && s.status === 'unlabeled'
     );
     if (nextUnlabeled >= 0) {
       goTo(nextUnlabeled);
     } else {
-      // Wrap around
       const wrapped = sampleList.findIndex(s => s.status === 'unlabeled');
       if (wrapped >= 0 && wrapped !== currentIndex) {
         goTo(wrapped);
@@ -192,20 +190,20 @@ export default function LabelingView() {
         goTo(currentIndex + 1);
       }
     }
-  };
+  }, [currentIndex, sampleList, loadStats]);
 
   // Multi-label classification: toggle a label on/off
-  const toggleLabel = (label) => {
+  const toggleLabel = useCallback((label) => {
     setSelectedLabels(prev => {
       const next = new Set(prev);
       if (next.has(label)) next.delete(label);
       else next.add(label);
       return next;
     });
-  };
+  }, []);
 
   // Multi-label classification: save all selected labels and advance
-  const handleSaveClassification = async () => {
+  const handleSaveClassification = useCallback(async () => {
     if (!sample || saving || selectedLabels.size === 0) return;
     setSaving(true);
     try {
@@ -220,7 +218,7 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [sample, saving, selectedLabels, projectId, markCurrentAndAdvance]);
 
   // Skip
   const handleSkip = async () => {
@@ -355,7 +353,7 @@ export default function LabelingView() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, selectedLabels]);
+  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, selectedLabels, handleSaveClassification, toggleLabel]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -808,7 +806,13 @@ export default function LabelingView() {
                       ? 'Saving...'
                       : selectedLabels.size === 0
                         ? 'Save & Next'
-                        : `Save & Next (${[...selectedLabels].join(', ')})`}
+                        : (() => {
+                            const labels = [...selectedLabels];
+                            const summary = labels.length <= 2
+                              ? labels.join(', ')
+                              : `${labels.slice(0, 2).join(', ')}, +${labels.length - 2} more`;
+                            return `Save & Next (${summary})`;
+                          })()}
                   </button>
 
                   <button
