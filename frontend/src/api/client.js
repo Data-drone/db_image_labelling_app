@@ -56,6 +56,9 @@ export const annotateSampleBatch = (projectId, sampleId, annotations) =>
 export const skipSample = (projectId, sampleId) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/skip`).then(r => r.data);
 
+export const fetchSampleHistory = (projectId, sampleId) =>
+  api.get(`/projects/${projectId}/samples/${sampleId}/history`).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // Image URLs
 // ---------------------------------------------------------------------------

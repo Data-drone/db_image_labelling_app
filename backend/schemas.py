@@ -98,3 +98,23 @@ class AnnotationOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Annotation History
+# ---------------------------------------------------------------------------
+class AnnotationHistoryOut(BaseModel):
+    id: int
+    sample_id: int
+    project_id: int
+    action: str
+    old_label: Optional[str] = None
+    new_label: Optional[str] = None
+    old_ann_type: Optional[str] = None
+    new_ann_type: Optional[str] = None
+    old_bbox_json: Optional[dict] = None
+    new_bbox_json: Optional[dict] = None
+    changed_by: str
+    changed_at: datetime
+
+    model_config = {"from_attributes": True}
