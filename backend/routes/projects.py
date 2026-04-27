@@ -2,13 +2,18 @@
 Project CRUD routes.
 """
 
+from datetime import date, datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
 from ..models import LabelingProject, ProjectSample, Annotation
-from ..schemas import ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats
+from ..schemas import (
+    ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats,
+    ClassCount, DailyVelocity, DetailedProjectStats,
+)
 from ..volumes import scan_volume_for_samples
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -261,4 +266,103 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
     return ProjectStats(
         total=total, labeled=labeled, unlabeled=unlabeled,
         skipped=skipped, per_user=per_user,
+    )
+
+
+@router.get("/{project_id}/stats/detailed", response_model=DetailedProjectStats)
+def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
+    """Rich stats for the progress dashboard."""
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    total = db.query(ProjectSample).filter_by(project_id=project_id).count()
+    labeled = db.query(ProjectSample).filter_by(project_id=project_id, status="labeled").count()
+    skipped = db.query(ProjectSample).filter_by(project_id=project_id, status="skipped").count()
+    unlabeled = total - labeled - skipped
+
+    # Per-class counts
+    class_rows = (
+        db.query(Annotation.label, func.count(Annotation.id))
+        .filter(Annotation.project_id == project_id)
+        .group_by(Annotation.label)
+        .all()
+    )
+    class_map = {row[0]: row[1] for row in class_rows}
+    per_class = [
+        ClassCount(label=cls, count=class_map.get(cls, 0))
+        for cls in (p.class_list or [])
+    ]
+
+    # Daily velocity — last 30 days (func.date works on both Postgres and SQLite)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    vel_rows = (
+        db.query(func.date(Annotation.created_at), func.count(Annotation.id))
+        .filter(
+            Annotation.project_id == project_id,
+            Annotation.created_at >= cutoff,
+        )
+        .group_by(func.date(Annotation.created_at))
+        .order_by(func.date(Annotation.created_at))
+        .all()
+    )
+    daily_velocity = [
+        DailyVelocity(date=str(row[0]), count=row[1])
+        for row in vel_rows
+    ]
+
+    # Per-user breakdown (reuse logic from basic stats)
+    user_rows = (
+        db.query(Annotation.created_by, func.count(Annotation.id))
+        .filter(Annotation.project_id == project_id)
+        .group_by(Annotation.created_by)
+        .all()
+    )
+    skip_rows = (
+        db.query(ProjectSample.locked_by, func.count(ProjectSample.id))
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.status == "skipped",
+        )
+        .group_by(ProjectSample.locked_by)
+        .all()
+    )
+    skip_map = {row[0]: row[1] for row in skip_rows if row[0]}
+    per_user: list[dict] = []
+    seen_users: set[str] = set()
+    for user, count in user_rows:
+        per_user.append({"user": user or "unknown", "labeled": count, "skipped": skip_map.get(user, 0)})
+        seen_users.add(user)
+    for user, count in skip_rows:
+        if user and user not in seen_users:
+            per_user.append({"user": user, "labeled": 0, "skipped": count})
+
+    # Average daily rate (last 7 days) and estimated completion
+    week_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    week_count = (
+        db.query(func.count(Annotation.id))
+        .filter(
+            Annotation.project_id == project_id,
+            Annotation.created_at >= week_cutoff,
+        )
+        .scalar()
+    ) or 0
+    avg_daily_rate = round(week_count / 7.0, 1)
+
+    estimated_completion_date = None
+    if avg_daily_rate > 0 and unlabeled > 0:
+        days_remaining = unlabeled / avg_daily_rate
+        est = date.today() + timedelta(days=int(days_remaining) + 1)
+        estimated_completion_date = est.isoformat()
+
+    return DetailedProjectStats(
+        total=total,
+        labeled=labeled,
+        unlabeled=unlabeled,
+        skipped=skipped,
+        per_class=per_class,
+        daily_velocity=daily_velocity,
+        per_user=per_user,
+        avg_daily_rate=avg_daily_rate,
+        estimated_completion_date=estimated_completion_date,
     )

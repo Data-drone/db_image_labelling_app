@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
+import { fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -13,6 +13,7 @@ export default function ProjectDashboard() {
 
   const [project, setProject] = useState(null);
   const [stats, setStats] = useState(null);
+  const [detailedStats, setDetailedStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [cloning, setCloning] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -39,10 +40,12 @@ export default function ProjectDashboard() {
     Promise.all([
       fetchProject(projectId),
       fetchProjectStats(projectId),
+      fetchDetailedProjectStats(projectId),
     ])
-      .then(([proj, st]) => {
+      .then(([proj, st, detailed]) => {
         setProject(proj);
         setStats(st);
+        setDetailedStats(detailed);
       })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
@@ -147,10 +150,13 @@ export default function ProjectDashboard() {
 
       const updated = await updateProject(projectId, patch);
       setProject(updated);
-      // Refresh stats if source changed (sample counts may differ)
       if (sourceChanged) {
-        const st = await fetchProjectStats(projectId);
+        const [st, detailed] = await Promise.all([
+          fetchProjectStats(projectId),
+          fetchDetailedProjectStats(projectId),
+        ]);
         setStats(st);
+        setDetailedStats(detailed);
       }
       setEditing(false);
     } catch (err) {
@@ -393,6 +399,108 @@ export default function ProjectDashboard() {
               {stats.labeled} labeled, {stats.skipped} skipped, {stats.unlabeled} remaining
             </div>
           </div>
+
+          {/* Analytics Section */}
+          {detailedStats && (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
+              gap: '1rem',
+              marginBottom: '1.5rem',
+            }}>
+              {/* Class Distribution */}
+              <div className="card">
+                <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem' }}>
+                  Class Distribution
+                </h3>
+                {detailedStats.per_class.length === 0 ? (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No classes defined</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    {(() => {
+                      const maxCount = Math.max(...detailedStats.per_class.map(c => c.count), 1);
+                      const colors = [
+                        '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
+                        '#06b6d4', '#f97316', '#6366f1', '#14b8a6', '#e11d48',
+                      ];
+                      return detailedStats.per_class.map((cls, i) => (
+                        <div key={cls.label} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <div style={{
+                            width: 90,
+                            fontSize: '0.8rem',
+                            color: 'var(--text-secondary)',
+                            textAlign: 'right',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                          }} title={cls.label}>
+                            {cls.label}
+                          </div>
+                          <div style={{ flex: 1, background: 'var(--bg-secondary)', borderRadius: 4, height: 22, position: 'relative' }}>
+                            <div style={{
+                              width: `${(cls.count / maxCount) * 100}%`,
+                              minWidth: cls.count > 0 ? 4 : 0,
+                              height: '100%',
+                              background: colors[i % colors.length],
+                              borderRadius: 4,
+                              transition: 'width 0.4s ease',
+                            }} />
+                          </div>
+                          <div style={{
+                            width: 36,
+                            fontSize: '0.8rem',
+                            fontWeight: 600,
+                            color: 'var(--text-primary)',
+                            textAlign: 'right',
+                            flexShrink: 0,
+                          }}>
+                            {cls.count}
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                )}
+              </div>
+
+              {/* Velocity + Completion */}
+              <div className="card">
+                <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem' }}>
+                  Labeling Velocity
+                </h3>
+                <VelocityChart data={detailedStats.daily_velocity} />
+                <div style={{
+                  marginTop: '1rem',
+                  padding: '0.75rem',
+                  background: 'var(--bg-secondary)',
+                  borderRadius: 6,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.15rem' }}>
+                      Avg. Daily Rate (7d)
+                    </div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--accent-blue)' }}>
+                      ~{detailedStats.avg_daily_rate} labels/day
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.15rem' }}>
+                      Est. Completion
+                    </div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 700, color: detailedStats.estimated_completion_date ? 'var(--status-success)' : 'var(--text-muted)' }}>
+                      {detailedStats.estimated_completion_date
+                        ? new Date(detailedStats.estimated_completion_date + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+                        : detailedStats.avg_daily_rate === 0 ? 'No recent activity' : 'Complete'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Sample Gallery */}
           <div className="card" style={{ marginBottom: '1.5rem' }}>
@@ -712,6 +820,80 @@ export default function ProjectDashboard() {
         </>
       )}
     </div>
+  );
+}
+
+function VelocityChart({ data }) {
+  if (!data || data.length === 0) {
+    return (
+      <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem 0', textAlign: 'center' }}>
+        No labeling activity in the last 30 days
+      </div>
+    );
+  }
+
+  const W = 480, H = 160, PAD_L = 40, PAD_R = 12, PAD_T = 12, PAD_B = 28;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+  const maxCount = Math.max(...data.map(d => d.count), 1);
+  const yTicks = [0, Math.round(maxCount / 2), maxCount];
+
+  const points = data.map((d, i) => {
+    const x = PAD_L + (data.length === 1 ? chartW / 2 : (i / (data.length - 1)) * chartW);
+    const y = PAD_T + chartH - (d.count / maxCount) * chartH;
+    return `${x},${y}`;
+  }).join(' ');
+
+  const areaPath = data.map((d, i) => {
+    const x = PAD_L + (data.length === 1 ? chartW / 2 : (i / (data.length - 1)) * chartW);
+    const y = PAD_T + chartH - (d.count / maxCount) * chartH;
+    return `${i === 0 ? 'M' : 'L'}${x},${y}`;
+  }).join(' ') + ` L${PAD_L + (data.length === 1 ? chartW / 2 : chartW)},${PAD_T + chartH} L${PAD_L + (data.length === 1 ? chartW / 2 : 0)},${PAD_T + chartH} Z`;
+
+  const xLabels = [];
+  if (data.length <= 7) {
+    data.forEach((d, i) => xLabels.push({ i, label: d.date.slice(5) }));
+  } else {
+    [0, Math.floor(data.length / 2), data.length - 1].forEach(i => {
+      xLabels.push({ i, label: data[i].date.slice(5) });
+    });
+  }
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }}>
+      {yTicks.map(t => {
+        const y = PAD_T + chartH - (t / maxCount) * chartH;
+        return (
+          <g key={t}>
+            <line x1={PAD_L} x2={W - PAD_R} y1={y} y2={y}
+              stroke="var(--border-color)" strokeWidth="0.5" strokeDasharray="3,3" />
+            <text x={PAD_L - 6} y={y + 3} textAnchor="end"
+              fill="var(--text-muted)" fontSize="9">{t}</text>
+          </g>
+        );
+      })}
+      <defs>
+        <linearGradient id="vel-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--accent-blue)" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="var(--accent-blue)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill="url(#vel-grad)" />
+      <polyline points={points} fill="none" stroke="var(--accent-blue)" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" />
+      {data.map((d, i) => {
+        const x = PAD_L + (data.length === 1 ? chartW / 2 : (i / (data.length - 1)) * chartW);
+        const y = PAD_T + chartH - (d.count / maxCount) * chartH;
+        return <circle key={i} cx={x} cy={y} r="2.5" fill="var(--accent-blue)" />;
+      })}
+      {xLabels.map(({ i, label }) => {
+        const x = PAD_L + (data.length === 1 ? chartW / 2 : (i / (data.length - 1)) * chartW);
+        return (
+          <text key={i} x={x} y={H - 4} textAnchor="middle"
+            fill="var(--text-muted)" fontSize="9">{label}</text>
+        );
+      })}
+    </svg>
   );
 }
 
