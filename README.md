@@ -13,7 +13,7 @@ Built on **Lakebase** (managed PostgreSQL) for persistent storage with automatic
 - **Gallery view**: thumbnail grid with status filters (all/unlabeled/labeled/skipped)
 - **Project versioning**: clone projects to create new versions for iterative labeling
 - **Dataset export**: one-click export to UC Volume in COCO JSON (detection) or CSV (classification) format
-- **Lakebase integration**: auto-provisioned PostgreSQL with token refresh and Lakehouse Sync to Delta
+- **Lakebase integration**: auto-provisioned by default (opt out for DAB-managed deployments) with token refresh and Lakehouse Sync to Delta
 - **Multi-user support**: user identity via Databricks SSO, per-user labeling stats
 
 ## Demo
@@ -42,7 +42,7 @@ Browser  ──>  React SPA (Vite)  ──>  FastAPI backend  ──>  Lakebase 
                                           └──>  Databricks SDK (workspace client)
 ```
 
-The FastAPI backend serves the React SPA as static files and provides the `/api/` endpoints. On startup it auto-provisions a Lakebase project with a background thread that refreshes database tokens every 20 minutes.
+The FastAPI backend serves the React SPA as static files and provides the `/api/` endpoints. On startup it auto-provisions a Lakebase project (by default — see `LAKEBASE_AUTO_PROVISION`) with a background thread that refreshes database tokens every 20 minutes.
 
 ## Pages
 
@@ -62,7 +62,7 @@ The FastAPI backend serves the React SPA as static files and provides the `/api/
 1. Push this repo to a Databricks workspace (Git folder or Repos)
 2. Create a Databricks App pointing to the repo folder
 3. The app auto-starts via `app.yaml` → `python start.py` → FastAPI + Uvicorn
-4. On first boot, Lakebase is auto-provisioned and tables are created
+4. On first boot, Lakebase is auto-provisioned (unless `LAKEBASE_AUTO_PROVISION=false`) and tables are created
 
 ### App Resources
 
@@ -79,6 +79,28 @@ The app needs a Databricks App service principal with:
 | `DEMO_VOLUME_PATH` | `/Volumes/brian_gen_ai/cv_explorer/demo_images` | Default demo volume (set in `app.yaml`) |
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Lakebase project identifier |
 | `LAKEBASE_DISPLAY_NAME` | `CV Explorer` | Lakebase project display name |
+| `LAKEBASE_AUTO_PROVISION` | `true` | Set to `"false"` to require a pre-existing Lakebase project (e.g. when managed by a Databricks Asset Bundle). If the project is missing at startup, the app exits with an error instead of creating it. |
+
+## Using with Databricks Asset Bundles
+
+When deploying this app as part of a larger Databricks Asset Bundle (DAB), the bundle typically owns the Lakebase project lifecycle (create / grant roles / enable Lakehouse Sync / destroy). To prevent the app from trying to create a duplicate project at startup, set:
+
+```yaml
+# app.yaml
+env:
+  - name: LAKEBASE_AUTO_PROVISION
+    value: "false"
+  - name: LAKEBASE_PROJECT_ID
+    value: "<project-id-created-by-your-bundle>"
+```
+
+With `LAKEBASE_AUTO_PROVISION=false`, the app:
+
+1. Looks up the Lakebase project named by `LAKEBASE_PROJECT_ID`
+2. Connects if it exists
+3. Exits with a clear error if it does not (instead of creating one)
+
+See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
 
 ## Project Structure
 
