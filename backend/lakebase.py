@@ -25,6 +25,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 LAKEBASE_PROJECT_ID = os.environ.get("LAKEBASE_PROJECT_ID", "cv-explorer")
 LAKEBASE_DISPLAY_NAME = os.environ.get("LAKEBASE_DISPLAY_NAME", "CV Explorer")
+# When "false", the app will NOT create a Lakebase project if one does
+# not exist; instead it raises on startup. Use this when a Databricks
+# Asset Bundle (or other external harness) owns the Lakebase resource.
+LAKEBASE_AUTO_PROVISION = (
+    os.environ.get("LAKEBASE_AUTO_PROVISION", "true").lower() != "false"
+)
 TOKEN_REFRESH_INTERVAL = 20 * 60  # 20 minutes (tokens typically expire in ~1 hour)
 
 
@@ -56,6 +62,12 @@ def ensure_lakebase_project():
         log.info("Connected to existing Lakebase project: %s", project.name)
         return project
     except Exception:
+        if not LAKEBASE_AUTO_PROVISION:
+            raise RuntimeError(
+                f"Lakebase project '{LAKEBASE_PROJECT_ID}' not found "
+                f"and LAKEBASE_AUTO_PROVISION=false. "
+                f"Pre-create the project (e.g. via DAB) or unset the flag."
+            )
         log.info("Lakebase project not found, creating: %s", LAKEBASE_PROJECT_ID)
 
     op = w.postgres.create_project(
