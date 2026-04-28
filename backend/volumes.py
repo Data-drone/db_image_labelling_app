@@ -46,6 +46,27 @@ def read_image_bytes(filepath: str) -> Optional[bytes]:
             return f.read()
 
 
+def read_bytes(filepath: str) -> Optional[bytes]:
+    """Read arbitrary file bytes from a UC Volume path or local filesystem.
+
+    Same I/O path as read_image_bytes, but named for non-image payloads
+    (e.g. COCO JSON, JSONL label files). Returns None if unreadable.
+    """
+    return read_image_bytes(filepath)
+
+
+def file_exists(filepath: str) -> bool:
+    """Cheap existence check for a UC Volume or local path."""
+    if is_volume_path(filepath):
+        try:
+            w = _get_workspace_client()
+            w.files.get_metadata(filepath)
+            return True
+        except Exception:
+            return False
+    return os.path.exists(filepath)
+
+
 def scan_volume_for_samples(
     db: Session,
     project_id: int,
