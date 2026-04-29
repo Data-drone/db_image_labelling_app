@@ -157,7 +157,12 @@ ignored.
   - `replace` — deletes existing annotations for the sample before inserting (emits `AnnotationHistory` delete rows)
   - `append` — adds to existing annotations (natural for multi-bbox detection)
   - `skip` — leaves samples that already have annotations untouched
-- `dry_run` — runs pass 1 only, returns the counters that *would* result
+- `dry_run` — runs pass 1 only, returns the counters that *would* result.
+  Note: dry-run counters are conservative — they assume every import
+  succeeds as `annotations_created`. Actual `annotations_replaced` or
+  `samples_skipped` may differ when `on_existing_annotations` is
+  `replace` or `skip`. A future PR will prefetch existing-annotation
+  counts per sample for exact dry-run parity.
 
 ### Responses
 
@@ -170,9 +175,24 @@ ignored.
 ### Limits and caveats
 
 - Soft cap: 500,000 items per request. Split larger imports.
+- Hard cap: 200 MB per file. Requests larger than this return `400`
+  before any parsing.
+- Hard cap: 2,000,000 annotations per import (protects against
+  pathological COCO files with one image and millions of annotations).
+- Filenames must be basenames — no path separators, no `..`, no empty
+  segments. COCO `file_name` values that include subdirectories are
+  rejected; this keeps `project_samples.filename` consistent with
+  `scan_volume_for_samples` which stores basenames.
+- `volume_path` must start with `/Volumes/` and contain no `..`
+  segments. Local-filesystem paths are rejected (except in tests via a
+  dedicated `X-Test-Allow-Local-Path` header that production never sets).
 - No per-project ACLs — anyone who can call the app can import.
 - `replace` is content-idempotent; re-running produces the same state.
+  Replacing with zero annotations transitions the sample back to
+  `status='unlabeled'`.
 - `append` is not idempotent — re-running duplicates annotations.
+- Duplicate filenames within a single import are rejected in
+  pass 1 (no partial inserts).
 
 ### Example (Python)
 
