@@ -3,7 +3,7 @@ Pydantic schemas for the CV Explorer API.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel
 
 
@@ -148,9 +148,9 @@ class AnnotationHistoryOut(BaseModel):
 # ---------------------------------------------------------------------------
 class ImportRequest(BaseModel):
     volume_path: str
-    format: str  # 'coco' or 'jsonl'
-    on_missing_sample: str = "error"  # 'error' | 'skip' | 'create'
-    on_existing_annotations: str = "replace"  # 'replace' | 'append' | 'skip'
+    format: Literal["coco", "jsonl"]
+    on_missing_sample: Literal["error", "skip", "create"] = "error"
+    on_existing_annotations: Literal["replace", "append", "skip"] = "replace"
     dry_run: bool = False
 
 
@@ -165,7 +165,6 @@ class ImportResponse(BaseModel):
     samples_touched: int = 0
     annotations_created: int = 0
     annotations_replaced: int = 0
-    annotations_skipped: int = 0
     samples_skipped: int = 0
     samples_created: int = 0
     warnings: list[str] = []
