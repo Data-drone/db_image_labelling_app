@@ -71,6 +71,21 @@ export const sampleThumbnailUrl = (projectId, sampleId, size = 300) =>
   `/api/projects/${projectId}/samples/${sampleId}/thumbnail?size=${size}`;
 
 // ---------------------------------------------------------------------------
+// Pre-annotation / Inference
+// ---------------------------------------------------------------------------
+export const fetchEndpointStatus = (projectId) =>
+  api.get(`/projects/${projectId}/endpoint-status`).then(r => r.data);
+
+export const predictSample = (projectId, sampleId) =>
+  api.get(`/projects/${projectId}/samples/${sampleId}/predict`).then(r => r.data);
+
+export const preAnnotateProject = (projectId, params = {}) =>
+  api.post(`/projects/${projectId}/pre-annotate`, params, { timeout: 300000 }).then(r => r.data);
+
+export const fetchInferenceSettings = (projectId) =>
+  api.get(`/projects/${projectId}/settings`).then(r => r.data);
+
+// ---------------------------------------------------------------------------
 // Browse & Volume navigation (kept from original)
 // ---------------------------------------------------------------------------
 export const fetchCatalogs = () => api.get('/catalogs').then(r => r.data);

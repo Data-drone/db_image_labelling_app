@@ -29,6 +29,8 @@ def _project_out(p, total=None, labeled=None):
         task_type=p.task_type,
         class_list=p.class_list,
         source_volume=p.source_volume,
+        serving_endpoint=p.serving_endpoint,
+        endpoint_config=p.endpoint_config,
         created_by=p.created_by,
         created_at=p.created_at,
         sample_count=total if total is not None else 0,
@@ -56,6 +58,8 @@ def create_project(
         task_type=payload.task_type,
         class_list=payload.class_list,
         source_volume=payload.source_volume,
+        serving_endpoint=payload.serving_endpoint,
+        endpoint_config=payload.endpoint_config,
         created_by=user_email,
     )
     db.add(project)
@@ -150,6 +154,12 @@ def update_project(
     if payload.class_list is not None:
         p.class_list = payload.class_list
 
+    if payload.serving_endpoint is not None:
+        p.serving_endpoint = payload.serving_endpoint or None
+
+    if payload.endpoint_config is not None:
+        p.endpoint_config = payload.endpoint_config or None
+
     db.commit()
     db.refresh(p)
 
@@ -204,6 +214,8 @@ def clone_project(
         task_type=parent.task_type,
         class_list=list(parent.class_list),
         source_volume=parent.source_volume,
+        serving_endpoint=parent.serving_endpoint,
+        endpoint_config=parent.endpoint_config,
         created_by=user_email,
         version=new_version,
         parent_project_id=root_id,
@@ -237,7 +249,8 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
     total = db.query(ProjectSample).filter_by(project_id=project_id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=project_id, status="labeled").count()
     skipped = db.query(ProjectSample).filter_by(project_id=project_id, status="skipped").count()
-    unlabeled = total - labeled - skipped
+    pre_labeled = db.query(ProjectSample).filter_by(project_id=project_id, status="pre_labeled").count()
+    unlabeled = total - labeled - skipped - pre_labeled
 
     user_rows = (
         db.query(Annotation.created_by, func.count(Annotation.id))
@@ -266,7 +279,7 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
 
     return ProjectStats(
         total=total, labeled=labeled, unlabeled=unlabeled,
-        skipped=skipped, per_user=per_user,
+        skipped=skipped, pre_labeled=pre_labeled, per_user=per_user,
     )
 
 

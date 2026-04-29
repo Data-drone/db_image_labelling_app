@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
+import { fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus, preAnnotateProject } from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -27,6 +27,12 @@ export default function ProjectDashboard() {
   const [exportVolume, setExportVolume] = useState('');
   const [exportResult, setExportResult] = useState(null);
   const [exportError, setExportError] = useState('');
+
+  // Endpoint / pre-annotation state
+  const [endpointStatus, setEndpointStatus] = useState(null);
+  const [preAnnotating, setPreAnnotating] = useState(false);
+  const [preAnnotateResult, setPreAnnotateResult] = useState(null);
+  const [preAnnotateError, setPreAnnotateError] = useState('');
 
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
@@ -70,6 +76,13 @@ export default function ProjectDashboard() {
       .finally(() => setLoading(false));
   }, [projectId, navigate]);
 
+  useEffect(() => {
+    if (!project) return;
+    fetchEndpointStatus(projectId)
+      .then(setEndpointStatus)
+      .catch(() => setEndpointStatus({ status: 'error', error: 'Could not check endpoint' }));
+  }, [project, projectId]);
+
   const handleClone = async () => {
     if (cloning) return;
     setCloning(true);
@@ -81,6 +94,27 @@ export default function ProjectDashboard() {
       alert('Failed to create new version: ' + (err.response?.data?.detail || err.message));
     } finally {
       setCloning(false);
+    }
+  };
+
+  const handlePreAnnotate = async () => {
+    if (preAnnotating) return;
+    if (!confirm(
+      'This will send all unlabeled images to the model endpoint for pre-labeling. This may take a while for large projects.\n\nContinue?'
+    )) return;
+    setPreAnnotating(true);
+    setPreAnnotateError('');
+    setPreAnnotateResult(null);
+    try {
+      const result = await preAnnotateProject(projectId);
+      setPreAnnotateResult(result);
+      const st = await fetchProjectStats(projectId);
+      setStats(st);
+      setGalleryPage(0);
+    } catch (err) {
+      setPreAnnotateError(err.response?.data?.detail || err.message);
+    } finally {
+      setPreAnnotating(false);
     }
   };
 
@@ -134,6 +168,7 @@ export default function ProjectDashboard() {
       description: project.description || '',
       source_volume: project.source_volume,
       class_list: [...project.class_list],
+      serving_endpoint: project.serving_endpoint || '',
     });
     setNewClass('');
     setEditing(true);
@@ -151,6 +186,7 @@ export default function ProjectDashboard() {
       if (editForm.name !== project.name) patch.name = editForm.name;
       if (editForm.description !== (project.description || '')) patch.description = editForm.description;
       if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
+      if ((editForm.serving_endpoint || '') !== (project.serving_endpoint || '')) patch.serving_endpoint = editForm.serving_endpoint;
 
       const sourceChanged = editForm.source_volume !== project.source_volume;
       if (sourceChanged) {
@@ -179,6 +215,9 @@ export default function ProjectDashboard() {
         ]);
         setStats(st);
         setDetailedStats(detailed);
+      }
+      if (patch.serving_endpoint !== undefined) {
+        fetchEndpointStatus(projectId).then(setEndpointStatus).catch(() => {});
       }
       setEditing(false);
     } catch (err) {
@@ -248,6 +287,16 @@ export default function ProjectDashboard() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {endpointStatus && endpointStatus.status === 'ready' && stats && stats.unlabeled > 0 && (
+            <button
+              className="btn-secondary"
+              onClick={handlePreAnnotate}
+              disabled={preAnnotating}
+              style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+            >
+              {preAnnotating ? 'Pre-labeling...' : 'Pre-label'}
+            </button>
+          )}
           <button
             className="btn-secondary"
             onClick={openExportModal}
@@ -382,6 +431,65 @@ export default function ProjectDashboard() {
         </div>
       )}
 
+      {/* Endpoint status badge */}
+      {endpointStatus && (
+        <div className="card" style={{ marginBottom: '1rem', padding: '0.6rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+            background:
+              endpointStatus.status === 'ready' ? 'var(--status-success)'
+              : endpointStatus.status === 'not_ready' ? 'var(--status-warning)'
+              : endpointStatus.status === 'not_configured' ? 'var(--text-muted)'
+              : '#ef4444',
+          }} />
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+            Pre-annotation:{' '}
+            {endpointStatus.status === 'ready' && (
+              <span style={{ color: 'var(--status-success)' }}>Ready ({endpointStatus.endpoint})</span>
+            )}
+            {endpointStatus.status === 'not_ready' && (
+              <span style={{ color: 'var(--status-warning)' }}>Endpoint updating ({endpointStatus.endpoint})</span>
+            )}
+            {endpointStatus.status === 'not_configured' && (
+              <span style={{ color: 'var(--text-muted)' }}>Not configured</span>
+            )}
+            {(endpointStatus.status === 'not_found' || endpointStatus.status === 'error') && (
+              <span style={{ color: '#ef4444' }}>{endpointStatus.error || 'Endpoint unreachable'}</span>
+            )}
+          </span>
+        </div>
+      )}
+
+      {/* Pre-annotate result/error */}
+      {preAnnotateError && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(239, 68, 68, 0.1)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          color: '#ef4444',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+        }}>
+          Pre-annotation failed: {preAnnotateError}
+        </div>
+      )}
+      {preAnnotateResult && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(34, 197, 94, 0.1)',
+          border: '1px solid rgba(34, 197, 94, 0.3)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+        }}>
+          <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Pre-annotation complete: </span>
+          <span style={{ color: 'var(--text-secondary)' }}>
+            {preAnnotateResult.completed} labeled, {preAnnotateResult.skipped} below threshold, {preAnnotateResult.failed} failed
+          </span>
+        </div>
+      )}
+
       {/* Stats cards */}
       {stats && (
         <>
@@ -394,6 +502,7 @@ export default function ProjectDashboard() {
             {[
               { label: 'Total', value: stats.total, color: 'var(--text-primary)' },
               { label: 'Labeled', value: stats.labeled, color: 'var(--status-success)' },
+              ...(stats.pre_labeled > 0 ? [{ label: 'Pre-labeled', value: stats.pre_labeled, color: '#a78bfa' }] : []),
               { label: 'Skipped', value: stats.skipped, color: 'var(--status-warning)' },
               { label: 'Remaining', value: stats.unlabeled, color: 'var(--accent-blue)' },
             ].map((card) => (
@@ -418,7 +527,7 @@ export default function ProjectDashboard() {
               <div className="progress-fill" style={{ width: `${pct}%` }} />
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
-              {stats.labeled} labeled, {stats.skipped} skipped, {stats.unlabeled} remaining
+              {stats.labeled} labeled{stats.pre_labeled > 0 ? `, ${stats.pre_labeled} pre-labeled` : ''}, {stats.skipped} skipped, {stats.unlabeled} remaining
             </div>
           </div>
 
@@ -531,7 +640,7 @@ export default function ProjectDashboard() {
                 Samples
               </h3>
               <div style={{ display: 'flex', gap: '0.3rem' }}>
-                {['', 'unlabeled', 'labeled', 'skipped'].map((f) => (
+                {['', 'unlabeled', 'pre_labeled', 'labeled', 'skipped'].map((f) => (
                   <button
                     key={f}
                     className="btn-secondary"
@@ -544,7 +653,7 @@ export default function ProjectDashboard() {
                       border: galleryFilter === f ? '1px solid var(--accent-blue)' : undefined,
                     }}
                   >
-                    {f || 'All'}
+                    {f === '' ? 'All' : f === 'pre_labeled' ? 'Pre-labeled' : f}
                   </button>
                 ))}
               </div>
@@ -667,6 +776,7 @@ export default function ProjectDashboard() {
                         fontSize: '0.6rem',
                         fontWeight: 600,
                         background: s.status === 'labeled' ? 'var(--status-success)'
+                          : s.status === 'pre_labeled' ? '#a78bfa'
                           : s.status === 'skipped' ? 'var(--status-warning)'
                           : 'rgba(255,255,255,0.15)',
                         color: s.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
@@ -831,6 +941,10 @@ export default function ProjectDashboard() {
                     <span key={c} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>{c}</span>
                   ))}
                 </span>
+                <span style={{ color: 'var(--text-muted)' }}>Endpoint</span>
+                <span style={{ color: project.serving_endpoint ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                  {project.serving_endpoint || '(none)'}
+                </span>
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>
                 <span>
                   v{project.version || 1}
@@ -924,6 +1038,20 @@ export default function ProjectDashboard() {
                     >
                       Add
                     </button>
+                  </div>
+                </div>
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Endpoint</span>
+                <div>
+                  <input
+                    type="text"
+                    value={editForm.serving_endpoint}
+                    onChange={(e) => setEditForm({ ...editForm, serving_endpoint: e.target.value })}
+                    placeholder="Model Serving endpoint name"
+                    className="input"
+                    style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
+                  />
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                    Databricks Model Serving endpoint for pre-annotation. Leave blank to disable.
                   </div>
                 </div>
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>

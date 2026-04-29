@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .models import Base
-from .routes import projects, labeling, admin, export, browse, import_routes
+from .routes import projects, labeling, admin, export, browse, import_routes, inference
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +111,7 @@ app.add_middleware(
 # Register routers
 app.include_router(projects.router)
 app.include_router(labeling.router)
+app.include_router(inference.router)
 app.include_router(admin.router)
 app.include_router(export.router)
 app.include_router(browse.router)

@@ -16,6 +16,8 @@ class ProjectCreate(BaseModel):
     task_type: str  # 'classification' or 'detection'
     class_list: list[str]
     source_volume: str  # UC Volume path
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -24,6 +26,8 @@ class ProjectUpdate(BaseModel):
     source_volume: Optional[str] = None
     class_list: Optional[list[str]] = None
     confirm_source_change: bool = False
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
 
 
 class ProjectOut(BaseModel):
@@ -33,6 +37,8 @@ class ProjectOut(BaseModel):
     task_type: str
     class_list: list[str]
     source_volume: str
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
     created_by: str
     created_at: datetime
     sample_count: int = 0
@@ -48,6 +54,7 @@ class ProjectStats(BaseModel):
     labeled: int
     unlabeled: int
     skipped: int
+    pre_labeled: int = 0
     per_user: list[dict]  # [{"user": "...", "labeled": N, "skipped": N}]
 
 
@@ -71,6 +78,35 @@ class DetailedProjectStats(BaseModel):
     per_user: list[dict]
     avg_daily_rate: float
     estimated_completion_date: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Pre-annotation / Inference
+# ---------------------------------------------------------------------------
+class PredictionOut(BaseModel):
+    label: str
+    ann_type: str
+    bbox_json: Optional[dict] = None
+    confidence: Optional[float] = None
+
+
+class PreAnnotateRequest(BaseModel):
+    max_samples: int = 0  # 0 = all unlabeled
+    min_confidence: Optional[float] = None
+
+
+class PreAnnotateProgress(BaseModel):
+    completed: int
+    failed: int
+    skipped: int
+    total: int
+
+
+class EndpointStatus(BaseModel):
+    status: str  # ready, not_ready, not_found, error, not_configured
+    endpoint: Optional[str] = None
+    state: Optional[str] = None
+    error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

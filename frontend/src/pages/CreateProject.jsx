@@ -24,6 +24,8 @@ export default function CreateProject() {
   const [classList, setClassList] = useState([]);
   const [classInput, setClassInput] = useState('');
   const [sourceVolume, setSourceVolume] = useState('');
+  const [servingEndpoint, setServingEndpoint] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Volume browser
   const [volumeMode, setVolumeMode] = useState('direct');
@@ -115,13 +117,17 @@ export default function CreateProject() {
     setSubmitting(true);
     setError('');
     try {
-      const project = await createProject({
+      const payload = {
         name: name.trim(),
         description: description.trim(),
         task_type: taskType,
         class_list: classList,
         source_volume: sourceVolume,
-      });
+      };
+      if (servingEndpoint.trim()) {
+        payload.serving_endpoint = servingEndpoint.trim();
+      }
+      const project = await createProject(payload);
       navigate(`/projects/${project.id}`);
     } catch (err) {
       setError(err.response?.data?.detail || err.message);
@@ -335,6 +341,44 @@ export default function CreateProject() {
           {sourceVolume && (
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
               {sourceVolume}
+            </div>
+          )}
+        </div>
+
+        {/* Advanced: Model Serving */}
+        <div style={{ marginBottom: '1.25rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              fontSize: '0.8rem',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.3rem',
+            }}
+          >
+            <span style={{ fontSize: '0.65rem' }}>{showAdvanced ? '\u25BC' : '\u25B6'}</span>
+            Pre-annotation (optional)
+          </button>
+          {showAdvanced && (
+            <div style={{ marginTop: '0.5rem' }}>
+              <label style={labelStyle}>Model Serving Endpoint</label>
+              <input
+                type="text"
+                value={servingEndpoint}
+                onChange={(e) => setServingEndpoint(e.target.value)}
+                placeholder="e.g. my-classifier-endpoint"
+                style={inputStyle}
+              />
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                Name of a Databricks Model Serving endpoint for pre-labeling. Leave blank to skip.
+                The endpoint must be added as a resource in the Databricks Apps UI with "Can query" permission.
+              </div>
             </div>
           )}
         </div>

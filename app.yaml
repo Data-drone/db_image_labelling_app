@@ -2,3 +2,8 @@ command: ['python', 'start.py']
 env:
   - name: DEMO_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
+  # Model Serving endpoint for pre-annotation.
+  # Add a serving-endpoint resource in the Databricks Apps UI first
+  # (grant "Can query" permission), then uncomment the line below.
+  # - name: SERVING_ENDPOINT
+  #   valueFrom: serving-endpoint

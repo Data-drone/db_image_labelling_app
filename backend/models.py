@@ -31,6 +31,8 @@ class LabelingProject(Base):
     task_type = Column(String(50), nullable=False)  # 'classification' or 'detection'
     class_list = Column(JSON, nullable=False)  # e.g. ["cat", "dog", "car"]
     source_volume = Column(Text, nullable=False)  # UC Volume path
+    serving_endpoint = Column(String(255), nullable=True)  # Model Serving endpoint name
+    endpoint_config = Column(JSON, nullable=True)  # response parsing overrides
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     version = Column(Integer, default=1, nullable=False)
@@ -53,7 +55,7 @@ class ProjectSample(Base):
     filename = Column(String(512), nullable=False)
     locked_by = Column(String(255), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
-    status = Column(String(50), default="unlabeled", nullable=False)  # unlabeled, labeled, skipped
+    status = Column(String(50), default="unlabeled", nullable=False)  # unlabeled, pre_labeled, labeled, skipped
 
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(

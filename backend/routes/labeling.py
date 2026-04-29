@@ -36,7 +36,7 @@ def get_next_sample(
         db.query(ProjectSample)
         .filter(
             ProjectSample.project_id == project_id,
-            ProjectSample.status == "unlabeled",
+            ProjectSample.status.in_(["unlabeled", "pre_labeled"]),
         )
         .filter(
             (ProjectSample.locked_by.is_(None)) | (ProjectSample.locked_at < cutoff)
