@@ -9,6 +9,7 @@ Follow-up hardening: docs/plans/2026-04-29-api-import-followup.md
 """
 
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -113,6 +114,8 @@ def _validate_annotation(
             v = bb.get(k)
             if not isinstance(v, (int, float)) or isinstance(v, bool):
                 return f"bbox.{k} must be numeric"
+            if not math.isfinite(v):
+                return f"bbox.{k} must be finite (got {v!r})"
             coords[k] = float(v)
         x, y, w, h = coords["x"], coords["y"], coords["w"], coords["h"]
         if x < 0 or y < 0:

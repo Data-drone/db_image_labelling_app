@@ -10,6 +10,7 @@ is tolerated and surfaced as per-entry errors rather than raising.
 """
 
 import json
+import math
 
 from pydantic import ValidationError
 
@@ -46,7 +47,9 @@ def parse(raw_bytes: bytes) -> tuple[list[NormalizedImportItem], list[ImportErro
         return items, errors
 
     # Build image map: image_id -> (filename, width, height).
+    # Also detect duplicate file_name values across images[] entries.
     image_map: dict = {}
+    seen_filenames: dict[str, int] = {}  # fname -> first image_id
     for img in raw_images:
         if not isinstance(img, dict):
             continue
@@ -57,8 +60,19 @@ def parse(raw_bytes: bytes) -> tuple[list[NormalizedImportItem], list[ImportErro
         if (iid is None or not isinstance(fname, str) or not fname
                 or not isinstance(w, (int, float)) or isinstance(w, bool)
                 or not isinstance(h, (int, float)) or isinstance(h, bool)
-                or w <= 0 or h <= 0):
+                or w <= 0 or h <= 0
+                or not math.isfinite(w) or not math.isfinite(h)):
             continue
+        if fname in seen_filenames:
+            errors.append(ImportErrorItem(
+                row=None, filename=fname,
+                reason=(
+                    f"duplicate file_name in images[]: image_id {iid!r} "
+                    f"collides with image_id {seen_filenames[fname]!r}"
+                ),
+            ))
+            continue
+        seen_filenames[fname] = iid
         image_map[iid] = (fname, float(w), float(h))
 
     # Build category map: category_id -> label.
@@ -110,7 +124,7 @@ def parse(raw_bytes: bytes) -> tuple[list[NormalizedImportItem], list[ImportErro
         else:
             if (not isinstance(bbox, list) or len(bbox) != 4
                     or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                               for v in bbox)):
+                               and math.isfinite(v) for v in bbox)):
                 errors.append(ImportErrorItem(
                     row=row, filename=fname,
                     reason=f"bbox must be [x,y,w,h] of numbers, got {bbox!r}",
