@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .models import Base
-from .routes import projects, labeling, admin, export, browse
+from .routes import projects, labeling, admin, export, browse, import_routes
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ app.include_router(labeling.router)
 app.include_router(admin.router)
 app.include_router(export.router)
 app.include_router(browse.router)
+app.include_router(import_routes.router)
 
 
 # ---------------------------------------------------------------------------

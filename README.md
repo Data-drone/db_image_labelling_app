@@ -102,6 +102,97 @@ With `LAKEBASE_AUTO_PROVISION=false`, the app:
 
 See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
 
+## Importing annotations
+
+In addition to UI-driven labeling, projects can be bulk-populated via
+`POST /api/projects/{project_id}/import`. The endpoint reads a label
+file from a UC Volume by reference (so payload size is unbounded from
+the HTTP side), validates every row, and commits in a single
+transaction.
+
+### Request
+
+```json
+{
+  "volume_path": "/Volumes/<catalog>/<schema>/<vol>/labels.jsonl",
+  "format": "jsonl",
+  "on_missing_sample": "error",
+  "on_existing_annotations": "replace",
+  "dry_run": false
+}
+```
+
+| Field | Default | Values |
+|---|---|---|
+| `volume_path` | — | UC Volume path readable by the app |
+| `format` | — | `coco` \| `jsonl` |
+| `on_missing_sample` | `error` | `error` \| `skip` \| `create` |
+| `on_existing_annotations` | `replace` | `replace` \| `append` \| `skip` |
+| `dry_run` | `false` | boolean |
+
+### Formats
+
+**JSONL** — one JSON object per line, blank lines ignored:
+
+```jsonl
+{"filename": "cat_001.jpg", "annotations": [{"label": "cat", "ann_type": "classification"}]}
+{"filename": "dog_042.jpg", "annotations": [{"label": "dog", "ann_type": "bbox", "bbox_json": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}}]}
+```
+
+Bbox coordinates are normalized (0-1). Filenames are matched against
+`project_samples.filename` (basename).
+
+**COCO** — standard COCO JSON. The adapter converts pixel bboxes
+`[x, y, w, h]` to normalized coordinates using the image `width` /
+`height` from the `images[]` section. `iscrowd` and `segmentation` are
+ignored.
+
+### Flags
+
+- `on_missing_sample`
+  - `error` — unknown filename fails the whole import
+  - `skip` — unknown filenames are silently skipped
+  - `create` — creates a new `ProjectSample` row if the file exists under `source_volume`; otherwise errors
+- `on_existing_annotations`
+  - `replace` — deletes existing annotations for the sample before inserting (emits `AnnotationHistory` delete rows)
+  - `append` — adds to existing annotations (natural for multi-bbox detection)
+  - `skip` — leaves samples that already have annotations untouched
+- `dry_run` — runs pass 1 only, returns the counters that *would* result
+
+### Responses
+
+- `200` — success, body has counters (`samples_touched`, `annotations_created`, `annotations_replaced`, `samples_skipped`, `samples_created`)
+- `400` — bad format, unreadable volume_path, invalid flag value
+- `404` — project not found
+- `422` — validation failed, body has `errors[]` (capped at 100) and `error_count`
+- `500` — commit failed, transaction rolled back
+
+### Limits and caveats
+
+- Soft cap: 500,000 items per request. Split larger imports.
+- No per-project ACLs — anyone who can call the app can import.
+- `replace` is content-idempotent; re-running produces the same state.
+- `append` is not idempotent — re-running duplicates annotations.
+
+### Example (Python)
+
+```python
+import requests
+
+r = requests.post(
+    "https://<app>.databricksapps.com/api/projects/42/import",
+    json={
+        "volume_path": "/Volumes/my_catalog/my_schema/imports/labels.jsonl",
+        "format": "jsonl",
+        "on_missing_sample": "error",
+        "on_existing_annotations": "replace",
+    },
+    headers={"Authorization": f"Bearer {token}"},
+)
+r.raise_for_status()
+print(r.json())
+```
+
 ## Project Structure
 
 ```

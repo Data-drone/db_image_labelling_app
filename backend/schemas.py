@@ -141,3 +141,31 @@ class AnnotationHistoryOut(BaseModel):
     changed_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Import
+# ---------------------------------------------------------------------------
+class ImportRequest(BaseModel):
+    volume_path: str
+    format: str  # 'coco' or 'jsonl'
+    on_missing_sample: str = "error"  # 'error' | 'skip' | 'create'
+    on_existing_annotations: str = "replace"  # 'replace' | 'append' | 'skip'
+    dry_run: bool = False
+
+
+class ImportErrorItem(BaseModel):
+    row: Optional[int] = None
+    filename: Optional[str] = None
+    reason: str
+
+
+class ImportResponse(BaseModel):
+    dry_run: bool
+    samples_touched: int = 0
+    annotations_created: int = 0
+    annotations_replaced: int = 0
+    annotations_skipped: int = 0
+    samples_skipped: int = 0
+    samples_created: int = 0
+    warnings: list[str] = []
