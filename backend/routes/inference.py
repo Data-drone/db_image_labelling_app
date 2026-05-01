@@ -2,10 +2,12 @@
 Pre-annotation routes — predict, batch pre-annotate, endpoint health.
 """
 
+import json
 import logging
 import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -114,17 +116,18 @@ def predict_single_sample(
     return [PredictionOut(**p) for p in predictions]
 
 
-@router.post("/pre-annotate", response_model=PreAnnotateProgress)
+@router.post("/pre-annotate")
 def pre_annotate_project(
     project_id: int,
     payload: PreAnnotateRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Batch pre-annotate samples using the configured model endpoint.
+    """Batch pre-annotate with SSE progress streaming.
 
-    Replaces prior **model** draft rows on each sample before inserting new ones
-    (idempotent re-run). When ``include_pre_labeled`` is true, includes
-    ``pre_labeled`` samples so you can refresh model suggestions.
+    When the client sends ``Accept: text/event-stream`` the response is an SSE
+    stream emitting ``progress`` events after each sample and a final ``done``
+    event.  Otherwise falls back to the original JSON response.
     """
     project = _get_project(project_id, db)
     endpoint_name = resolve_endpoint(project)
@@ -165,24 +168,106 @@ def pre_annotate_project(
 
     samples = query.all()
 
-    try:
-        result = run_preannotate_for_samples(
-            db,
-            project,
-            samples,
-            min_confidence=payload.min_confidence,
+    wants_sse = "text/event-stream" in (request.headers.get("accept") or "")
+
+    if not wants_sse:
+        try:
+            result = run_preannotate_for_samples(
+                db, project, samples,
+                min_confidence=payload.min_confidence,
+                text_prompt=payload.text_prompt,
+            )
+        except UnknownInferenceAdapterError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        db.commit()
+        return PreAnnotateProgress(
+            completed=result["completed"],
+            failed=result["failed"],
+            skipped=result["skipped"],
+            total=result["total"],
         )
-    except UnknownInferenceAdapterError as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
-    db.commit()
+    def _sse_generator():
+        from ..inference import predict_sample as _predict_sample, resolve_endpoint as _resolve_ep
+        from ..models import Annotation
+        from ..preannotate import (
+            clear_model_drafts_for_sample,
+            refresh_sample_status_after_annotation_change,
+        )
 
-    return PreAnnotateProgress(
-        completed=result["completed"],
-        failed=result["failed"],
-        skipped=result["skipped"],
-        total=result["total"],
+        ep = _resolve_ep(project)
+        ep_config = dict(project.endpoint_config or {})
+        if payload.min_confidence is not None:
+            ep_config["min_confidence"] = payload.min_confidence
+        if payload.text_prompt:
+            ep_config["sam_text_prompt"] = payload.text_prompt
+        created_by = f"model:{ep}"
+
+        total = len(samples)
+        completed = failed = skipped = 0
+
+        def _emit(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        yield _emit("progress", {"completed": 0, "failed": 0, "skipped": 0, "total": total, "current": 0})
+
+        for idx, sample in enumerate(samples, 1):
+            img = read_image_bytes(sample.filepath)
+            if not img:
+                failed += 1
+                refresh_sample_status_after_annotation_change(db, project.id, sample.id)
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            clear_model_drafts_for_sample(db, project.id, sample.id)
+
+            try:
+                preds = _predict_sample(
+                    endpoint_name=ep,
+                    image_bytes=img,
+                    task_type=project.task_type,
+                    class_list=list(project.class_list),
+                    endpoint_config=ep_config,
+                )
+            except Exception as exc:
+                log.warning("Pre-annotate failed for sample %d: %s", sample.id, exc)
+                failed += 1
+                refresh_sample_status_after_annotation_change(db, project.id, sample.id)
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            if not preds:
+                skipped += 1
+                refresh_sample_status_after_annotation_change(db, project.id, sample.id)
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            for pred in preds:
+                db.add(Annotation(
+                    sample_id=sample.id,
+                    project_id=project.id,
+                    label=pred["label"],
+                    ann_type=pred["ann_type"],
+                    bbox_json=pred.get("bbox_json"),
+                    is_draft=True,
+                    created_by=created_by,
+                ))
+            sample.status = "pre_labeled"
+            completed += 1
+
+            if completed % 25 == 0:
+                db.flush()
+
+            yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+
+        db.commit()
+        yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
+
+    return StreamingResponse(
+        _sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -212,6 +297,7 @@ def get_project_inference_settings(
         ),
         "async_preannotate_job_configured": resolve_preannotate_job_id() is not None,
         "pre_annotate_databricks_job_id": resolve_preannotate_job_id(),
+        "workspace_host": os.environ.get("DATABRICKS_HOST", "").rstrip("/") or None,
     }
 
 

@@ -119,6 +119,7 @@ def main(run_id: int) -> None:
                 project,
                 chunk,
                 min_confidence=run_row.min_confidence,
+                text_prompt=run_row.text_prompt,
             )
             completed += stats["completed"]
             failed += stats["failed"]

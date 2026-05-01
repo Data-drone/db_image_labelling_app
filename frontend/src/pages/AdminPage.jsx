@@ -10,6 +10,7 @@ import {
   provisionLakebase,
   connectLakebase,
 } from '../api/client';
+import { humanizeApiError } from '../api/errors';
 
 export default function AdminPage() {
   const [dbStatus, setDbStatus] = useState(null);
@@ -38,7 +39,7 @@ export default function AdminPage() {
       setDbStatus(db);
       setLakebaseStatus(lb);
     } catch (e) {
-      setError(e.response?.data?.detail || e.message);
+      setError(humanizeApiError(e));
     } finally {
       setLoading(false);
     }
@@ -55,7 +56,7 @@ export default function AdminPage() {
       setProvisionMsg(result.message || JSON.stringify(result));
       await loadStatus();
     } catch (e) {
-      setProvisionMsg('Error: ' + (e.response?.data?.detail || e.message));
+      setProvisionMsg('Error: ' + humanizeApiError(e));
     } finally {
       setProvisioning(false);
     }
@@ -69,7 +70,7 @@ export default function AdminPage() {
       setConnectMsg(result.message || 'Connected!');
       await loadStatus();
     } catch (e) {
-      setConnectMsg('Error: ' + (e.response?.data?.detail || e.message));
+      setConnectMsg('Error: ' + humanizeApiError(e));
     } finally {
       setConnecting('');
     }

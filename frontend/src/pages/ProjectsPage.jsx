@@ -5,6 +5,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchProjects, deleteProject } from '../api/client';
+import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
 
 /**
@@ -191,7 +192,7 @@ export default function ProjectsPage() {
   useEffect(() => {
     fetchProjects()
       .then(setProjects)
-      .catch((e) => setError(e.response?.data?.detail || e.message))
+      .catch((e) => setError(humanizeApiError(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -202,7 +203,7 @@ export default function ProjectsPage() {
       await deleteProject(id);
       setProjects((prev) => prev.filter((p) => p.id !== id));
     } catch (err) {
-      alert(err.response?.data?.detail || err.message);
+      alert(humanizeApiError(err));
     }
   };
 

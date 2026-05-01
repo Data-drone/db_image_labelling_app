@@ -107,17 +107,20 @@ def _get_pg_username(endpoint) -> str:
     """Determine the PostgreSQL username by decoding the JWT credential.
 
     We always derive the username from the generated token's 'sub' claim,
-    which correctly reflects the current service principal's identity
-    (rather than picking the first role from the list, which may belong
-    to a different SP).
+    which correctly reflects the current identity (service principal UUID
+    or user email). The identity must have a Lakebase role on the branch.
     """
     import base64, json
     w = _get_workspace_client()
-    cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
-    parts = cred.token.split(".")
-    payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-    claims = json.loads(base64.urlsafe_b64decode(payload))
-    return claims.get("sub", "token")
+    try:
+        cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+        parts = cred.token.split(".")
+        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("sub", "token")
+    except Exception:
+        log.warning("Could not derive PG username from JWT; falling back to 'token'")
+        return "token"
 
 
 def generate_connection_string(endpoint, pg_username: str = None) -> str:
@@ -143,11 +146,16 @@ def _build_engine(connection_url: str) -> Engine:
 
 
 def uses_app_resource_postgres() -> bool:
-    """True when the app declares a Lakebase postgres resource (Databricks injects PG*)."""
+    """True when the app declares a Lakebase postgres resource (Databricks injects PG*).
+
+    Requires all four PG* variables including PGPASSWORD — if the platform
+    fails to inject the password we fall through to the SDK credential path.
+    """
     return bool(
         os.environ.get("PGHOST")
         and os.environ.get("PGDATABASE")
         and os.environ.get("PGUSER")
+        and os.environ.get("PGPASSWORD")
     )
 
 

@@ -4,9 +4,12 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Spinner from '../components/Spinner';
 import FilterableSelect from '../components/FilterableSelect';
+import { humanizeApiError } from '../api/errors';
 import {
+  fetchAppConfig,
   fetchCatalogs,
   fetchSchemas,
   fetchVolumes,
@@ -14,6 +17,7 @@ import {
 } from '../api/client';
 
 export default function BrowseVolumes() {
+  const navigate = useNavigate();
   // Mode: 'picker' or 'direct'
   const [mode, setMode] = useState('direct');
 
@@ -26,8 +30,16 @@ export default function BrowseVolumes() {
   const [volume, setVolume] = useState('');
   const [catalogsLoading, setCatalogsLoading] = useState(false);
 
-  // Direct path input
-  const [directPath, setDirectPath] = useState('/Volumes/brian_gen_ai/cv_explorer/demo_images');
+  // Direct path input — default populated from DEMO_VOLUME_PATH env var
+  const [directPath, setDirectPath] = useState('');
+
+  useEffect(() => {
+    fetchAppConfig()
+      .then((cfg) => {
+        if (cfg.demo_volume_path) setDirectPath(cfg.demo_volume_path);
+      })
+      .catch(() => {});
+  }, []);
 
   // Browsing state
   const [subpath, setSubpath] = useState('');
@@ -48,7 +60,7 @@ export default function BrowseVolumes() {
         setCatalogsLoading(false);
       })
       .catch((e) => {
-        setError('Could not load catalogs: ' + (e.response?.data?.detail || e.message));
+        setError('Could not load catalogs: ' + humanizeApiError(e));
         setCatalogsLoading(false);
       });
   }, [mode, catalogs.length]);
@@ -62,7 +74,7 @@ export default function BrowseVolumes() {
     if (!catalog) return;
     fetchSchemas(catalog)
       .then(setSchemas)
-      .catch((e) => setError('Could not load schemas: ' + (e.response?.data?.detail || e.message)));
+      .catch((e) => setError('Could not load schemas: ' + humanizeApiError(e)));
   }, [catalog]);
 
   // Load volumes when schema changes
@@ -72,7 +84,7 @@ export default function BrowseVolumes() {
     if (!catalog || !schema) return;
     fetchVolumes(catalog, schema)
       .then(setVolumesList)
-      .catch((e) => setError('Could not load volumes: ' + (e.response?.data?.detail || e.message)));
+      .catch((e) => setError('Could not load volumes: ' + humanizeApiError(e)));
   }, [catalog, schema]);
 
   // Reset subpath when volume or mode changes
@@ -80,6 +92,7 @@ export default function BrowseVolumes() {
     setSubpath('');
     setFolders([]);
     setFiles([]);
+    setHasBrowsed(false);
   }, [catalog, schema, volume, mode]);
 
   // Compute current path based on mode
@@ -104,7 +117,7 @@ export default function BrowseVolumes() {
       setFolders(data.folders || []);
       setFiles(data.files || []);
     } catch (e) {
-      setError('Could not browse: ' + (e.response?.data?.detail || e.message));
+      setError('Could not browse: ' + humanizeApiError(e));
       setFolders([]);
       setFiles([]);
     } finally {
@@ -112,10 +125,12 @@ export default function BrowseVolumes() {
     }
   }, [currentPath]);
 
+  const [hasBrowsed, setHasBrowsed] = useState(false);
+
   useEffect(() => {
-    if (mode === 'direct') return; // Only auto-browse in picker mode
+    if (mode === 'direct' && !hasBrowsed) return;
     loadDirectory();
-  }, [loadDirectory, mode]);
+  }, [loadDirectory, mode, hasBrowsed]);
 
   // Breadcrumb navigation
   const breadcrumbs = ['Root', ...(subpath ? subpath.split('/') : [])];
@@ -137,6 +152,7 @@ export default function BrowseVolumes() {
     setSubpath('');
     setFolders([]);
     setFiles([]);
+    setHasBrowsed(true);
     loadDirectory();
   };
 
@@ -349,9 +365,26 @@ export default function BrowseVolumes() {
           {/* Files */}
           {files.length > 0 && (
             <div style={{ marginBottom: '2rem' }}>
-              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>
-                Files ({files.length})
-              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
+                  Files ({files.length})
+                </h3>
+                {(() => {
+                  const imageCount = files.filter(f => {
+                    const ext = f.name.split('.').pop()?.toLowerCase();
+                    return ['jpg','jpeg','png','gif','webp','bmp','tiff','tif'].includes(ext);
+                  }).length;
+                  return imageCount > 0 ? (
+                    <button
+                      className="btn-primary"
+                      onClick={() => navigate(`/projects/new?volume=${encodeURIComponent(currentPath)}`)}
+                      style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
+                    >
+                      Create Project ({imageCount} images)
+                    </button>
+                  ) : null;
+                })()}
+              </div>
               <div style={{
                 display: 'grid',
                 gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))',

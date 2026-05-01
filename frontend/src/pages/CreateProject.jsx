@@ -2,8 +2,8 @@
  * Create Project page — form to create a new labeling project.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   createProject,
   fetchCatalogs,
@@ -12,33 +12,61 @@ import {
   browseDirectory,
   fetchInferenceDefaults,
 } from '../api/client';
-import Spinner from '../components/Spinner';
+import { humanizeApiError } from '../api/errors';
 import FilterableSelect from '../components/FilterableSelect';
+
+/** UC paths must be /Volumes/catalog/schema/volume[...]; local paths any non-empty string. */
+function isValidSourceVolumePath(path) {
+  const p = (path || '').trim();
+  if (!p) return false;
+  if (p.startsWith('/Volumes/')) {
+    const segs = p.split('/').filter(Boolean);
+    return segs.length >= 4;
+  }
+  return true;
+}
 
 export default function CreateProject() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const volumeFromBrowser = searchParams.get('volume') || '';
 
   // Form fields
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [taskType, setTaskType] = useState('classification');
+  const [taskType, setTaskType] = useState('detection');
   const [classList, setClassList] = useState([]);
   const [classInput, setClassInput] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [samPrompt, setSamPrompt] = useState('');
 
-  // Volume browser
+  // Volume browser — if arriving from Browse Volumes, split the path into
+  // base volume (/Volumes/cat/sch/vol) and any nested subfolder portion.
+  const [initialBase, initialSub] = useMemo(() => {
+    if (!volumeFromBrowser) return ['/Volumes/', ''];
+    const trimmed = volumeFromBrowser.replace(/\/+$/, '');
+    if (trimmed.startsWith('/Volumes/')) {
+      const segs = trimmed.split('/').filter(Boolean); // ['Volumes','cat','sch','vol', ...]
+      if (segs.length > 4) {
+        const base = '/' + segs.slice(0, 4).join('/');
+        const sub = segs.slice(4).join('/');
+        return [base, sub];
+      }
+    }
+    return [trimmed, ''];
+  }, [volumeFromBrowser]);
+
   const [volumeMode, setVolumeMode] = useState('direct');
-  const [directPath, setDirectPath] = useState('/Volumes/');
+  const [directPath, setDirectPath] = useState(initialBase);
   const [catalogs, setCatalogs] = useState([]);
   const [schemas, setSchemas] = useState([]);
   const [volumesList, setVolumesList] = useState([]);
   const [catalog, setCatalog] = useState('');
   const [schema, setSchema] = useState('');
   const [volume, setVolume] = useState('');
-  const [pickerSubpath, setPickerSubpath] = useState('');
-  const [pickerFolders, setPickerFolders] = useState([]);
-  const [pickerNavLoading, setPickerNavLoading] = useState(false);
+  const [nestedSubpath, setNestedSubpath] = useState(initialSub);
+  const [volumeFolders, setVolumeFolders] = useState([]);
+  const [volumeNavLoading, setVolumeNavLoading] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [browseResult, setBrowseResult] = useState(null);
 
@@ -46,7 +74,24 @@ export default function CreateProject() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  // Pre-fill serving endpoint from app env (e.g. SERVING_ENDPOINT via valueFrom)
+  // Auto-browse when arriving from Browse Volumes with a pre-filled path
+  const hasAutoScanned = useRef(false);
+  useEffect(() => {
+    if (volumeFromBrowser && !hasAutoScanned.current && isValidSourceVolumePath(volumeFromBrowser)) {
+      hasAutoScanned.current = true;
+      browseDirectory(volumeFromBrowser)
+        .then((data) => {
+          const imageCount = (data.files || []).filter(f => {
+            const ext = f.name.split('.').pop()?.toLowerCase();
+            return ['jpg','jpeg','png','gif','webp','bmp','tiff','tif'].includes(ext);
+          }).length;
+          setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
+        })
+        .catch(() => {});
+    }
+  }, [volumeFromBrowser]);
+
+  // Pre-fill serving endpoint from app env
   useEffect(() => {
     let cancelled = false;
     fetchInferenceDefaults()
@@ -55,7 +100,6 @@ export default function CreateProject() {
         const d = (data?.default_serving_endpoint || '').trim();
         if (!d) return;
         setServingEndpoint(d);
-        setShowAdvanced(true);
       })
       .catch(() => {});
     return () => {
@@ -85,50 +129,68 @@ export default function CreateProject() {
     fetchVolumes(catalog, schema).then(setVolumesList).catch(() => {});
   }, [catalog, schema]);
 
-  useEffect(() => {
-    setPickerSubpath('');
-  }, [catalog, schema, volume]);
+  const volumeBasePath = useMemo(() => {
+    if (volumeMode === 'picker') {
+      if (!catalog || !schema || !volume) return '';
+      return `/Volumes/${catalog}/${schema}/${volume}`;
+    }
+    return directPath.trim().replace(/\/+$/, '');
+  }, [volumeMode, catalog, schema, volume, directPath]);
 
-  const pickerBasePath = useMemo(() => {
-    if (volumeMode !== 'picker' || !catalog || !schema || !volume) return '';
-    return `/Volumes/${catalog}/${schema}/${volume}`;
-  }, [volumeMode, catalog, schema, volume]);
+  const prevVolumeBaseRef = useRef(null);
+  useEffect(() => {
+    const b = volumeBasePath || '';
+    if (prevVolumeBaseRef.current !== null && prevVolumeBaseRef.current !== b) {
+      setNestedSubpath('');
+    }
+    prevVolumeBaseRef.current = b;
+  }, [volumeBasePath]);
 
   const sourceVolume = useMemo(() => {
-    if (volumeMode === 'direct') return directPath.trim();
-    if (!pickerBasePath) return '';
-    if (!pickerSubpath) return pickerBasePath;
-    return `${pickerBasePath.replace(/\/+$/, '')}/${pickerSubpath}`;
-  }, [volumeMode, directPath, pickerBasePath, pickerSubpath]);
+    if (!volumeBasePath) return '';
+    if (!nestedSubpath) return volumeBasePath;
+    return `${volumeBasePath.replace(/\/+$/, '')}/${nestedSubpath}`;
+  }, [volumeBasePath, nestedSubpath]);
+
+  const sourceVolumeReady = useMemo(
+    () => Boolean(sourceVolume) && isValidSourceVolumePath(sourceVolume),
+    [sourceVolume],
+  );
 
   useEffect(() => {
     setBrowseResult(null);
   }, [sourceVolume]);
 
+  const showVolumeFolderNav = useMemo(() => {
+    if (!volumeBasePath) return false;
+    if (volumeMode === 'picker') return true;
+    return isValidSourceVolumePath(volumeBasePath);
+  }, [volumeMode, volumeBasePath]);
+
   useEffect(() => {
-    if (volumeMode !== 'picker' || !pickerBasePath) {
-      setPickerFolders([]);
+    if (!showVolumeFolderNav) {
+      setVolumeFolders([]);
       return;
     }
     let cancelled = false;
-    const listPath = pickerSubpath
-      ? `${pickerBasePath.replace(/\/+$/, '')}/${pickerSubpath}`
-      : pickerBasePath;
-    setPickerNavLoading(true);
+    const listPath = nestedSubpath
+      ? `${volumeBasePath.replace(/\/+$/, '')}/${nestedSubpath}`
+      : volumeBasePath;
+    setVolumeNavLoading(true);
     browseDirectory(listPath)
       .then((data) => {
-        if (!cancelled) setPickerFolders(data.folders || []);
+        if (!cancelled) setVolumeFolders(data.folders || []);
       })
       .catch(() => {
-        if (!cancelled) setPickerFolders([]);
+        if (!cancelled) setVolumeFolders([]);
       })
       .finally(() => {
-        if (!cancelled) setPickerNavLoading(false);
+        if (!cancelled) setVolumeNavLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [volumeMode, pickerBasePath, pickerSubpath]);
+  }, [showVolumeFolderNav, volumeBasePath, nestedSubpath]);
 
   // Browse the selected path
   const handleBrowse = useCallback(async () => {
@@ -143,7 +205,7 @@ export default function CreateProject() {
       }).length;
       setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
     } catch (e) {
-      setBrowseResult({ error: e.response?.data?.detail || e.message });
+      setBrowseResult({ error: humanizeApiError(e) });
     } finally {
       setBrowsing(false);
     }
@@ -162,9 +224,25 @@ export default function CreateProject() {
     setClassList(classList.filter((c) => c !== cls));
   };
 
+  const submitBlockers = useMemo(() => {
+    const parts = [];
+    if (!name.trim()) parts.push('enter a project name');
+    if (!sourceVolume) parts.push('choose a source volume (catalog picker or full direct path)');
+    else if (!isValidSourceVolumePath(sourceVolume)) {
+      parts.push('use a full Unity Catalog path: /Volumes/catalog/schema/volume');
+    }
+    if (classList.length === 0) parts.push('add at least one class (type a label and click Add or press Enter)');
+    return parts;
+  }, [name, sourceVolume, classList.length]);
+
+  const canSubmit = submitBlockers.length === 0;
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!name.trim() || !sourceVolume || classList.length === 0) return;
+    if (!canSubmit) {
+      setError(`Complete the form first: ${submitBlockers.join('; ')}.`);
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
@@ -178,10 +256,15 @@ export default function CreateProject() {
       if (servingEndpoint.trim()) {
         payload.serving_endpoint = servingEndpoint.trim();
       }
+      const epConfig = { adapter: 'sam31' };
+      if (samPrompt.trim()) {
+        epConfig.sam_text_prompt = samPrompt.trim();
+      }
+      payload.endpoint_config = epConfig;
       const project = await createProject(payload);
       navigate(`/projects/${project.id}`);
     } catch (err) {
-      setError(err.response?.data?.detail || err.message);
+      setError(humanizeApiError(err));
     } finally {
       setSubmitting(false);
     }
@@ -250,53 +333,6 @@ export default function CreateProject() {
           </div>
         </div>
 
-        {/* Class list */}
-        <div style={{ marginBottom: '1.25rem' }}>
-          <label style={labelStyle}>Classes * ({classList.length})</label>
-          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <input
-              type="text"
-              value={classInput}
-              onChange={(e) => setClassInput(e.target.value)}
-              placeholder="Type a class name and press Enter"
-              style={{ ...inputStyle, flex: 1 }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  addClass();
-                }
-              }}
-            />
-            <button
-              type="button"
-              onClick={addClass}
-              className="btn-secondary"
-              style={{ padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
-            >
-              Add
-            </button>
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-            {classList.map((cls, i) => (
-              <span
-                key={cls}
-                className="badge badge-blue"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.25rem 0.6rem' }}
-              >
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700 }}>{i + 1}</span>
-                {cls}
-                <button
-                  type="button"
-                  onClick={() => removeClass(cls)}
-                  style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.85rem', lineHeight: 1 }}
-                >
-                  &#x2715;
-                </button>
-              </span>
-            ))}
-          </div>
-        </div>
-
         {/* Source volume */}
         <div style={{ marginBottom: '1.25rem' }}>
           <label style={labelStyle}>Source Volume *</label>
@@ -325,13 +361,19 @@ export default function CreateProject() {
           </div>
 
           {volumeMode === 'direct' ? (
-            <input
-              type="text"
-              value={directPath}
-              onChange={(e) => setDirectPath(e.target.value)}
-              placeholder="/Volumes/catalog/schema/volume"
-              style={inputStyle}
-            />
+            <div>
+              <input
+                type="text"
+                value={directPath}
+                onChange={(e) => setDirectPath(e.target.value)}
+                placeholder="/Volumes/catalog/schema/volume"
+                style={inputStyle}
+              />
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                Enter the volume mount path (no trailing subfolder required). When the path is valid, use the folder
+                navigator below to nest into a subfolder—same as Catalog Picker.
+              </div>
+            </div>
           ) : (
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <div style={{ flex: 1, minWidth: 120 }}>
@@ -363,7 +405,7 @@ export default function CreateProject() {
             </div>
           )}
 
-          {volumeMode === 'picker' && pickerBasePath && (
+          {showVolumeFolderNav && (
             <div
               style={{
                 marginTop: '0.75rem',
@@ -374,27 +416,27 @@ export default function CreateProject() {
               }}
             >
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                Subfolder (optional) — click a folder to nest; project uses the folder shown in the path below.
+                Subfolder (optional) — click a folder to nest; project uses the resolved path shown below.
               </div>
-              {pickerNavLoading ? (
+              {volumeNavLoading ? (
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Loading folders…</div>
               ) : (
                 <>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.25rem', marginBottom: pickerFolders.length ? '0.65rem' : 0 }}>
-                    {['Volume root', ...(pickerSubpath ? pickerSubpath.split('/') : [])].map((crumb, i) => (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.25rem', marginBottom: volumeFolders.length ? '0.65rem' : 0 }}>
+                    {['Volume root', ...(nestedSubpath ? nestedSubpath.split('/') : [])].map((crumb, i) => (
                       <span key={`${crumb}-${i}`} style={{ display: 'flex', alignItems: 'center' }}>
                         {i > 0 && <span style={{ color: 'var(--text-muted)', margin: '0 0.2rem' }}>/</span>}
                         <button
                           type="button"
                           onClick={() => {
-                            if (i === 0) setPickerSubpath('');
+                            if (i === 0) setNestedSubpath('');
                             else {
-                              const parts = pickerSubpath.split('/');
-                              setPickerSubpath(parts.slice(0, i).join('/'));
+                              const parts = nestedSubpath.split('/');
+                              setNestedSubpath(parts.slice(0, i).join('/'));
                             }
                           }}
                           style={{
-                            background: i === (pickerSubpath ? pickerSubpath.split('/').length : 0) ? 'rgba(66, 153, 224, 0.12)' : 'var(--bg-input)',
+                            background: i === (nestedSubpath ? nestedSubpath.split('/').length : 0) ? 'rgba(66, 153, 224, 0.12)' : 'var(--bg-input)',
                             border: '1px solid var(--border-color)',
                             borderRadius: 6,
                             padding: '0.25rem 0.5rem',
@@ -408,7 +450,7 @@ export default function CreateProject() {
                       </span>
                     ))}
                   </div>
-                  {pickerFolders.length > 0 ? (
+                  {volumeFolders.length > 0 ? (
                     <div
                       style={{
                         display: 'grid',
@@ -416,12 +458,12 @@ export default function CreateProject() {
                         gap: '0.5rem',
                       }}
                     >
-                      {pickerFolders.map((folder) => (
+                      {volumeFolders.map((folder) => (
                         <button
                           key={folder.name}
                           type="button"
                           onClick={() =>
-                            setPickerSubpath(pickerSubpath ? `${pickerSubpath}/${folder.name}` : folder.name)
+                            setNestedSubpath(nestedSubpath ? `${nestedSubpath}/${folder.name}` : folder.name)
                           }
                           style={{
                             background: 'var(--bg-input)',
@@ -482,43 +524,100 @@ export default function CreateProject() {
           )}
         </div>
 
-        {/* Advanced: Model Serving */}
-        <div style={{ marginBottom: '1.25rem' }}>
-          <button
-            type="button"
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-muted)',
-              cursor: 'pointer',
-              fontSize: '0.8rem',
-              padding: 0,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.3rem',
-            }}
-          >
-            <span style={{ fontSize: '0.65rem' }}>{showAdvanced ? '\u25BC' : '\u25B6'}</span>
-            Pre-annotation (optional)
-          </button>
-          {showAdvanced && (
-            <div style={{ marginTop: '0.5rem' }}>
-              <label style={labelStyle}>Model Serving Endpoint</label>
+        {/* Pre-Label with SAM 3.1 */}
+        <div
+          style={{
+            marginBottom: '1.5rem',
+            padding: '1.25rem',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 12,
+          }}
+        >
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.15rem' }}>
+            Pre-Label with SAM 3.1
+          </h2>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
+            Define classes and an optional text prompt for automatic bounding-box pre-annotation using SAM 3.1.
+          </p>
+
+          {/* Classes */}
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={labelStyle}>Classes * ({classList.length})</label>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
               <input
                 type="text"
-                value={servingEndpoint}
-                onChange={(e) => setServingEndpoint(e.target.value)}
-                placeholder="e.g. my-classifier-endpoint"
-                style={inputStyle}
+                value={classInput}
+                onChange={(e) => setClassInput(e.target.value)}
+                placeholder="Type a class name and press Enter"
+                style={{ ...inputStyle, flex: 1 }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addClass();
+                  }
+                }}
               />
-              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                Name of a Databricks Model Serving endpoint for pre-labeling. Leave blank to skip.
-                The endpoint must be added as a resource in the Databricks Apps UI with "Can query" permission.
-                If the app sets <code style={{ fontSize: '0.65rem' }}>SERVING_ENDPOINT</code>, this field is pre-filled automatically.
-              </div>
+              <button
+                type="button"
+                onClick={addClass}
+                className="btn-secondary"
+                style={{ padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
+              >
+                Add
+              </button>
             </div>
-          )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+              {classList.map((cls, i) => (
+                <span
+                  key={cls}
+                  className="badge badge-blue"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.25rem 0.6rem' }}
+                >
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700 }}>{i + 1}</span>
+                  {cls}
+                  <button
+                    type="button"
+                    onClick={() => removeClass(cls)}
+                    style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.85rem', lineHeight: 1 }}
+                  >
+                    &#x2715;
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* SAM Text Prompt */}
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={labelStyle}>SAM Text Prompt</label>
+            <textarea
+              value={samPrompt}
+              onChange={(e) => setSamPrompt(e.target.value)}
+              placeholder={classList.length > 0 ? `Default: "${classList.join('. ')}"` : 'e.g. "car. person. traffic sign"'}
+              rows={2}
+              style={{ ...inputStyle, resize: 'vertical' }}
+            />
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Text prompt sent to SAM 3.1 for detection. Leave blank to auto-generate from the class list above (classes joined with ". ").
+            </div>
+          </div>
+
+          {/* Serving endpoint */}
+          <div>
+            <label style={labelStyle}>Model Serving Endpoint</label>
+            <input
+              type="text"
+              value={servingEndpoint}
+              onChange={(e) => setServingEndpoint(e.target.value)}
+              placeholder="e.g. sam31-endpoint"
+              style={inputStyle}
+            />
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Databricks Model Serving endpoint running SAM 3.1. Must be added as an App resource with "Can query" permission.
+              {servingEndpoint && <span style={{ color: 'var(--status-success)', marginLeft: '0.5rem' }}>Auto-detected from environment</span>}
+            </div>
+          </div>
         </div>
 
         {/* Error */}
@@ -537,23 +636,38 @@ export default function CreateProject() {
         )}
 
         {/* Submit */}
-        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
-          <button
-            type="submit"
-            disabled={submitting || !name.trim() || !sourceVolume || classList.length === 0}
-            className="btn-primary"
-            style={{ padding: '0.6rem 2rem' }}
-          >
-            {submitting ? 'Creating...' : 'Create Project'}
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate('/')}
-            className="btn-secondary"
-            style={{ padding: '0.6rem 1.5rem' }}
-          >
-            Cancel
-          </button>
+        <div style={{ marginTop: '1.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              type="submit"
+              disabled={submitting || !canSubmit}
+              className="btn-primary"
+              style={{ padding: '0.6rem 2rem' }}
+            >
+              {submitting ? 'Creating...' : 'Create Project'}
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/projects')}
+              className="btn-secondary"
+              style={{ padding: '0.6rem 1.5rem' }}
+            >
+              Cancel
+            </button>
+          </div>
+          {!canSubmit && !submitting && (
+            <p
+              style={{
+                marginTop: '0.65rem',
+                fontSize: '0.8rem',
+                color: 'var(--text-muted)',
+                lineHeight: 1.45,
+              }}
+            >
+              <strong style={{ color: 'var(--text-secondary)' }}>Create is disabled until:</strong>{' '}
+              {submitBlockers.join(' · ')}.
+            </p>
+          )}
         </div>
       </form>
     </div>

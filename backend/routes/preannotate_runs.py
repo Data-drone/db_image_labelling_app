@@ -18,12 +18,56 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["preannotate-jobs"])
 
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
 
 def _get_project(project_id: int, db: Session) -> LabelingProject:
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
     return p
+
+
+def _sync_run_with_databricks(row: PreannotateRun, db: Session) -> None:
+    """If the DB row is non-terminal but the Databricks run has finished, update the row.
+
+    Handles the case where the serverless job crashed before the worker could
+    write back to the database (e.g. library install failure, OOM, timeout).
+    """
+    if row.status in _TERMINAL_STATUSES or not row.databricks_run_id:
+        return
+    try:
+        from ..volumes import _get_workspace_client
+        w = _get_workspace_client()
+        run = w.jobs.get_run(run_id=row.databricks_run_id)
+        state = run.state
+        if not state:
+            return
+        lcs = str(getattr(state, "life_cycle_state", "") or "").upper()
+        result = str(getattr(state, "result_state", "") or "").upper()
+        msg = str(getattr(state, "state_message", "") or "")
+
+        log.info(
+            "Cross-check run %s (db_run=%s): life_cycle=%s result=%s msg=%.120s",
+            row.id, row.databricks_run_id, lcs, result, msg,
+        )
+
+        if "FAILED" in result or "INTERNAL_ERROR" in lcs or "SKIPPED" in lcs or "BLOCKED" in lcs:
+            row.status = "failed"
+            row.error_message = (msg or f"Databricks run {lcs}/{result}")[:4000]
+            row.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            log.info("Marked run %s as failed from Databricks state: %s / %s", row.id, lcs, result)
+        elif "CANCEL" in result:
+            row.status = "cancelled"
+            row.finished_at = datetime.now(timezone.utc)
+            db.commit()
+        elif "SUCCESS" in result and row.status in ("queued", "pending"):
+            row.status = "succeeded"
+            row.finished_at = datetime.now(timezone.utc)
+            db.commit()
+    except Exception:
+        log.warning("Could not cross-check Databricks run %s", row.databricks_run_id, exc_info=True)
 
 
 @router.post("/pre-annotate-async", response_model=PreannotateRunOut)
@@ -59,6 +103,7 @@ def enqueue_preannotate_job(
         max_samples=payload.max_samples or 0,
         include_pre_labeled=bool(payload.include_pre_labeled),
         min_confidence=payload.min_confidence,
+        text_prompt=payload.text_prompt or None,
         created_by=user_email,
     )
     db.add(run_row)
@@ -93,6 +138,7 @@ def get_latest_preannotate_run(project_id: int, db: Session = Depends(get_db)):
     )
     if not row:
         raise HTTPException(status_code=404, detail="No pre-annotate runs for this project.")
+    _sync_run_with_databricks(row, db)
     return PreannotateRunOut.model_validate(row)
 
 
@@ -106,4 +152,5 @@ def get_preannotate_run(project_id: int, run_id: int, db: Session = Depends(get_
     )
     if not row:
         raise HTTPException(status_code=404, detail="Run not found.")
+    _sync_run_with_databricks(row, db)
     return PreannotateRunOut.model_validate(row)

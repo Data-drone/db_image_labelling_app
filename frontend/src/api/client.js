@@ -3,11 +3,24 @@
  */
 
 import axios from 'axios';
+import { humanizeApiError } from './errors';
 
 const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
 });
+
+api.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (err && typeof err === 'object') {
+      err.userMessage = humanizeApiError(err);
+    }
+    return Promise.reject(err);
+  },
+);
+
+export { humanizeApiError } from './errors';
 
 // ---------------------------------------------------------------------------
 // Projects
@@ -86,6 +99,61 @@ export const predictSample = (projectId, sampleId) =>
 export const preAnnotateProject = (projectId, params = {}) =>
   api.post(`/projects/${projectId}/pre-annotate`, params, { timeout: 300000 }).then(r => r.data);
 
+/**
+ * SSE-streaming pre-annotate. Calls onProgress({completed,failed,skipped,total,current})
+ * for each sample and resolves with the final counters on completion.
+ */
+export function preAnnotateProjectStream(projectId, params = {}, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    fetch(`/api/projects/${projectId}/pre-annotate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(params),
+      signal,
+    })
+      .then((res) => {
+        if (!res.ok) {
+          return res.text().then((body) => {
+            let detail = body;
+            try { detail = JSON.parse(body).detail || body; } catch {}
+            reject(new Error(detail));
+          });
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let lastData = null;
+
+        function pump() {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              resolve(lastData || { completed: 0, failed: 0, skipped: 0, total: 0 });
+              return;
+            }
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
+            let eventType = 'progress';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+              else if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  lastData = data;
+                  if (eventType === 'progress' && onProgress) onProgress(data);
+                  if (eventType === 'done') { resolve(data); return; }
+                } catch {}
+              }
+            }
+            pump();
+          }).catch(reject);
+        }
+        pump();
+      })
+      .catch(reject);
+  });
+}
+
 export const acceptDraftsSample = (projectId, sampleId) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/accept-drafts`).then(r => r.data);
 
@@ -112,6 +180,23 @@ export const fetchLatestPreannotateRun = (projectId) =>
 
 export const fetchPreannotateRun = (projectId, runId) =>
   api.get(`/projects/${projectId}/pre-annotate-runs/${runId}`).then(r => r.data);
+
+// ---------------------------------------------------------------------------
+// Finetuning
+// ---------------------------------------------------------------------------
+export const triggerFinetune = (projectId, exportPath) =>
+  api.post(`/projects/${projectId}/finetune`, { export_path: exportPath }, { timeout: 60000 }).then(r => r.data);
+
+export const fetchLatestFinetuneRun = (projectId) =>
+  api.get(`/projects/${projectId}/finetune-runs/latest`).then(r => r.data);
+
+export const fetchFinetuneRun = (projectId, runId) =>
+  api.get(`/projects/${projectId}/finetune-runs/${runId}`).then(r => r.data);
+
+// ---------------------------------------------------------------------------
+// App config
+// ---------------------------------------------------------------------------
+export const fetchAppConfig = () => api.get('/config').then(r => r.data);
 
 // ---------------------------------------------------------------------------
 // Browse & Volume navigation (kept from original)

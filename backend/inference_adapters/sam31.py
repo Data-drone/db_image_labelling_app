@@ -1,8 +1,9 @@
-"""SAM 3.1 + route-optimized serving — dataplane ``query`` + configurable record shape."""
+"""SAM 3.1 + route-optimized serving — dataplane ``query`` + JSON-wrapped input."""
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import Optional
 
@@ -12,11 +13,13 @@ log = logging.getLogger(__name__)
 
 
 class Sam31Adapter(InferenceAdapter):
-    """Route-optimized endpoints: ``serving_endpoints_data_plane.query`` (OAuth dataplane).
+    """SAM 3.1 serving wrapper.
 
-    Request record defaults to ``{"image": "<base64>"}``. Override with
-    ``endpoint_config["sam_input_image_key"]`` and optional ``sam_record_extra``
-    (dict merged into the record; image field wins on key collision).
+    The endpoint schema is ``{"input": "<json_string>"}`` where the JSON string
+    contains ``{"image": "<base64>", "prompt_type": "text", "prompt": "..."}``
+    (or point/box prompts).
+
+    For detection tasks the text prompt is the class list joined by ``. ``.
     """
 
     def query_and_parse(
@@ -30,26 +33,81 @@ class Sam31Adapter(InferenceAdapter):
         from .. import inference as inf
 
         cfg = endpoint_config or {}
-        image_key = (cfg.get("sam_input_image_key") or "image").strip() or "image"
-        extra = cfg.get("sam_record_extra")
-        if extra is not None and not isinstance(extra, dict):
-            log.warning("sam_record_extra is not a dict; ignoring")
-            extra = None
-
         b64 = base64.b64encode(image_bytes).decode("ascii")
-        record: dict = {image_key: b64}
-        if isinstance(extra, dict):
-            record = {**extra, **record}
+
+        prompt = cfg.get("sam_text_prompt") or ". ".join(class_list)
+        inner_payload: dict = {
+            "image": b64,
+            "prompt_type": "text",
+            "prompt": prompt,
+        }
+        if "sam_record_extra" in cfg and isinstance(cfg["sam_record_extra"], dict):
+            inner_payload = {**cfg["sam_record_extra"], **inner_payload}
+
+        record = [{"input": json.dumps(inner_payload)}]
 
         raw = inf.query_serving_endpoint(
             endpoint_name,
-            [record],
+            record,
             use_data_plane=True,
         )
 
-        if task_type == "classification":
-            return inf.parse_classification_response(raw, class_list, endpoint_config)
-        if task_type == "detection":
-            return inf.parse_detection_response(raw, class_list, endpoint_config)
-        log.warning("Unknown task_type '%s', trying classification parser", task_type)
-        return inf.parse_classification_response(raw, class_list, endpoint_config)
+        return self._parse_sam_response(raw, class_list, cfg)
+
+    def _parse_sam_response(
+        self,
+        raw: dict,
+        class_list: list[str],
+        cfg: dict,
+    ) -> list[dict]:
+        """Parse SAM 3.1 detection output into annotation dicts."""
+        min_conf = float(cfg.get("min_confidence", 0.3))
+        predictions = raw.get("predictions", [])
+        annotations: list[dict] = []
+
+        for pred_row in predictions:
+            output_str = pred_row if isinstance(pred_row, str) else pred_row.get("output", "")
+            if isinstance(output_str, str):
+                try:
+                    output = json.loads(output_str)
+                except (json.JSONDecodeError, TypeError):
+                    log.warning("Cannot parse SAM output: %s", output_str[:200])
+                    continue
+            else:
+                output = output_str
+
+            if "error" in output:
+                log.warning("SAM endpoint returned error: %s", output["error"])
+                continue
+
+            img_size = output.get("image_size", {})
+            img_w = img_size.get("width", 1)
+            img_h = img_size.get("height", 1)
+
+            for det in output.get("detections", []):
+                score = det.get("score", 0.0)
+                if score < min_conf:
+                    continue
+
+                box = det.get("box")
+                if not box:
+                    continue
+
+                x1 = box.get("x1", 0) / img_w
+                y1 = box.get("y1", 0) / img_h
+                x2 = box.get("x2", 0) / img_w
+                y2 = box.get("y2", 0) / img_h
+                w = x2 - x1
+                h = y2 - y1
+
+                label = class_list[0] if class_list else "object"
+
+                annotations.append({
+                    "label": label,
+                    "ann_type": "bbox",
+                    "bbox_json": {"x": round(x1, 6), "y": round(y1, 6),
+                                  "w": round(w, 6), "h": round(h, 6)},
+                    "confidence": round(score, 4),
+                })
+
+        return annotations

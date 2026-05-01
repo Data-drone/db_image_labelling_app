@@ -62,6 +62,7 @@ def run_preannotate_for_samples(
     samples: list,
     *,
     min_confidence: Optional[float] = None,
+    text_prompt: Optional[str] = None,
 ) -> dict[str, int]:
     """Run model inference and insert draft annotations. Caller must commit.
 
@@ -78,6 +79,8 @@ def run_preannotate_for_samples(
     endpoint_config = dict(project.endpoint_config or {})
     if min_confidence is not None:
         endpoint_config["min_confidence"] = min_confidence
+    if text_prompt:
+        endpoint_config["sam_text_prompt"] = text_prompt
 
     created_by = f"model:{endpoint_name}"
     completed = failed = skipped = 0

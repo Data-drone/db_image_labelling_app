@@ -119,6 +119,14 @@ a:hover {
 .btn-primary:active {
   transform: scale(0.97);
 }
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+.btn-primary:disabled:hover {
+  background: var(--accent-blue-dark);
+}
 
 .btn-secondary {
   background: transparent;
@@ -130,6 +138,10 @@ a:hover {
   font-size: 0.875rem;
   cursor: pointer;
   transition: background 0.2s, border-color 0.2s;
+}
+.btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .btn-secondary:hover {
   background: var(--bg-hover);
@@ -247,6 +259,62 @@ a:hover {
   background: rgba(230, 167, 0, 0.15);
   color: #ffa726;
   border-color: rgba(230, 167, 0, 0.3);
+}
+
+/* Dropdown menu */
+.dropdown-wrapper {
+  position: relative;
+  display: inline-block;
+}
+.dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 180px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.35rem 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  animation: dropdown-in 0.12s ease-out;
+}
+.dropdown-menu .dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 0.85rem;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+.dropdown-menu .dropdown-item:hover {
+  background: var(--bg-hover);
+}
+.dropdown-menu .dropdown-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dropdown-menu .dropdown-item:disabled:hover {
+  background: none;
+}
+.dropdown-menu .dropdown-item.danger {
+  color: #f97316;
+}
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 0.3rem 0;
+}
+@keyframes dropdown-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* Spinner animation */

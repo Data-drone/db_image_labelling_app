@@ -1,6 +1,10 @@
 # Databricks Job — async batch pre-annotation (see backend/routes/preannotate_runs.py).
 # Deploy: databricks bundle deploy
 # Set env PRE_ANNOTATE_DATABRICKS_JOB_ID in the app to this job's numeric id after deploy.
+#
+# Runs on serverless compute — the worker is pure I/O-bound Python (SDK calls
+# to Model Serving + Lakebase writes), no Spark or GPU needed. Startup is
+# seconds instead of minutes compared to a classic cluster.
 
 resources:
   jobs:
@@ -9,30 +13,26 @@ resources:
       parameters:
         - name: run_id
           default: "0"
-      job_clusters:
-        - job_cluster_key: preann_cluster
-          new_cluster:
-            spark_version: ${var.spark_version}
-            node_type_id: ${var.node_type_id}
-            # Driver-only (Python task). If you need workers, set num_workers > 0 and
-            # remove spark_conf / custom_tags below (Databricks single-node rules).
-            num_workers: 0
-            data_security_mode: SINGLE_USER
-            spark_conf:
-              spark.databricks.cluster.profile: singleNode
-              spark.master: local[*]
-            custom_tags:
-              ResourceClass: SingleNode
-            spark_env_vars:
-              USE_LAKEBASE: "true"
-              LAKEBASE_AUTO_PROVISION: "false"
-              LAKEBASE_PROJECT_ID: "cv-explorer"
+        - name: sp_client_id
+          default: ""
+        - name: sp_client_secret
+          default: ""
       tasks:
         - task_key: main
-          job_cluster_key: preann_cluster
+          environment_key: preann_env
           spark_python_task:
             python_file: ../scripts/preannotate_job.py
             parameters:
               - "{{job.parameters.run_id}}"
-          libraries:
-            - requirements: ../requirements.txt
+              - "{{job.parameters.sp_client_id}}"
+              - "{{job.parameters.sp_client_secret}}"
+      environments:
+        - environment_key: preann_env
+          spec:
+            environment_version: "5"
+            dependencies:
+              - sqlalchemy>=2.0.0
+              - psycopg2-binary>=2.9.0
+              - databricks-sdk>=0.99
+              - Pillow>=10.0.0
+              - pydantic>=2.0.0

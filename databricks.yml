@@ -18,13 +18,17 @@ variables:
   # App resources (override if your workspace differs)
   # Override for your workspace, e.g. brian_gen_ai.cv_explorer.demo_images
   demo_volume_full_name:
-    default: fevm_shared_catalog.fevm_shared_data.fevm_shared_assets
+    default: classic_stable_hdtwu7_catalog.cv_manufacturing.labeling
+  export_volume_full_name:
+    default: classic_stable_hdtwu7_catalog.cv_manufacturing.labeling
   lakebase_postgres_branch:
     default: projects/cv-explorer/branches/production
   lakebase_postgres_database:
-    default: projects/cv-explorer/branches/production/databases/db-9ioz-rwsg1iavxm
+    default: projects/cv-explorer/branches/production/databases/cv-explorer-db
   serving_endpoint_name:
     default: cv-sam31-cv_manufacturing
+  finetune_job_id:
+    default: "0"
   app_name:
     default: cv-explorer-dev
 targets:

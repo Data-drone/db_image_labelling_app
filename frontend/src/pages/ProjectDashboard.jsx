@@ -6,10 +6,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
-  fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus, preAnnotateProject,
+  fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus,
+  preAnnotateProject, preAnnotateProjectStream,
   acceptAllDrafts, clearAllModelDrafts,
   fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun,
+  fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
 } from '../api/client';
+import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -33,18 +36,35 @@ export default function ProjectDashboard() {
   const [exportResult, setExportResult] = useState(null);
   const [exportError, setExportError] = useState('');
 
+  const [configExportVolume, setConfigExportVolume] = useState('');
+
+  // Finetuning state
+  const [finetuneConfigured, setFinetuneConfigured] = useState(false);
+  const [triggerFinetuneAfterExport, setTriggerFinetuneAfterExport] = useState(false);
+  const [finetuneTriggering, setFinetuneTriggering] = useState(false);
+  const [finetuneRun, setFinetuneRun] = useState(null);
+  const [finetuneError, setFinetuneError] = useState('');
+  const finetunePollingRef = useRef(null);
+
   // Endpoint / pre-annotation state
   const [endpointStatus, setEndpointStatus] = useState(null);
   const [preAnnotating, setPreAnnotating] = useState(false);
   const [preAnnotateResult, setPreAnnotateResult] = useState(null);
   const [preAnnotateError, setPreAnnotateError] = useState('');
+  const [preAnnotateProgress, setPreAnnotateProgress] = useState(null);
   const [includePreLabeledInPreAnnotate, setIncludePreLabeledInPreAnnotate] = useState(false);
+  const [preAnnotatePrompt, setPreAnnotatePrompt] = useState('');
   const [draftActionBusy, setDraftActionBusy] = useState(false);
   const [draftActionMessage, setDraftActionMessage] = useState('');
   const [inferenceSettings, setInferenceSettings] = useState(null);
   const [asyncPreAnnotating, setAsyncPreAnnotating] = useState(false);
   const [activeAsyncRunId, setActiveAsyncRunId] = useState(null);
   const [asyncRunMessage, setAsyncRunMessage] = useState('');
+  const [asyncDatabricksRunId, setAsyncDatabricksRunId] = useState(null);
+
+  // Actions dropdown state
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const actionsRef = useRef(null);
 
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
@@ -74,19 +94,31 @@ export default function ProjectDashboard() {
   }, []);
 
   useEffect(() => {
+    if (!actionsOpen) return;
+    const onClickOutside = (e) => {
+      if (actionsRef.current && !actionsRef.current.contains(e.target)) setActionsOpen(false);
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [actionsOpen]);
+
+  useEffect(() => {
     Promise.all([
       fetchProject(projectId),
       fetchProjectStats(projectId),
       fetchDetailedProjectStats(projectId),
       fetchInferenceSettings(projectId).catch(() => null),
+      fetchAppConfig().catch(() => ({})),
     ])
-      .then(([proj, st, detailed, inf]) => {
+      .then(([proj, st, detailed, inf, cfg]) => {
         setProject(proj);
         setStats(st);
         setDetailedStats(detailed);
         setInferenceSettings(inf);
+        setFinetuneConfigured(!!cfg.finetune_job_configured);
+        if (cfg.export_volume_path) setConfigExportVolume(cfg.export_volume_path);
       })
-      .catch(() => navigate('/'))
+      .catch(() => navigate('/projects'))
       .finally(() => setLoading(false));
   }, [projectId, navigate]);
 
@@ -102,12 +134,17 @@ export default function ProjectDashboard() {
     const tick = async () => {
       try {
         const r = await fetchPreannotateRun(projectId, activeAsyncRunId);
+        if (r.databricks_run_id) setAsyncDatabricksRunId(r.databricks_run_id);
+        if (r.total_planned > 0) {
+          const pct = Math.round(((r.completed + r.failed + r.skipped) / r.total_planned) * 100);
+          setAsyncRunMessage(`Background job: ${r.completed + r.failed + r.skipped} / ${r.total_planned} (${pct}%) — ${r.completed} pre-labeled, ${r.skipped} skipped, ${r.failed} failed`);
+        }
         if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
           setActiveAsyncRunId(null);
           setAsyncRunMessage(
             r.status === 'succeeded'
               ? `Background pre-label finished (${r.completed} samples pre-labeled, ${r.skipped} skipped, ${r.failed} failed).`
-              : `Background pre-label ended: ${r.status}${r.error_message ? ` — ${r.error_message}` : ''}`,
+              : `Background pre-label ended: ${r.status}${r.error_message ? ` — ${r.error_message.slice(0, 200)}` : ''}`,
           );
           const [st, detailed] = await Promise.all([
             fetchProjectStats(projectId),
@@ -132,57 +169,89 @@ export default function ProjectDashboard() {
       navigate(`/projects/${newProj.id}`);
     } catch (err) {
       console.error('Clone failed:', err);
-      alert('Failed to create new version: ' + (err.response?.data?.detail || err.message));
+      alert('Failed to create new version: ' + humanizeApiError(err));
     } finally {
       setCloning(false);
     }
   };
 
-  const handleAsyncPreAnnotate = async () => {
-    if (asyncPreAnnotating) return;
-    const scope = includePreLabeledInPreAnnotate
-      ? 'unlabeled and pre-labeled rows (model drafts on pre-labeled will be replaced)'
-      : 'unlabeled rows only';
-    if (!confirm(`Start a Databricks Job to pre-label ${scope}? You can close this page; progress updates every few seconds.\n\nContinue?`)) return;
-    setAsyncPreAnnotating(true);
-    setAsyncRunMessage('');
-    try {
-      const r = await enqueuePreannotateJob(projectId, {
-        include_pre_labeled: includePreLabeledInPreAnnotate,
-        max_samples: 0,
-      });
-      setActiveAsyncRunId(r.id);
-      setAsyncRunMessage(`Job queued (run record #${r.id}, Databricks run ${r.databricks_run_id ?? '—'}).`);
-    } catch (err) {
-      setAsyncRunMessage(err.response?.data?.detail || err.message || 'Failed to start job');
-    } finally {
-      setAsyncPreAnnotating(false);
-    }
+  const SYNC_THRESHOLD = 100;
+
+  const eligibleCount = (() => {
+    if (!stats) return 0;
+    return includePreLabeledInPreAnnotate
+      ? stats.unlabeled + (stats.pre_labeled || 0)
+      : stats.unlabeled;
+  })();
+
+  const jobAvailable = !!inferenceSettings?.async_preannotate_job_configured;
+  const willUseJob = jobAvailable && eligibleCount > SYNC_THRESHOLD;
+
+  const buildJobRunUrl = (databricksRunId) => {
+    const host = inferenceSettings?.workspace_host;
+    const jobId = inferenceSettings?.pre_annotate_databricks_job_id;
+    if (!host || !jobId || !databricksRunId) return null;
+    return `${host}/#job/${jobId}/run/${databricksRunId}`;
   };
 
   const handlePreAnnotate = async () => {
-    if (preAnnotating) return;
+    if (preAnnotating || asyncPreAnnotating) return;
+
     const scope = includePreLabeledInPreAnnotate
       ? 'unlabeled and pre-labeled images (model drafts on pre-labeled rows will be replaced)'
       : 'unlabeled images only';
-    if (!confirm(
-      `This will send ${scope} to the model endpoint for pre-labeling. This may take a while for large projects.\n\nContinue?`
-    )) return;
-    setPreAnnotating(true);
-    setPreAnnotateError('');
-    setPreAnnotateResult(null);
-    try {
-      const result = await preAnnotateProject(projectId, {
-        include_pre_labeled: includePreLabeledInPreAnnotate,
-      });
-      setPreAnnotateResult(result);
-      const st = await fetchProjectStats(projectId);
-      setStats(st);
-      setGalleryPage(0);
-    } catch (err) {
-      setPreAnnotateError(err.response?.data?.detail || err.message);
-    } finally {
-      setPreAnnotating(false);
+
+    if (willUseJob) {
+      const msg = `${eligibleCount} samples to pre-label — this will run as a background Databricks Job (${scope}).\nYou can close this page; progress updates every few seconds.\n\nContinue?`;
+      if (!confirm(msg)) return;
+      setAsyncPreAnnotating(true);
+      setAsyncRunMessage('');
+      setAsyncDatabricksRunId(null);
+      try {
+        const r = await enqueuePreannotateJob(projectId, {
+          include_pre_labeled: includePreLabeledInPreAnnotate,
+          max_samples: 0,
+          ...(preAnnotatePrompt.trim() && { text_prompt: preAnnotatePrompt.trim() }),
+        });
+        setActiveAsyncRunId(r.id);
+        if (r.databricks_run_id) setAsyncDatabricksRunId(r.databricks_run_id);
+        setAsyncRunMessage(`Background job started for ${eligibleCount} samples (run #${r.id}).`);
+      } catch (err) {
+        setAsyncRunMessage(humanizeApiError(err) || 'Failed to start job');
+      } finally {
+        setAsyncPreAnnotating(false);
+      }
+    } else {
+      const msg = `Pre-label ${eligibleCount} ${scope}?\n\nYou'll see a live progress bar.`;
+      if (!confirm(msg)) return;
+      setPreAnnotating(true);
+      setPreAnnotateError('');
+      setPreAnnotateResult(null);
+      setPreAnnotateProgress(null);
+      try {
+        const result = await preAnnotateProjectStream(
+          projectId,
+          {
+            include_pre_labeled: includePreLabeledInPreAnnotate,
+            ...(preAnnotatePrompt.trim() && { text_prompt: preAnnotatePrompt.trim() }),
+          },
+          { onProgress: (p) => setPreAnnotateProgress(p) },
+        );
+        setPreAnnotateResult(result);
+        setPreAnnotateProgress(null);
+        const [st, detailed] = await Promise.all([
+          fetchProjectStats(projectId),
+          fetchDetailedProjectStats(projectId),
+        ]);
+        setStats(st);
+        setDetailedStats(detailed);
+        setGalleryPage(0);
+      } catch (err) {
+        setPreAnnotateError(err?.message || humanizeApiError(err));
+        setPreAnnotateProgress(null);
+      } finally {
+        setPreAnnotating(false);
+      }
     }
   };
 
@@ -202,7 +271,7 @@ export default function ProjectDashboard() {
       setDetailedStats(detailed);
       setGalleryPage(0);
     } catch (err) {
-      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+      setDraftActionMessage(humanizeApiError(err) || 'Failed');
     } finally {
       setDraftActionBusy(false);
     }
@@ -224,20 +293,23 @@ export default function ProjectDashboard() {
       setDetailedStats(detailed);
       setGalleryPage(0);
     } catch (err) {
-      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+      setDraftActionMessage(humanizeApiError(err) || 'Failed');
     } finally {
       setDraftActionBusy(false);
     }
   };
 
   const openExportModal = () => {
-    // Default export path: same source volume with /exports subdirectory
-    // e.g. /Volumes/catalog/schema/volume -> /Volumes/catalog/schema/volume/exports
-    if (project?.source_volume) {
+    if (configExportVolume) {
+      setExportVolume(configExportVolume.replace(/\/+$/, '') + '/exports');
+    } else if (project?.source_volume) {
       setExportVolume(project.source_volume.replace(/\/+$/, '') + '/exports');
     }
     setExportResult(null);
     setExportError('');
+    setFinetuneRun(null);
+    setFinetuneError('');
+    setTriggerFinetuneAfterExport(false);
     setShowExport(true);
   };
 
@@ -246,15 +318,53 @@ export default function ProjectDashboard() {
     setExporting(true);
     setExportError('');
     setExportResult(null);
+    setFinetuneRun(null);
+    setFinetuneError('');
     try {
       const result = await exportProject(projectId, exportVolume.trim());
       setExportResult(result);
+
+      if (triggerFinetuneAfterExport && result.export_path) {
+        setFinetuneTriggering(true);
+        try {
+          const ftRun = await triggerFinetune(projectId, result.export_path);
+          setFinetuneRun(ftRun);
+          startFinetunePolling(ftRun.id);
+        } catch (ftErr) {
+          setFinetuneError(humanizeApiError(ftErr));
+        } finally {
+          setFinetuneTriggering(false);
+        }
+      }
     } catch (err) {
-      setExportError(err.response?.data?.detail || err.message);
+      setExportError(humanizeApiError(err));
     } finally {
       setExporting(false);
     }
   };
+
+  const startFinetunePolling = (runId) => {
+    if (finetunePollingRef.current) clearInterval(finetunePollingRef.current);
+    finetunePollingRef.current = setInterval(async () => {
+      try {
+        const r = await fetchLatestFinetuneRun(projectId);
+        setFinetuneRun(r);
+        if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
+          clearInterval(finetunePollingRef.current);
+          finetunePollingRef.current = null;
+        }
+      } catch {
+        clearInterval(finetunePollingRef.current);
+        finetunePollingRef.current = null;
+      }
+    }, 5000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (finetunePollingRef.current) clearInterval(finetunePollingRef.current);
+    };
+  }, []);
 
   // Load gallery
   useEffect(() => {
@@ -333,7 +443,7 @@ export default function ProjectDashboard() {
       }
       setEditing(false);
     } catch (err) {
-      alert(err.response?.data?.detail || err.message);
+      alert(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -361,11 +471,11 @@ export default function ProjectDashboard() {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1rem' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.25rem' }}>
             <button
-              onClick={() => navigate('/')}
+              onClick={() => navigate('/projects')}
               style={{
                 background: 'none',
                 border: 'none',
@@ -398,76 +508,53 @@ export default function ProjectDashboard() {
             Created by {project.created_by || 'unknown'} on {new Date(project.created_at).toLocaleDateString()}
           </div>
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
-          {endpointStatus && endpointStatus.status === 'ready' && stats && (stats.unlabeled > 0 || (includePreLabeledInPreAnnotate && stats.pre_labeled > 0)) && (
-            <>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
-                <input
-                  type="checkbox"
-                  checked={includePreLabeledInPreAnnotate}
-                  onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
-                />
-                Include pre-labeled
-              </label>
-              <button
-                className="btn-secondary"
-                onClick={handlePreAnnotate}
-                disabled={preAnnotating}
-                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-              >
-                {preAnnotating ? 'Pre-labeling...' : 'Pre-label'}
-              </button>
-              {inferenceSettings?.async_preannotate_job_configured && (
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <div className="dropdown-wrapper" ref={actionsRef}>
+            <button
+              className="btn-secondary"
+              onClick={() => setActionsOpen(o => !o)}
+              style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+            >
+              Actions <span style={{ fontSize: '0.6rem', lineHeight: 1 }}>{actionsOpen ? '▲' : '▼'}</span>
+            </button>
+            {actionsOpen && (
+              <div className="dropdown-menu">
                 <button
-                  className="btn-secondary"
-                  onClick={handleAsyncPreAnnotate}
-                  disabled={asyncPreAnnotating || Boolean(activeAsyncRunId)}
-                  style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-                  title="Runs the bundle-deployed Databricks Job (non-blocking)"
+                  className="dropdown-item"
+                  onClick={() => { openExportModal(); setActionsOpen(false); }}
+                  disabled={!stats || stats.labeled === 0}
                 >
-                  {asyncPreAnnotating ? 'Queueing…' : activeAsyncRunId ? 'Job running…' : 'Pre-label (job)'}
+                  Export Dataset
                 </button>
-              )}
-            </>
-          )}
-          {stats && stats.pre_labeled > 0 && (
-            <>
-              <button
-                className="btn-secondary"
-                onClick={handleAcceptAllDrafts}
-                disabled={draftActionBusy}
-                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-                title="Confirm every draft annotation in this project"
-              >
-                {draftActionBusy ? '…' : 'Accept all drafts'}
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={handleClearAllDrafts}
-                disabled={draftActionBusy}
-                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', color: '#f97316' }}
-                title="Remove all model-generated draft rows"
-              >
-                Clear model drafts
-              </button>
-            </>
-          )}
-          <button
-            className="btn-secondary"
-            onClick={openExportModal}
-            disabled={!stats || stats.labeled === 0}
-            style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-          >
-            Export Dataset
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={handleClone}
-            disabled={cloning}
-            style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-          >
-            {cloning ? 'Creating...' : 'New Version'}
-          </button>
+                <button
+                  className="dropdown-item"
+                  onClick={() => { handleClone(); setActionsOpen(false); }}
+                  disabled={cloning}
+                >
+                  {cloning ? 'Creating…' : 'New Version'}
+                </button>
+                {stats && stats.pre_labeled > 0 && (
+                  <>
+                    <div className="dropdown-divider" />
+                    <button
+                      className="dropdown-item"
+                      onClick={() => { handleAcceptAllDrafts(); setActionsOpen(false); }}
+                      disabled={draftActionBusy}
+                    >
+                      Accept all drafts ({stats.pre_labeled})
+                    </button>
+                    <button
+                      className="dropdown-item danger"
+                      onClick={() => { handleClearAllDrafts(); setActionsOpen(false); }}
+                      disabled={draftActionBusy}
+                    >
+                      Clear model drafts
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <button
             className="btn-primary"
             onClick={() => navigate(`/projects/${projectId}/label`)}
@@ -477,6 +564,53 @@ export default function ProjectDashboard() {
           </button>
         </div>
       </div>
+
+      {/* Pre-annotation toolbar */}
+      {endpointStatus && endpointStatus.status === 'ready' && stats && eligibleCount > 0 && (
+        <div className="card" style={{
+          marginBottom: '1rem',
+          padding: '0.6rem 1rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+            Pre-label
+          </span>
+          <input
+            type="text"
+            value={preAnnotatePrompt}
+            onChange={(e) => setPreAnnotatePrompt(e.target.value)}
+            placeholder={project.class_list?.join('. ') || 'Detection prompt…'}
+            className="input"
+            style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', flex: '1 1 180px', minWidth: 140 }}
+            title="Text prompt sent to the model. Leave blank to use class list."
+          />
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none', whiteSpace: 'nowrap' }}>
+            <input
+              type="checkbox"
+              checked={includePreLabeledInPreAnnotate}
+              onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
+            />
+            Include pre-labeled
+          </label>
+          <button
+            className="btn-primary"
+            onClick={handlePreAnnotate}
+            disabled={preAnnotating || asyncPreAnnotating || Boolean(activeAsyncRunId)}
+            style={{ padding: '0.4rem 1rem', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
+            title={willUseJob
+              ? `${eligibleCount} samples → runs as background Databricks Job`
+              : `${eligibleCount} samples → runs in-app with live progress`}
+          >
+            {preAnnotating ? 'Pre-labeling…'
+              : asyncPreAnnotating ? 'Queueing…'
+              : activeAsyncRunId ? 'Job running…'
+              : `Run (${eligibleCount})`}
+          </button>
+        </div>
+      )}
 
       {/* Export Modal */}
       {showExport && (
@@ -518,6 +652,22 @@ export default function ProjectDashboard() {
               }}
             />
           </div>
+
+          {finetuneConfigured && !exportResult && (
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: '0.5rem',
+              fontSize: '0.85rem', color: 'var(--text-secondary)',
+              marginBottom: '0.75rem', cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={triggerFinetuneAfterExport}
+                onChange={(e) => setTriggerFinetuneAfterExport(e.target.checked)}
+                disabled={exporting}
+              />
+              Trigger finetuning job after export
+            </label>
+          )}
 
           {exportError && (
             <div style={{
@@ -566,15 +716,95 @@ export default function ProjectDashboard() {
             </div>
           )}
 
+          {finetuneError && (
+            <div style={{
+              padding: '0.5rem 0.75rem',
+              borderRadius: 4,
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              color: '#ef4444',
+              fontSize: '0.8rem',
+              marginBottom: '0.75rem',
+            }}>
+              Finetuning trigger failed: {finetuneError}
+            </div>
+          )}
+
+          {finetuneRun && (
+            <div style={{
+              padding: '0.75rem',
+              borderRadius: 4,
+              background: finetuneRun.status === 'failed'
+                ? 'rgba(239, 68, 68, 0.1)'
+                : finetuneRun.status === 'succeeded'
+                  ? 'rgba(34, 197, 94, 0.1)'
+                  : 'rgba(59, 130, 246, 0.1)',
+              border: `1px solid ${
+                finetuneRun.status === 'failed'
+                  ? 'rgba(239, 68, 68, 0.3)'
+                  : finetuneRun.status === 'succeeded'
+                    ? 'rgba(34, 197, 94, 0.3)'
+                    : 'rgba(59, 130, 246, 0.3)'
+              }`,
+              fontSize: '0.8rem',
+              marginBottom: '0.75rem',
+            }}>
+              <div style={{
+                fontWeight: 600, marginBottom: '0.3rem',
+                color: finetuneRun.status === 'failed' ? '#ef4444'
+                  : finetuneRun.status === 'succeeded' ? 'var(--status-success)'
+                    : 'var(--accent-blue)',
+              }}>
+                Finetuning: {finetuneRun.status}
+                {['queued', 'pending', 'running'].includes(finetuneRun.status) && (
+                  <span style={{ fontWeight: 400, marginLeft: '0.5rem' }}>
+                    (polling for updates...)
+                  </span>
+                )}
+              </div>
+              {finetuneRun.databricks_run_id && (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>
+                  Databricks Run ID: {finetuneRun.databricks_run_id}
+                </div>
+              )}
+              {finetuneRun.error_message && (
+                <div style={{ color: '#ef4444', marginTop: '0.3rem', fontSize: '0.75rem' }}>
+                  {finetuneRun.error_message.slice(0, 300)}
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             <button
               className="btn-primary"
               onClick={handleExport}
-              disabled={exporting || !exportVolume.trim() || !!exportResult}
+              disabled={exporting || finetuneTriggering || !exportVolume.trim() || !!exportResult}
               style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
             >
-              {exporting ? 'Exporting...' : 'Export'}
+              {exporting ? 'Exporting...' : finetuneTriggering ? 'Triggering finetuning...' : 'Export'}
             </button>
+            {exportResult && finetuneConfigured && !finetuneRun && !finetuneError && (
+              <button
+                className="btn-primary"
+                onClick={async () => {
+                  setFinetuneTriggering(true);
+                  try {
+                    const ftRun = await triggerFinetune(projectId, exportResult.export_path);
+                    setFinetuneRun(ftRun);
+                    startFinetunePolling(ftRun.id);
+                  } catch (ftErr) {
+                    setFinetuneError(humanizeApiError(ftErr));
+                  } finally {
+                    setFinetuneTriggering(false);
+                  }
+                }}
+                disabled={finetuneTriggering}
+                style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
+              >
+                {finetuneTriggering ? 'Triggering...' : 'Trigger Finetuning'}
+              </button>
+            )}
             <button
               className="btn-secondary"
               onClick={() => setShowExport(false)}
@@ -612,6 +842,30 @@ export default function ProjectDashboard() {
               <span style={{ color: '#ef4444' }}>{endpointStatus.error || 'Endpoint unreachable'}</span>
             )}
           </span>
+        </div>
+      )}
+
+      {/* Pre-annotate live progress */}
+      {preAnnotating && preAnnotateProgress && preAnnotateProgress.total > 0 && (
+        <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Pre-labeling in progress…</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              {preAnnotateProgress.current} / {preAnnotateProgress.total}
+              {' '}({Math.round((preAnnotateProgress.current / preAnnotateProgress.total) * 100)}%)
+            </span>
+          </div>
+          <div className="progress-bar" style={{ height: 8 }}>
+            <div className="progress-fill" style={{
+              width: `${(preAnnotateProgress.current / preAnnotateProgress.total) * 100}%`,
+              transition: 'width 0.2s ease',
+            }} />
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            <span style={{ color: 'var(--status-success)' }}>{preAnnotateProgress.completed} pre-labeled</span>
+            <span>{preAnnotateProgress.skipped} skipped</span>
+            {preAnnotateProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{preAnnotateProgress.failed} failed</span>}
+          </div>
         </div>
       )}
 
@@ -668,6 +922,21 @@ export default function ProjectDashboard() {
           color: 'var(--text-secondary)',
         }}>
           {asyncRunMessage}
+          {asyncDatabricksRunId && buildJobRunUrl(asyncDatabricksRunId) && (
+            <a
+              href={buildJobRunUrl(asyncDatabricksRunId)}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                marginLeft: '0.5rem',
+                color: 'var(--accent-blue)',
+                textDecoration: 'underline',
+                fontSize: '0.8rem',
+              }}
+            >
+              View in Databricks Jobs ↗
+            </a>
+          )}
         </div>
       )}
 

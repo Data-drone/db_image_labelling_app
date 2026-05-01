@@ -59,14 +59,24 @@ def create_project(
         raise HTTPException(status_code=409, detail=f"Project '{payload.name}' already exists.")
 
     user_email = get_user_email(request)
+    serving_ep = payload.serving_endpoint or os.environ.get("SERVING_ENDPOINT") or None
+    ep_config = dict(payload.endpoint_config or {})
+    if "use_data_plane" not in ep_config:
+        env_dp = os.environ.get("USE_SERVING_DATA_PLANE", "").strip().lower()
+        if env_dp in ("1", "true", "yes", "on"):
+            ep_config["use_data_plane"] = True
+    if "adapter" not in ep_config:
+        env_adapter = os.environ.get("SERVING_ENDPOINT_ADAPTER", "").strip()
+        if env_adapter:
+            ep_config["adapter"] = env_adapter
     project = LabelingProject(
         name=payload.name,
         description=payload.description,
         task_type=payload.task_type,
         class_list=payload.class_list,
         source_volume=payload.source_volume,
-        serving_endpoint=payload.serving_endpoint,
-        endpoint_config=payload.endpoint_config,
+        serving_endpoint=serving_ep,
+        endpoint_config=ep_config or None,
         created_by=user_email,
     )
     db.add(project)
