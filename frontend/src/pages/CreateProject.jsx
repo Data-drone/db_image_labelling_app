@@ -2,7 +2,7 @@
  * Create Project page — form to create a new labeling project.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   createProject,
@@ -23,7 +23,6 @@ export default function CreateProject() {
   const [taskType, setTaskType] = useState('classification');
   const [classList, setClassList] = useState([]);
   const [classInput, setClassInput] = useState('');
-  const [sourceVolume, setSourceVolume] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -36,6 +35,9 @@ export default function CreateProject() {
   const [catalog, setCatalog] = useState('');
   const [schema, setSchema] = useState('');
   const [volume, setVolume] = useState('');
+  const [pickerSubpath, setPickerSubpath] = useState('');
+  const [pickerFolders, setPickerFolders] = useState([]);
+  const [pickerNavLoading, setPickerNavLoading] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [browseResult, setBrowseResult] = useState(null);
 
@@ -65,19 +67,50 @@ export default function CreateProject() {
     fetchVolumes(catalog, schema).then(setVolumesList).catch(() => {});
   }, [catalog, schema]);
 
-  // Build volume path from picker
   useEffect(() => {
-    if (volumeMode === 'picker' && catalog && schema && volume) {
-      const path = `/Volumes/${catalog}/${schema}/${volume}`;
-      setSourceVolume(path);
-    }
+    setPickerSubpath('');
+  }, [catalog, schema, volume]);
+
+  const pickerBasePath = useMemo(() => {
+    if (volumeMode !== 'picker' || !catalog || !schema || !volume) return '';
+    return `/Volumes/${catalog}/${schema}/${volume}`;
   }, [volumeMode, catalog, schema, volume]);
 
+  const sourceVolume = useMemo(() => {
+    if (volumeMode === 'direct') return directPath.trim();
+    if (!pickerBasePath) return '';
+    if (!pickerSubpath) return pickerBasePath;
+    return `${pickerBasePath.replace(/\/+$/, '')}/${pickerSubpath}`;
+  }, [volumeMode, directPath, pickerBasePath, pickerSubpath]);
+
   useEffect(() => {
-    if (volumeMode === 'direct') {
-      setSourceVolume(directPath.trim());
+    setBrowseResult(null);
+  }, [sourceVolume]);
+
+  useEffect(() => {
+    if (volumeMode !== 'picker' || !pickerBasePath) {
+      setPickerFolders([]);
+      return;
     }
-  }, [volumeMode, directPath]);
+    let cancelled = false;
+    const listPath = pickerSubpath
+      ? `${pickerBasePath.replace(/\/+$/, '')}/${pickerSubpath}`
+      : pickerBasePath;
+    setPickerNavLoading(true);
+    browseDirectory(listPath)
+      .then((data) => {
+        if (!cancelled) setPickerFolders(data.folders || []);
+      })
+      .catch(() => {
+        if (!cancelled) setPickerFolders([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPickerNavLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [volumeMode, pickerBasePath, pickerSubpath]);
 
   // Browse the selected path
   const handleBrowse = useCallback(async () => {
@@ -309,6 +342,92 @@ export default function CreateProject() {
                   disabled={!schema}
                 />
               </div>
+            </div>
+          )}
+
+          {volumeMode === 'picker' && pickerBasePath && (
+            <div
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.75rem',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 8,
+              }}
+            >
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                Subfolder (optional) — click a folder to nest; project uses the folder shown in the path below.
+              </div>
+              {pickerNavLoading ? (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Loading folders…</div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.25rem', marginBottom: pickerFolders.length ? '0.65rem' : 0 }}>
+                    {['Volume root', ...(pickerSubpath ? pickerSubpath.split('/') : [])].map((crumb, i) => (
+                      <span key={`${crumb}-${i}`} style={{ display: 'flex', alignItems: 'center' }}>
+                        {i > 0 && <span style={{ color: 'var(--text-muted)', margin: '0 0.2rem' }}>/</span>}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (i === 0) setPickerSubpath('');
+                            else {
+                              const parts = pickerSubpath.split('/');
+                              setPickerSubpath(parts.slice(0, i).join('/'));
+                            }
+                          }}
+                          style={{
+                            background: i === (pickerSubpath ? pickerSubpath.split('/').length : 0) ? 'rgba(66, 153, 224, 0.12)' : 'var(--bg-input)',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 6,
+                            padding: '0.25rem 0.5rem',
+                            fontSize: '0.75rem',
+                            color: 'var(--accent-blue)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {crumb}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  {pickerFolders.length > 0 ? (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))',
+                        gap: '0.5rem',
+                      }}
+                    >
+                      {pickerFolders.map((folder) => (
+                        <button
+                          key={folder.name}
+                          type="button"
+                          onClick={() =>
+                            setPickerSubpath(pickerSubpath ? `${pickerSubpath}/${folder.name}` : folder.name)
+                          }
+                          style={{
+                            background: 'var(--bg-input)',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 8,
+                            padding: '0.5rem 0.35rem',
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                            fontSize: '0.78rem',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          <span style={{ fontSize: '1.1rem', display: 'block', marginBottom: '0.2rem' }}>&#x1F4C2;</span>
+                          {folder.name}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      No subfolders in this location. Images must sit directly in this folder (not in deeper nested paths for scanning).
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
