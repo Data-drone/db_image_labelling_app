@@ -1,0 +1,42 @@
+# Declarative Automation Bundle — CV Explorer app + async pre-annotate job.
+# Validate: databricks bundle validate
+# Deploy:   databricks bundle deploy --target dev
+
+bundle:
+  name: cv_explorer
+
+include:
+  - resources/*.yml
+
+variables:
+  spark_version:
+    default: "15.4.x-scala2.12"
+  node_type_id:
+    default: "i3.xlarge"
+  num_workers:
+    default: 0
+  # App resources (override if your workspace differs)
+  # Override for your workspace, e.g. brian_gen_ai.cv_explorer.demo_images
+  demo_volume_full_name:
+    default: fevm_shared_catalog.fevm_shared_data.fevm_shared_assets
+  lakebase_postgres_branch:
+    default: projects/cv-explorer/branches/production
+  lakebase_postgres_database:
+    default: projects/cv-explorer/branches/production/databases/db-9ioz-rwsg1iavxm
+  serving_endpoint_name:
+    default: cv-sam31-cv_manufacturing
+  app_name:
+    default: cv-explorer-dev
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://fevm-classic-stable-hdtwu7.cloud.databricks.com
+      # Pick the ~/.databrickscfg stanza for this host (you had both fevm-classic-stable and dev).
+      profile: fevm-classic-stable
+
+  prod:
+    mode: production
+    variables:
+      app_name: cv-explorer-prod

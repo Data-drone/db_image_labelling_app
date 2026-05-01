@@ -20,6 +20,10 @@ import {
   sampleImageUrl,
   addProjectClass,
   fetchSampleHistory,
+  predictSample,
+  fetchEndpointStatus,
+  acceptDraftsSample,
+  clearDraftsSample,
 } from '../api/client';
 
 export default function LabelingView() {
@@ -53,6 +57,11 @@ export default function LabelingView() {
   // Multi-label classification state
   const [selectedLabels, setSelectedLabels] = useState(new Set());
 
+  // Pre-annotation state
+  const [predicting, setPredicting] = useState(false);
+  const [predictions, setPredictions] = useState(null);
+  const [endpointReady, setEndpointReady] = useState(false);
+
   // Flash feedback for keyboard class selection
   const [flashIndex, setFlashIndex] = useState(null);
   const flashTimeout = useRef(null);
@@ -64,6 +73,7 @@ export default function LabelingView() {
 
   const isDetection = project?.task_type === 'detection';
   const total = sampleList.length;
+  const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
   // Load project info
   useEffect(() => {
@@ -71,6 +81,14 @@ export default function LabelingView() {
       .then(setProject)
       .catch(() => navigate('/'));
   }, [projectId, navigate]);
+
+  // Check endpoint status
+  useEffect(() => {
+    if (!project) return;
+    fetchEndpointStatus(projectId)
+      .then(s => setEndpointReady(s.status === 'ready'))
+      .catch(() => setEndpointReady(false));
+  }, [project, projectId]);
 
   // Load stats
   const loadStats = useCallback(() => {
@@ -104,12 +122,11 @@ export default function LabelingView() {
       }
     }
 
-    // Otherwise find first unlabeled
-    const unlabeledIdx = sampleList.findIndex(s => s.status === 'unlabeled');
-    if (unlabeledIdx >= 0) {
-      setCurrentIndex(unlabeledIdx);
+    // Otherwise find first unlabeled or pre_labeled
+    const workIdx = sampleList.findIndex(s => s.status === 'unlabeled' || s.status === 'pre_labeled');
+    if (workIdx >= 0) {
+      setCurrentIndex(workIdx);
     } else {
-      // All labeled — start at first sample
       setCurrentIndex(0);
     }
   }, [sampleList]); // Only run when sampleList first loads
@@ -119,6 +136,7 @@ export default function LabelingView() {
     if (idx < 0 || idx >= sampleList.length) return;
     setLoading(true);
     setImageLoaded(false);
+    setPredictions(null);
     try {
       const s = await fetchSample(projectId, sampleList[idx].id);
       setSample(s);
@@ -131,6 +149,7 @@ export default function LabelingView() {
             id: `existing-${nextBoxId.current++}`,
             label: a.label,
             classIndex: Math.max(0, (project?.class_list || []).indexOf(a.label)),
+            isDraft: Boolean(a.is_draft),
             ...a.bbox_json,
           }));
         setBoxes(existingBoxes);
@@ -198,32 +217,30 @@ export default function LabelingView() {
   const goNext = () => goTo(currentIndex + 1);
 
   const goNextUnlabeled = () => {
-    // Find next unlabeled from current position (wrapping)
+    // Find next unlabeled or pre_labeled from current position (wrapping)
     for (let i = 1; i <= sampleList.length; i++) {
       const idx = (currentIndex + i) % sampleList.length;
-      if (sampleList[idx].status === 'unlabeled') {
+      if (sampleList[idx].status === 'unlabeled' || sampleList[idx].status === 'pre_labeled') {
         goTo(idx);
         return;
       }
     }
-    // All done — stay on current
   };
 
   // After annotating, update local sample list status and advance
+  const needsWork = (s) => s.status === 'unlabeled' || s.status === 'pre_labeled';
+
   const markCurrentAndAdvance = useCallback(() => {
     setSampleList(prev => prev.map((s, i) =>
       i === currentIndex ? { ...s, status: 'labeled' } : s
     ));
     loadStats();
     if (historyOpen) loadHistory();
-    // Go to next unlabeled
-    const nextUnlabeled = sampleList.findIndex((s, i) =>
-      i > currentIndex && s.status === 'unlabeled'
-    );
-    if (nextUnlabeled >= 0) {
-      goTo(nextUnlabeled);
+    const nextIdx = sampleList.findIndex((s, i) => i > currentIndex && needsWork(s));
+    if (nextIdx >= 0) {
+      goTo(nextIdx);
     } else {
-      const wrapped = sampleList.findIndex(s => s.status === 'unlabeled');
+      const wrapped = sampleList.findIndex(s => needsWork(s));
       if (wrapped >= 0 && wrapped !== currentIndex) {
         goTo(wrapped);
       } else if (currentIndex < sampleList.length - 1) {
@@ -278,6 +295,43 @@ export default function LabelingView() {
     }
   };
 
+  const handleAcceptDraftsOnly = useCallback(async () => {
+    if (!sample || saving || currentIndex < 0) return;
+    const sid = sampleList[currentIndex]?.id;
+    if (sid == null) return;
+    setSaving(true);
+    try {
+      await acceptDraftsSample(projectId, sid);
+      await loadSampleAtIndex(currentIndex);
+      const s = await fetchSample(projectId, sid);
+      setSampleList((prev) => prev.map((row) => (row.id === sid ? { ...row, status: s.status } : row)));
+      loadStats();
+    } catch (err) {
+      console.error('Accept drafts failed:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, projectId, currentIndex, sampleList, loadSampleAtIndex, loadStats]);
+
+  const handleClearDraftsOnly = useCallback(async () => {
+    if (!sample || saving || currentIndex < 0) return;
+    const sid = sampleList[currentIndex]?.id;
+    if (sid == null) return;
+    if (!confirm('Remove model draft suggestions on this image?')) return;
+    setSaving(true);
+    try {
+      await clearDraftsSample(projectId, sid);
+      await loadSampleAtIndex(currentIndex);
+      const s = await fetchSample(projectId, sid);
+      setSampleList((prev) => prev.map((row) => (row.id === sid ? { ...row, status: s.status } : row)));
+      loadStats();
+    } catch (err) {
+      console.error('Clear drafts failed:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, projectId, currentIndex, sampleList, loadSampleAtIndex, loadStats]);
+
   // Add new class
   const handleAddClass = async () => {
     const trimmed = newClassName.trim();
@@ -296,6 +350,59 @@ export default function LabelingView() {
     } finally {
       setAddingClass(false);
     }
+  };
+
+  // Pre-annotation: request prediction
+  const handlePredict = async () => {
+    if (!sample || predicting) return;
+    setPredicting(true);
+    setPredictions(null);
+    try {
+      const preds = await predictSample(projectId, sample.id);
+      setPredictions(preds);
+      if (isDetection && preds.length > 0) {
+        const predBoxes = preds
+          .filter(p => p.ann_type === 'bbox' && p.bbox_json)
+          .map(p => ({
+            id: `pred-${nextBoxId.current++}`,
+            label: p.label,
+            classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
+            ...p.bbox_json,
+          }));
+        setBoxes(predBoxes);
+      }
+    } catch (err) {
+      console.error('Prediction failed:', err);
+    } finally {
+      setPredicting(false);
+    }
+  };
+
+  const handleAcceptPrediction = async () => {
+    if (!sample || !predictions || predictions.length === 0 || saving) return;
+    if (isDetection) {
+      handleSaveBoxes();
+      return;
+    }
+    setSaving(true);
+    try {
+      const annotations = predictions.map(p => ({
+        label: p.label,
+        ann_type: p.ann_type,
+      }));
+      await annotateSampleBatch(projectId, sample.id, annotations);
+      setPredictions(null);
+      markCurrentAndAdvance();
+    } catch (err) {
+      console.error('Accept failed:', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRejectPrediction = () => {
+    setPredictions(null);
+    setBoxes([]);
   };
 
   // Detection: box CRUD
@@ -564,10 +671,30 @@ export default function LabelingView() {
         {currentStatus && (
           <span className={`badge ${
             currentStatus === 'labeled' ? 'badge-green'
+            : currentStatus === 'pre_labeled' ? 'badge-purple'
             : currentStatus === 'skipped' ? 'badge-yellow'
             : 'badge-muted'
-          }`} style={{ fontSize: '0.7rem' }}>
-            {currentStatus}
+          }`} style={{
+            fontSize: '0.7rem',
+            ...(currentStatus === 'pre_labeled' ? { background: '#a78bfa', color: '#fff' } : {}),
+          }}>
+            {currentStatus === 'pre_labeled' ? 'pre-labeled' : currentStatus}
+          </span>
+        )}
+        {sample?.annotations?.some(a => a.is_draft) && (
+          <span
+            title="Model suggestions are drafts until you save"
+            style={{
+              fontSize: '0.65rem',
+              fontWeight: 600,
+              padding: '0.15rem 0.45rem',
+              borderRadius: 4,
+              background: 'rgba(167, 139, 250, 0.2)',
+              color: '#a78bfa',
+              border: '1px solid rgba(167, 139, 250, 0.45)',
+            }}
+          >
+            draft
           </span>
         )}
         {currentStatus === 'labeled' && (
@@ -820,6 +947,60 @@ export default function LabelingView() {
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0 0 0.75rem' }} />
 
+                  {/* Prediction banner (detection) */}
+                  {predictions && predictions.length > 0 && (
+                    <div style={{
+                      padding: '0.4rem 0.5rem',
+                      borderRadius: 4,
+                      background: 'rgba(167, 139, 250, 0.12)',
+                      border: '1px solid rgba(167, 139, 250, 0.3)',
+                      marginBottom: '0.5rem',
+                      fontSize: '0.7rem',
+                      color: '#a78bfa',
+                      fontWeight: 600,
+                    }}>
+                      {predictions.length} model prediction{predictions.length !== 1 ? 's' : ''} loaded
+                    </div>
+                  )}
+
+                  {/* Get Prediction button (detection) */}
+                  {endpointReady && !predictions && boxes.length === 0 && (currentStatus === 'unlabeled' || currentStatus === 'pre_labeled') && (
+                    <button
+                      className="btn-secondary"
+                      onClick={handlePredict}
+                      disabled={predicting || saving}
+                      style={{
+                        width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem',
+                        borderColor: '#a78bfa', color: '#a78bfa',
+                      }}
+                    >
+                      {predicting ? 'Predicting...' : 'Get Prediction'}
+                    </button>
+                  )}
+
+                  {hasDraftAnnotations && (
+                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleAcceptDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem' }}
+                      >
+                        Accept drafts
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleClearDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem', color: '#f97316' }}
+                      >
+                        Clear drafts
+                      </button>
+                    </div>
+                  )}
+
                   {/* Save & Next + Skip */}
                   <button
                     className="btn-primary"
@@ -844,6 +1025,46 @@ export default function LabelingView() {
               ) : (
                 /* ===== CLASSIFICATION MODE (multi-label) ===== */
                 <>
+                  {/* Prediction banner (classification) */}
+                  {predictions && predictions.length > 0 && (
+                    <div style={{
+                      padding: '0.5rem 0.6rem',
+                      borderRadius: 6,
+                      background: 'rgba(167, 139, 250, 0.12)',
+                      border: '1px solid rgba(167, 139, 250, 0.3)',
+                      marginBottom: '0.75rem',
+                    }}>
+                      <div style={{ fontSize: '0.7rem', color: '#a78bfa', fontWeight: 600, marginBottom: '0.3rem' }}>
+                        Model prediction
+                      </div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.1rem' }}>
+                        {predictions[0].label}
+                      </div>
+                      {predictions[0].confidence != null && (
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          Confidence: {(predictions[0].confidence * 100).toFixed(1)}%
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.4rem' }}>
+                        <button
+                          className="btn-primary"
+                          onClick={handleAcceptPrediction}
+                          disabled={saving}
+                          style={{ flex: 1, fontSize: '0.75rem', padding: '0.3rem' }}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          className="btn-secondary"
+                          onClick={handleRejectPrediction}
+                          style={{ flex: 1, fontSize: '0.75rem', padding: '0.3rem' }}
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ marginBottom: '0.5rem' }}>
                     <h4 style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--text-secondary)' }}>
                       Select labels:
@@ -932,7 +1153,30 @@ export default function LabelingView() {
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0 0.75rem' }} />
 
-                  {/* Save & Next + Skip */}
+                  {hasDraftAnnotations && (
+                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleAcceptDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem' }}
+                      >
+                        Accept drafts
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleClearDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem', color: '#f97316' }}
+                      >
+                        Clear drafts
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Save & Next */}
                   <button
                     className="btn-primary"
                     onClick={handleSaveClassification}
@@ -951,6 +1195,21 @@ export default function LabelingView() {
                             return `Save & Next (${summary})`;
                           })()}
                   </button>
+
+                  {/* Get Prediction button */}
+                  {endpointReady && !predictions && (currentStatus === 'unlabeled' || currentStatus === 'pre_labeled') && (
+                    <button
+                      className="btn-secondary"
+                      onClick={handlePredict}
+                      disabled={predicting || saving}
+                      style={{
+                        width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem',
+                        borderColor: '#a78bfa', color: '#a78bfa',
+                      }}
+                    >
+                      {predicting ? 'Predicting...' : 'Get Prediction'}
+                    </button>
+                  )}
 
                   <button
                     className="btn-secondary"

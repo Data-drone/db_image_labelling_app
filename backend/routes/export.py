@@ -122,7 +122,10 @@ def export_project(
                 first_error = str(e)
             continue
 
-        sample_anns = ann_by_sample.get(sample.id, [])
+        sample_anns = [
+            a for a in ann_by_sample.get(sample.id, [])
+            if not a.is_draft
+        ]
 
         if is_detection:
             coco_img_id = image_count

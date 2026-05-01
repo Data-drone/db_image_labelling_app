@@ -16,6 +16,8 @@ class ProjectCreate(BaseModel):
     task_type: str  # 'classification' or 'detection'
     class_list: list[str]
     source_volume: str  # UC Volume path
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -24,6 +26,8 @@ class ProjectUpdate(BaseModel):
     source_volume: Optional[str] = None
     class_list: Optional[list[str]] = None
     confirm_source_change: bool = False
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
 
 
 class ProjectOut(BaseModel):
@@ -33,6 +37,8 @@ class ProjectOut(BaseModel):
     task_type: str
     class_list: list[str]
     source_volume: str
+    serving_endpoint: Optional[str] = None
+    endpoint_config: Optional[dict] = None
     created_by: str
     created_at: datetime
     sample_count: int = 0
@@ -48,6 +54,7 @@ class ProjectStats(BaseModel):
     labeled: int
     unlabeled: int
     skipped: int
+    pre_labeled: int = 0
     per_user: list[dict]  # [{"user": "...", "labeled": N, "skipped": N}]
 
 
@@ -71,6 +78,80 @@ class DetailedProjectStats(BaseModel):
     per_user: list[dict]
     avg_daily_rate: float
     estimated_completion_date: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Pre-annotation / Inference
+# ---------------------------------------------------------------------------
+class PredictionOut(BaseModel):
+    label: str
+    ann_type: str
+    bbox_json: Optional[dict] = None
+    confidence: Optional[float] = None
+
+
+class PreAnnotateRequest(BaseModel):
+    max_samples: int = 0  # 0 = all matching samples
+    min_confidence: Optional[float] = None
+    include_pre_labeled: bool = False  # also re-run on pre_labeled (replaces model drafts)
+
+
+class PreAnnotateProgress(BaseModel):
+    completed: int
+    failed: int
+    skipped: int
+    total: int
+
+
+class PreAnnotateAsyncRequest(BaseModel):
+    """Same options as synchronous pre-annotate, executed by a Databricks Job."""
+
+    max_samples: int = 0
+    min_confidence: Optional[float] = None
+    include_pre_labeled: bool = False
+
+
+class PreannotateRunOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    max_samples: int
+    include_pre_labeled: bool
+    min_confidence: Optional[float] = None
+    completed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    total_planned: int = 0
+    databricks_run_id: Optional[int] = None
+    error_message: Optional[str] = None
+    created_by: str = ""
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class EndpointStatus(BaseModel):
+    status: str  # ready, not_ready, not_found, error, not_configured
+    endpoint: Optional[str] = None
+    state: Optional[str] = None
+    error: Optional[str] = None
+
+
+class InferenceDefaultsOut(BaseModel):
+    """Workspace-level inference defaults (from env), for forms before a project exists."""
+
+    default_serving_endpoint: Optional[str] = None
+
+
+class BulkDraftSampleIds(BaseModel):
+    sample_ids: list[int]
+
+
+class DraftMutationResult(BaseModel):
+    annotations_affected: int = 0
+    samples_touched: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +198,7 @@ class AnnotationOut(BaseModel):
     label: str
     ann_type: str
     bbox_json: Optional[dict] = None
+    is_draft: bool = False
     created_by: str
     created_at: datetime
 

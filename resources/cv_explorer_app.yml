@@ -1,0 +1,51 @@
+# Databricks App with declarative resources (visible in Apps UI).
+# Requires bundle variables (see databricks.yml defaults); override per workspace if needed.
+# Git + source_code_path: platform deploys from the branch; app.yml valueFrom keys match resource `name`.
+
+resources:
+  apps:
+    cv_explorer_app:
+      name: ${var.app_name}
+      description: Image labeling and annotation for CV manufacturing datasets
+      git_repository:
+        url: https://github.com/Data-drone/db_image_labelling_app
+        provider: gitHub
+      git_source:
+        branch: feat/pre-annotation-inference
+        source_code_path: .
+      # Runtime manifest (Git checkout may not be used for command/env when unset).
+      # Keep `app.yml` in the repo in sync for non-bundle deploys.
+      config:
+        command: ["python", "app.py"]
+        env:
+          - name: LAKEBASE_AUTO_PROVISION
+            value: "false"
+          - name: USE_LAKEBASE
+            value: "true"
+          - name: DEMO_VOLUME_PATH
+            value_from: demo-volume
+          - name: SERVING_ENDPOINT
+            value_from: serving-endpoint
+          - name: SERVING_ENDPOINT_ADAPTER
+            value: "sam31"
+          - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
+            value_from: app-preannotate-job
+      resources:
+        - name: lakebase-db
+          postgres:
+            branch: ${var.lakebase_postgres_branch}
+            database: ${var.lakebase_postgres_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: demo-volume
+          uc_securable:
+            securable_type: VOLUME
+            securable_full_name: ${var.demo_volume_full_name}
+            permission: READ_VOLUME
+        - name: serving-endpoint
+          serving_endpoint:
+            name: ${var.serving_endpoint_name}
+            permission: CAN_QUERY
+        - name: app-preannotate-job
+          job:
+            id: ${resources.jobs.cv_explorer_preannotate.id}
+            permission: CAN_MANAGE_RUN

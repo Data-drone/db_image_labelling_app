@@ -71,6 +71,49 @@ export const sampleThumbnailUrl = (projectId, sampleId, size = 300) =>
   `/api/projects/${projectId}/samples/${sampleId}/thumbnail?size=${size}`;
 
 // ---------------------------------------------------------------------------
+// Pre-annotation / Inference
+// ---------------------------------------------------------------------------
+/** Workspace defaults from env (e.g. SERVING_ENDPOINT); no project id required. */
+export const fetchInferenceDefaults = () =>
+  api.get('/inference-defaults').then((r) => r.data);
+
+export const fetchEndpointStatus = (projectId) =>
+  api.get(`/projects/${projectId}/endpoint-status`).then(r => r.data);
+
+export const predictSample = (projectId, sampleId) =>
+  api.get(`/projects/${projectId}/samples/${sampleId}/predict`).then(r => r.data);
+
+export const preAnnotateProject = (projectId, params = {}) =>
+  api.post(`/projects/${projectId}/pre-annotate`, params, { timeout: 300000 }).then(r => r.data);
+
+export const acceptDraftsSample = (projectId, sampleId) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/accept-drafts`).then(r => r.data);
+
+export const clearDraftsSample = (projectId, sampleId) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/clear-drafts`).then(r => r.data);
+
+export const acceptAllDrafts = (projectId) =>
+  api.post(`/projects/${projectId}/drafts/accept-all`).then(r => r.data);
+
+export const clearAllModelDrafts = (projectId) =>
+  api.post(`/projects/${projectId}/drafts/clear-all`).then(r => r.data);
+
+export const bulkAcceptDrafts = (projectId, sampleIds) =>
+  api.post(`/projects/${projectId}/drafts/bulk-accept`, { sample_ids: sampleIds }).then(r => r.data);
+
+export const fetchInferenceSettings = (projectId) =>
+  api.get(`/projects/${projectId}/settings`).then(r => r.data);
+
+export const enqueuePreannotateJob = (projectId, params = {}) =>
+  api.post(`/projects/${projectId}/pre-annotate-async`, params, { timeout: 60000 }).then(r => r.data);
+
+export const fetchLatestPreannotateRun = (projectId) =>
+  api.get(`/projects/${projectId}/pre-annotate-runs/latest`).then(r => r.data);
+
+export const fetchPreannotateRun = (projectId, runId) =>
+  api.get(`/projects/${projectId}/pre-annotate-runs/${runId}`).then(r => r.data);
+
+// ---------------------------------------------------------------------------
 // Browse & Volume navigation (kept from original)
 // ---------------------------------------------------------------------------
 export const fetchCatalogs = () => api.get('/catalogs').then(r => r.data);

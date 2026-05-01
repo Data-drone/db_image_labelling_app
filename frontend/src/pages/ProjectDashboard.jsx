@@ -4,7 +4,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject } from '../api/client';
+import {
+  fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
+  fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus, preAnnotateProject,
+  acceptAllDrafts, clearAllModelDrafts,
+  fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun,
+} from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -27,6 +32,19 @@ export default function ProjectDashboard() {
   const [exportVolume, setExportVolume] = useState('');
   const [exportResult, setExportResult] = useState(null);
   const [exportError, setExportError] = useState('');
+
+  // Endpoint / pre-annotation state
+  const [endpointStatus, setEndpointStatus] = useState(null);
+  const [preAnnotating, setPreAnnotating] = useState(false);
+  const [preAnnotateResult, setPreAnnotateResult] = useState(null);
+  const [preAnnotateError, setPreAnnotateError] = useState('');
+  const [includePreLabeledInPreAnnotate, setIncludePreLabeledInPreAnnotate] = useState(false);
+  const [draftActionBusy, setDraftActionBusy] = useState(false);
+  const [draftActionMessage, setDraftActionMessage] = useState('');
+  const [inferenceSettings, setInferenceSettings] = useState(null);
+  const [asyncPreAnnotating, setAsyncPreAnnotating] = useState(false);
+  const [activeAsyncRunId, setActiveAsyncRunId] = useState(null);
+  const [asyncRunMessage, setAsyncRunMessage] = useState('');
 
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
@@ -60,15 +78,51 @@ export default function ProjectDashboard() {
       fetchProject(projectId),
       fetchProjectStats(projectId),
       fetchDetailedProjectStats(projectId),
+      fetchInferenceSettings(projectId).catch(() => null),
     ])
-      .then(([proj, st, detailed]) => {
+      .then(([proj, st, detailed, inf]) => {
         setProject(proj);
         setStats(st);
         setDetailedStats(detailed);
+        setInferenceSettings(inf);
       })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
   }, [projectId, navigate]);
+
+  useEffect(() => {
+    if (!project) return;
+    fetchEndpointStatus(projectId)
+      .then(setEndpointStatus)
+      .catch(() => setEndpointStatus({ status: 'error', error: 'Could not check endpoint' }));
+  }, [project, projectId]);
+
+  useEffect(() => {
+    if (!activeAsyncRunId) return;
+    const tick = async () => {
+      try {
+        const r = await fetchPreannotateRun(projectId, activeAsyncRunId);
+        if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
+          setActiveAsyncRunId(null);
+          setAsyncRunMessage(
+            r.status === 'succeeded'
+              ? `Background pre-label finished (${r.completed} samples pre-labeled, ${r.skipped} skipped, ${r.failed} failed).`
+              : `Background pre-label ended: ${r.status}${r.error_message ? ` — ${r.error_message}` : ''}`,
+          );
+          const [st, detailed] = await Promise.all([
+            fetchProjectStats(projectId),
+            fetchDetailedProjectStats(projectId),
+          ]);
+          setStats(st);
+          setDetailedStats(detailed);
+          setGalleryPage(0);
+        }
+      } catch (_) { /* still running */ }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => clearInterval(id);
+  }, [activeAsyncRunId, projectId]);
 
   const handleClone = async () => {
     if (cloning) return;
@@ -81,6 +135,98 @@ export default function ProjectDashboard() {
       alert('Failed to create new version: ' + (err.response?.data?.detail || err.message));
     } finally {
       setCloning(false);
+    }
+  };
+
+  const handleAsyncPreAnnotate = async () => {
+    if (asyncPreAnnotating) return;
+    const scope = includePreLabeledInPreAnnotate
+      ? 'unlabeled and pre-labeled rows (model drafts on pre-labeled will be replaced)'
+      : 'unlabeled rows only';
+    if (!confirm(`Start a Databricks Job to pre-label ${scope}? You can close this page; progress updates every few seconds.\n\nContinue?`)) return;
+    setAsyncPreAnnotating(true);
+    setAsyncRunMessage('');
+    try {
+      const r = await enqueuePreannotateJob(projectId, {
+        include_pre_labeled: includePreLabeledInPreAnnotate,
+        max_samples: 0,
+      });
+      setActiveAsyncRunId(r.id);
+      setAsyncRunMessage(`Job queued (run record #${r.id}, Databricks run ${r.databricks_run_id ?? '—'}).`);
+    } catch (err) {
+      setAsyncRunMessage(err.response?.data?.detail || err.message || 'Failed to start job');
+    } finally {
+      setAsyncPreAnnotating(false);
+    }
+  };
+
+  const handlePreAnnotate = async () => {
+    if (preAnnotating) return;
+    const scope = includePreLabeledInPreAnnotate
+      ? 'unlabeled and pre-labeled images (model drafts on pre-labeled rows will be replaced)'
+      : 'unlabeled images only';
+    if (!confirm(
+      `This will send ${scope} to the model endpoint for pre-labeling. This may take a while for large projects.\n\nContinue?`
+    )) return;
+    setPreAnnotating(true);
+    setPreAnnotateError('');
+    setPreAnnotateResult(null);
+    try {
+      const result = await preAnnotateProject(projectId, {
+        include_pre_labeled: includePreLabeledInPreAnnotate,
+      });
+      setPreAnnotateResult(result);
+      const st = await fetchProjectStats(projectId);
+      setStats(st);
+      setGalleryPage(0);
+    } catch (err) {
+      setPreAnnotateError(err.response?.data?.detail || err.message);
+    } finally {
+      setPreAnnotating(false);
+    }
+  };
+
+  const handleAcceptAllDrafts = async () => {
+    if (draftActionBusy) return;
+    if (!confirm('Confirm all draft (model suggestion) annotations in this project? They will count as human-approved labels.')) return;
+    setDraftActionBusy(true);
+    setDraftActionMessage('');
+    try {
+      const r = await acceptAllDrafts(projectId);
+      setDraftActionMessage(`Accepted ${r.annotations_affected} draft(s) across ${r.samples_touched} sample(s).`);
+      const [st, detailed] = await Promise.all([
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setStats(st);
+      setDetailedStats(detailed);
+      setGalleryPage(0);
+    } catch (err) {
+      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+    } finally {
+      setDraftActionBusy(false);
+    }
+  };
+
+  const handleClearAllDrafts = async () => {
+    if (draftActionBusy) return;
+    if (!confirm('Delete ALL model draft annotations project-wide? Human labels are kept. This cannot be undone.')) return;
+    setDraftActionBusy(true);
+    setDraftActionMessage('');
+    try {
+      const r = await clearAllModelDrafts(projectId);
+      setDraftActionMessage(`Removed ${r.annotations_affected} draft(s) from ${r.samples_touched} sample(s).`);
+      const [st, detailed] = await Promise.all([
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setStats(st);
+      setDetailedStats(detailed);
+      setGalleryPage(0);
+    } catch (err) {
+      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+    } finally {
+      setDraftActionBusy(false);
     }
   };
 
@@ -134,6 +280,7 @@ export default function ProjectDashboard() {
       description: project.description || '',
       source_volume: project.source_volume,
       class_list: [...project.class_list],
+      serving_endpoint: project.serving_endpoint || '',
     });
     setNewClass('');
     setEditing(true);
@@ -151,6 +298,7 @@ export default function ProjectDashboard() {
       if (editForm.name !== project.name) patch.name = editForm.name;
       if (editForm.description !== (project.description || '')) patch.description = editForm.description;
       if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
+      if ((editForm.serving_endpoint || '') !== (project.serving_endpoint || '')) patch.serving_endpoint = editForm.serving_endpoint;
 
       const sourceChanged = editForm.source_volume !== project.source_volume;
       if (sourceChanged) {
@@ -179,6 +327,9 @@ export default function ProjectDashboard() {
         ]);
         setStats(st);
         setDetailedStats(detailed);
+      }
+      if (patch.serving_endpoint !== undefined) {
+        fetchEndpointStatus(projectId).then(setEndpointStatus).catch(() => {});
       }
       setEditing(false);
     } catch (err) {
@@ -247,7 +398,60 @@ export default function ProjectDashboard() {
             Created by {project.created_by || 'unknown'} on {new Date(project.created_at).toLocaleDateString()}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+          {endpointStatus && endpointStatus.status === 'ready' && stats && (stats.unlabeled > 0 || (includePreLabeledInPreAnnotate && stats.pre_labeled > 0)) && (
+            <>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={includePreLabeledInPreAnnotate}
+                  onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
+                />
+                Include pre-labeled
+              </label>
+              <button
+                className="btn-secondary"
+                onClick={handlePreAnnotate}
+                disabled={preAnnotating}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+              >
+                {preAnnotating ? 'Pre-labeling...' : 'Pre-label'}
+              </button>
+              {inferenceSettings?.async_preannotate_job_configured && (
+                <button
+                  className="btn-secondary"
+                  onClick={handleAsyncPreAnnotate}
+                  disabled={asyncPreAnnotating || Boolean(activeAsyncRunId)}
+                  style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                  title="Runs the bundle-deployed Databricks Job (non-blocking)"
+                >
+                  {asyncPreAnnotating ? 'Queueing…' : activeAsyncRunId ? 'Job running…' : 'Pre-label (job)'}
+                </button>
+              )}
+            </>
+          )}
+          {stats && stats.pre_labeled > 0 && (
+            <>
+              <button
+                className="btn-secondary"
+                onClick={handleAcceptAllDrafts}
+                disabled={draftActionBusy}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                title="Confirm every draft annotation in this project"
+              >
+                {draftActionBusy ? '…' : 'Accept all drafts'}
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={handleClearAllDrafts}
+                disabled={draftActionBusy}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', color: '#f97316' }}
+                title="Remove all model-generated draft rows"
+              >
+                Clear model drafts
+              </button>
+            </>
+          )}
           <button
             className="btn-secondary"
             onClick={openExportModal}
@@ -382,6 +586,91 @@ export default function ProjectDashboard() {
         </div>
       )}
 
+      {/* Endpoint status badge */}
+      {endpointStatus && (
+        <div className="card" style={{ marginBottom: '1rem', padding: '0.6rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+            background:
+              endpointStatus.status === 'ready' ? 'var(--status-success)'
+              : endpointStatus.status === 'not_ready' ? 'var(--status-warning)'
+              : endpointStatus.status === 'not_configured' ? 'var(--text-muted)'
+              : '#ef4444',
+          }} />
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+            Pre-annotation:{' '}
+            {endpointStatus.status === 'ready' && (
+              <span style={{ color: 'var(--status-success)' }}>Ready ({endpointStatus.endpoint})</span>
+            )}
+            {endpointStatus.status === 'not_ready' && (
+              <span style={{ color: 'var(--status-warning)' }}>Endpoint updating ({endpointStatus.endpoint})</span>
+            )}
+            {endpointStatus.status === 'not_configured' && (
+              <span style={{ color: 'var(--text-muted)' }}>Not configured</span>
+            )}
+            {(endpointStatus.status === 'not_found' || endpointStatus.status === 'error') && (
+              <span style={{ color: '#ef4444' }}>{endpointStatus.error || 'Endpoint unreachable'}</span>
+            )}
+          </span>
+        </div>
+      )}
+
+      {/* Pre-annotate result/error */}
+      {preAnnotateError && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(239, 68, 68, 0.1)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          color: '#ef4444',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+        }}>
+          Pre-annotation failed: {preAnnotateError}
+        </div>
+      )}
+      {preAnnotateResult && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(34, 197, 94, 0.1)',
+          border: '1px solid rgba(34, 197, 94, 0.3)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+        }}>
+          <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Pre-annotation complete: </span>
+          <span style={{ color: 'var(--text-secondary)' }}>
+            {preAnnotateResult.completed} pre-labeled, {preAnnotateResult.skipped} below threshold / empty, {preAnnotateResult.failed} failed
+          </span>
+        </div>
+      )}
+      {draftActionMessage && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(59, 130, 246, 0.08)',
+          border: '1px solid rgba(59, 130, 246, 0.25)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+          color: 'var(--text-secondary)',
+        }}>
+          {draftActionMessage}
+        </div>
+      )}
+      {asyncRunMessage && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(59, 130, 246, 0.08)',
+          border: '1px solid rgba(59, 130, 246, 0.25)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+          color: 'var(--text-secondary)',
+        }}>
+          {asyncRunMessage}
+        </div>
+      )}
+
       {/* Stats cards */}
       {stats && (
         <>
@@ -394,6 +683,7 @@ export default function ProjectDashboard() {
             {[
               { label: 'Total', value: stats.total, color: 'var(--text-primary)' },
               { label: 'Labeled', value: stats.labeled, color: 'var(--status-success)' },
+              ...(stats.pre_labeled > 0 ? [{ label: 'Pre-labeled', value: stats.pre_labeled, color: '#a78bfa' }] : []),
               { label: 'Skipped', value: stats.skipped, color: 'var(--status-warning)' },
               { label: 'Remaining', value: stats.unlabeled, color: 'var(--accent-blue)' },
             ].map((card) => (
@@ -418,7 +708,7 @@ export default function ProjectDashboard() {
               <div className="progress-fill" style={{ width: `${pct}%` }} />
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
-              {stats.labeled} labeled, {stats.skipped} skipped, {stats.unlabeled} remaining
+              {stats.labeled} labeled{stats.pre_labeled > 0 ? `, ${stats.pre_labeled} pre-labeled` : ''}, {stats.skipped} skipped, {stats.unlabeled} remaining
             </div>
           </div>
 
@@ -531,7 +821,7 @@ export default function ProjectDashboard() {
                 Samples
               </h3>
               <div style={{ display: 'flex', gap: '0.3rem' }}>
-                {['', 'unlabeled', 'labeled', 'skipped'].map((f) => (
+                {['', 'unlabeled', 'pre_labeled', 'labeled', 'skipped'].map((f) => (
                   <button
                     key={f}
                     className="btn-secondary"
@@ -544,7 +834,7 @@ export default function ProjectDashboard() {
                       border: galleryFilter === f ? '1px solid var(--accent-blue)' : undefined,
                     }}
                   >
-                    {f || 'All'}
+                    {f === '' ? 'All' : f === 'pre_labeled' ? 'Pre-labeled' : f}
                   </button>
                 ))}
               </div>
@@ -667,6 +957,7 @@ export default function ProjectDashboard() {
                         fontSize: '0.6rem',
                         fontWeight: 600,
                         background: s.status === 'labeled' ? 'var(--status-success)'
+                          : s.status === 'pre_labeled' ? '#a78bfa'
                           : s.status === 'skipped' ? 'var(--status-warning)'
                           : 'rgba(255,255,255,0.15)',
                         color: s.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
@@ -831,6 +1122,10 @@ export default function ProjectDashboard() {
                     <span key={c} className="badge badge-blue" style={{ marginRight: '0.25rem' }}>{c}</span>
                   ))}
                 </span>
+                <span style={{ color: 'var(--text-muted)' }}>Endpoint</span>
+                <span style={{ color: project.serving_endpoint ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                  {project.serving_endpoint || '(none)'}
+                </span>
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>
                 <span>
                   v{project.version || 1}
@@ -924,6 +1219,20 @@ export default function ProjectDashboard() {
                     >
                       Add
                     </button>
+                  </div>
+                </div>
+                <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Endpoint</span>
+                <div>
+                  <input
+                    type="text"
+                    value={editForm.serving_endpoint}
+                    onChange={(e) => setEditForm({ ...editForm, serving_endpoint: e.target.value })}
+                    placeholder="Model Serving endpoint name"
+                    className="input"
+                    style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
+                  />
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                    Databricks Model Serving endpoint for pre-annotation. Leave blank to disable.
                   </div>
                 </div>
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>

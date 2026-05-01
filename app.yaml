@@ -1,4 +1,0 @@
-command: ['python', 'start.py']
-env:
-  - name: DEMO_VOLUME_PATH
-    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'

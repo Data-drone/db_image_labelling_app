@@ -59,34 +59,53 @@ The FastAPI backend serves the React SPA as static files and provides the `/api/
 
 ### Deploy to Databricks Apps
 
-1. Push this repo to a Databricks workspace (Git folder or Repos)
-2. Create a Databricks App pointing to the repo folder
-3. The app auto-starts via `app.yaml` → `python start.py` → FastAPI + Uvicorn
-4. On first boot, Lakebase is auto-provisioned (unless `LAKEBASE_AUTO_PROVISION=false`) and tables are created
+**Recommended:** use the **Databricks Asset Bundle** in this repo (`databricks bundle deploy --target dev`). It deploys the pre-annotate **job** and a **bundle-defined app** (`resources/cv_explorer_app.yml`) with declarative **App resources** (Lakebase postgres, UC volume, model serving endpoint, job) so they show in the Apps UI and `app.yml` can use `valueFrom`.
 
-### App Resources
+1. Adjust **`databricks.yml` → `variables`** for your workspace (especially `demo_volume_full_name`, `lakebase_postgres_branch`, `lakebase_postgres_database`, `serving_endpoint_name`, `app_name`).
+2. `databricks bundle deploy --target dev` (with a configured CLI profile for that workspace).
+3. The app runs `app.yml` → `python start.py` → FastAPI + Uvicorn. With a Lakebase **postgres** App resource, the platform injects `PGHOST` / `PGUSER` / etc.; the app uses those instead of SDK auto-provision (`LAKEBASE_AUTO_PROVISION=false` in `app.yml`).
 
-The app needs a Databricks App service principal with:
-- **READ_VOLUME** on source image volumes
-- **READ_VOLUME + WRITE_VOLUME** on export volumes
-- Access to the Lakebase API (auto-provisioning)
+Alternatively, create an app manually from Git and copy the `app.yml` pattern — you must still attach matching resources in the UI and use the same `valueFrom` keys.
+
+### App icon (Apps overview thumbnail)
+
+The tile on the **Databricks Apps** overview is an **app thumbnail** on the workspace object, not a static file served by FastAPI.
+
+1. **Store the image in this repo** as **`assets/databricks-app-thumbnail.jpg`** (or `.jpeg` / `.png` with that basename). Any reasonable resolution and modest file size is fine.
+2. **Upload it once per app** (after the app exists in the workspace):
+
+   ```bash
+   python scripts/upload_app_thumbnail.py <your-app-name>
+   ```
+
+   Or with a custom path: `python scripts/upload_app_thumbnail.py <your-app-name> --image /path/to/icon.png`
+
+   This wraps `databricks apps update-app-thumbnail` with the JSON shape `{"app_thumbnail":{"thumbnail":"<base64>"}}` required by the [Apps API](https://docs.databricks.com/api/workspace/apps/updateappthumbnail).
+
+### App resources (Databricks Apps UI)
+
+With bundle deploy, **resources are declared in YAML** and appear on the app’s Resources tab. The service principal is the app identity; permissions are set on each resource (e.g. **READ_VOLUME** on the demo volume, **CAN_QUERY** on the serving endpoint, **CAN_MANAGE_RUN** on the pre-annotate job).
+
+Export to additional volumes still requires **WRITE_VOLUME** on those paths (add another `uc_securable` resource or grant the app SP in Unity Catalog).
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABRICKS_APP_PORT` | `8000` | Port for the FastAPI server |
-| `DEMO_VOLUME_PATH` | `/Volumes/brian_gen_ai/cv_explorer/demo_images` | Default demo volume (set in `app.yaml`) |
-| `LAKEBASE_PROJECT_ID` | `cv-explorer` | Lakebase project identifier |
-| `LAKEBASE_DISPLAY_NAME` | `CV Explorer` | Lakebase project display name |
-| `LAKEBASE_AUTO_PROVISION` | `true` | Set to `"false"` to require a pre-existing Lakebase project (e.g. when managed by a Databricks Asset Bundle). If the project is missing at startup, the app exits with an error instead of creating it. |
+| `DEMO_VOLUME_PATH` | _(from `valueFrom: demo-volume`)_ | UC volume path injected from the **demo-volume** App resource (`app.yml`). |
+| `SERVING_ENDPOINT` | _(from `valueFrom: serving-endpoint`)_ | Serving endpoint name from the **serving-endpoint** resource. |
+| `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
+| `LAKEBASE_AUTO_PROVISION` | `false` (bundle app) | With a **postgres** App resource, use `false` and connect via injected `PG*` variables (no SDK project creation on app startup). |
+| `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
+| `PGHOST`, `PGUSER`, … | _(platform)_ | Set automatically when a Lakebase **postgres** database resource is attached. |
 
 ## Using with Databricks Asset Bundles
 
 When deploying this app as part of a larger Databricks Asset Bundle (DAB), the bundle typically owns the Lakebase project lifecycle (create / grant roles / enable Lakehouse Sync / destroy). To prevent the app from trying to create a duplicate project at startup, set:
 
 ```yaml
-# app.yaml
+# app.yml
 env:
   - name: LAKEBASE_AUTO_PROVISION
     value: "false"
@@ -101,6 +120,15 @@ With `LAKEBASE_AUTO_PROVISION=false`, the app:
 3. Exits with a clear error if it does not (instead of creating one)
 
 See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
+
+### Async pre-label (Databricks Job)
+
+This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and API routes so large pre-label batches run on a cluster instead of inside the app HTTP worker.
+
+1. From the repo root: `databricks bundle deploy` (with a configured profile).
+2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). The job cluster still needs Lakebase SDK env (`LAKEBASE_AUTO_PROVISION=false`, `LAKEBASE_PROJECT_ID`) set in `resources/preannotate_job.job.yml`.
+
+The dashboard shows **Pre-label (job)** when the job id resolves. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
 
 ## Importing annotations
 
@@ -217,7 +245,7 @@ print(r.json())
 
 ```
 cv-explorer/
-├── app.yaml                        # Databricks App config
+├── app.yml                         # Databricks App manifest (Git deploy expects app.yml)
 ├── start.py                        # Uvicorn entrypoint
 ├── requirements.txt                # Python dependencies
 ├── backend/

@@ -118,15 +118,18 @@ export default function BBoxCanvas({
       const bh = box.h * imageRect.h;
       const color = getClassColor(box.classIndex);
       const isSelected = box.id === selectedBoxId;
+      const isDraft = Boolean(box.isDraft);
 
       // Fill
       ctx.fillStyle = color + (isSelected ? '40' : '26');
       ctx.fillRect(bx, by, bw, bh);
 
-      // Border
+      // Border (dashed for model draft suggestions)
       ctx.strokeStyle = color;
       ctx.lineWidth = isSelected ? 3 : 2;
+      if (isDraft) ctx.setLineDash([6, 4]);
       ctx.strokeRect(bx, by, bw, bh);
+      if (isDraft) ctx.setLineDash([]);
 
       // Label above box
       const label = classList[box.classIndex] || box.label;

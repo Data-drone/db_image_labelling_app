@@ -1,0 +1,38 @@
+# Databricks Job — async batch pre-annotation (see backend/routes/preannotate_runs.py).
+# Deploy: databricks bundle deploy
+# Set env PRE_ANNOTATE_DATABRICKS_JOB_ID in the app to this job's numeric id after deploy.
+
+resources:
+  jobs:
+    cv_explorer_preannotate:
+      name: cv-explorer-preannotate-${bundle.target}
+      parameters:
+        - name: run_id
+          default: "0"
+      job_clusters:
+        - job_cluster_key: preann_cluster
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            # Driver-only (Python task). If you need workers, set num_workers > 0 and
+            # remove spark_conf / custom_tags below (Databricks single-node rules).
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: local[*]
+            custom_tags:
+              ResourceClass: SingleNode
+            spark_env_vars:
+              USE_LAKEBASE: "true"
+              LAKEBASE_AUTO_PROVISION: "false"
+              LAKEBASE_PROJECT_ID: "cv-explorer"
+      tasks:
+        - task_key: main
+          job_cluster_key: preann_cluster
+          spark_python_task:
+            python_file: ../scripts/preannotate_job.py
+            parameters:
+              - "{{job.parameters.run_id}}"
+          libraries:
+            - requirements: ../requirements.txt

@@ -351,6 +351,7 @@ def import_annotations(
                     label=ann.label,
                     ann_type=ann.ann_type,
                     bbox_json=ann.bbox_json,
+                    is_draft=False,
                     created_by=user_email,
                     created_at=now,
                 ))
