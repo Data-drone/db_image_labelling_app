@@ -1,4 +1,4 @@
-command: ['python', 'start.py']
+command: ["python", "app.py"]
 env:
   # Lakebase: use App "postgres" resource (PG* env). Do not auto-create a project in SDK.
   - name: LAKEBASE_AUTO_PROVISION

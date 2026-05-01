@@ -13,6 +13,23 @@ resources:
       git_source:
         branch: feat/pre-annotation-inference
         source_code_path: .
+      # Runtime manifest (Git checkout may not be used for command/env when unset).
+      # Keep `app.yml` in the repo in sync for non-bundle deploys.
+      config:
+        command: ["python", "app.py"]
+        env:
+          - name: LAKEBASE_AUTO_PROVISION
+            value: "false"
+          - name: USE_LAKEBASE
+            value: "true"
+          - name: DEMO_VOLUME_PATH
+            value_from: demo-volume
+          - name: SERVING_ENDPOINT
+            value_from: serving-endpoint
+          - name: SERVING_ENDPOINT_ADAPTER
+            value: "sam31"
+          - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
+            value_from: app-preannotate-job
       resources:
         - name: lakebase-db
           postgres:
