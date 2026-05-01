@@ -3,7 +3,9 @@
  * Phase 1: project-centric navigation.
  */
 
+import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
+import { fetchAppConfig } from '../api/client';
 
 const NAV_ITEMS = [
   { path: '/browse', label: 'Browse Volumes', icon: 'M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z' },
@@ -12,6 +14,14 @@ const NAV_ITEMS = [
 ];
 
 export default function Layout({ children }) {
+  const [isSqlite, setIsSqlite] = useState(false);
+
+  useEffect(() => {
+    fetchAppConfig()
+      .then((cfg) => setIsSqlite(cfg.db_backend === 'sqlite'))
+      .catch(() => {});
+  }, []);
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       {/* Sidebar */}
@@ -119,6 +129,30 @@ export default function Layout({ children }) {
           maxHeight: '100vh',
         }}
       >
+        {isSqlite && (
+          <div
+            style={{
+              background: 'rgba(230, 167, 0, 0.1)',
+              border: '1px solid rgba(230, 167, 0, 0.3)',
+              borderRadius: 8,
+              padding: '0.75rem 1rem',
+              marginBottom: '1.5rem',
+              fontSize: '0.85rem',
+              color: '#ffa726',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01" />
+            </svg>
+            Running on local SQLite — data will be lost on redeploy.{' '}
+            <NavLink to="/admin" style={{ color: '#ffa726', fontWeight: 600 }}>
+              Configure Lakebase
+            </NavLink>
+          </div>
+        )}
         {children}
       </main>
     </div>
