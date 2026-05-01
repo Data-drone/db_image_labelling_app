@@ -46,6 +46,62 @@ def _merge_config(endpoint_config: Optional[dict]) -> dict:
     return merged
 
 
+def _truthy_config(val) -> Optional[bool]:
+    if val is True:
+        return True
+    if val is False:
+        return False
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+    return None
+
+
+def resolve_use_data_plane(endpoint_config: Optional[dict]) -> bool:
+    """Use ``serving_endpoints_data_plane.query`` (route-optimized / OAuth dataplane).
+
+    Project ``endpoint_config["use_data_plane"]`` overrides when set to a boolean-like
+    value; otherwise ``USE_SERVING_DATA_PLANE`` or ``SERVING_ROUTE_OPTIMIZED`` env
+    (truthy) enables the dataplane client.
+    """
+    cfg = endpoint_config or {}
+    explicit = _truthy_config(cfg.get("use_data_plane"))
+    if explicit is not None:
+        return explicit
+    for key in ("USE_SERVING_DATA_PLANE", "SERVING_ROUTE_OPTIMIZED"):
+        v = os.environ.get(key, "")
+        if v.strip().lower() in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
+def query_serving_endpoint(
+    endpoint_name: str,
+    dataframe_records: list,
+    *,
+    use_data_plane: bool,
+) -> dict:
+    """Query a serving endpoint; dataplane path for route-optimized endpoints."""
+    w = _get_workspace_client()
+    if use_data_plane:
+        dp = getattr(w, "serving_endpoints_data_plane", None)
+        if dp is None:
+            raise RuntimeError(
+                "WorkspaceClient has no serving_endpoints_data_plane; "
+                "upgrade databricks-sdk for route-optimized (OAuth dataplane) endpoints."
+            )
+        resp = dp.query(name=endpoint_name, dataframe_records=dataframe_records)
+    else:
+        resp = w.serving_endpoints.query(
+            name=endpoint_name,
+            dataframe_records=dataframe_records,
+        )
+    return resp.as_dict() if hasattr(resp, "as_dict") else resp
+
+
 def check_endpoint_health(endpoint_name: str) -> dict:
     """Check if a serving endpoint exists and is ready.
 
@@ -69,19 +125,29 @@ def check_endpoint_health(endpoint_name: str) -> dict:
         return {"status": "error", "endpoint": endpoint_name, "error": err_str}
 
 
-def query_endpoint(endpoint_name: str, image_bytes: bytes) -> dict:
+def query_endpoint(
+    endpoint_name: str,
+    image_bytes: bytes,
+    *,
+    use_data_plane: bool = False,
+    image_field: str = "image",
+    extra_record_fields: Optional[dict] = None,
+) -> dict:
     """Send an image to a serving endpoint and return the raw prediction.
 
-    Sends image as base64-encoded string in dataframe_records format.
-    Raises on network/SDK errors.
+    Sends base64 image in ``dataframe_records`` (default field name ``image``).
+    Set ``use_data_plane=True`` for route-optimized endpoints (OAuth dataplane).
+    ``extra_record_fields`` are merged into the single request record (e.g. SAM text prompts).
     """
-    w = _get_workspace_client()
     b64 = base64.b64encode(image_bytes).decode("ascii")
-    resp = w.serving_endpoints.query(
-        name=endpoint_name,
-        dataframe_records=[{"image": b64}],
+    record: dict = {image_field: b64}
+    if extra_record_fields:
+        record = {**extra_record_fields, **record}
+    return query_serving_endpoint(
+        endpoint_name,
+        [record],
+        use_data_plane=use_data_plane,
     )
-    return resp.as_dict() if hasattr(resp, "as_dict") else resp
 
 
 def parse_classification_response(
@@ -204,13 +270,17 @@ def predict_sample(
     """End-to-end: query endpoint and parse response for a single image.
 
     Returns a list of annotation dicts (may be empty on error or low confidence).
+    Dispatches to a pluggable :class:`~backend.inference_adapters.InferenceAdapter`
+    (default ``generic`` — same behavior as before this refactor).
     """
-    raw = query_endpoint(endpoint_name, image_bytes)
+    # Lazy import avoids circular imports (adapters may call back into this module).
+    from .inference_adapters import get_adapter_for_config
 
-    if task_type == "classification":
-        return parse_classification_response(raw, class_list, endpoint_config)
-    elif task_type == "detection":
-        return parse_detection_response(raw, class_list, endpoint_config)
-    else:
-        log.warning("Unknown task_type '%s', trying classification parser", task_type)
-        return parse_classification_response(raw, class_list, endpoint_config)
+    adapter = get_adapter_for_config(endpoint_config)
+    return adapter.query_and_parse(
+        endpoint_name,
+        image_bytes,
+        task_type,
+        class_list,
+        endpoint_config,
+    )

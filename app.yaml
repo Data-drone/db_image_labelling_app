@@ -2,8 +2,14 @@ command: ['python', 'start.py']
 env:
   - name: DEMO_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
-  # Model Serving endpoint for pre-annotation.
-  # Add a serving-endpoint resource in the Databricks Apps UI first
-  # (grant "Can query" permission), then uncomment the line below.
+  # Model Serving endpoint for pre-annotation (resource injects the name).
+  # Route-optimized endpoints: set SERVING_ENDPOINT_ADAPTER=sam31 (or
+  # endpoint_config.adapter) and use serving_endpoints_data_plane in-app.
   # - name: SERVING_ENDPOINT
   #   valueFrom: serving-endpoint
+  # - name: SERVING_ENDPOINT_ADAPTER
+  #   value: 'sam31'
+  # Optional: PRE_ANNOTATE_ON_IMPORT=true, PRE_ANNOTATE_ON_IMPORT_MAX_SAMPLES=50
+  # Optional: USE_SERVING_DATA_PLANE=true for generic adapter on dataplane
+  # Async batch (Databricks Job): deploy resources/preannotate_job.job.yml then set:
+  #   PRE_ANNOTATE_DATABRICKS_JOB_ID=<numeric job id>

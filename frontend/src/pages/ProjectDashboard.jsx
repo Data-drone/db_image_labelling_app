@@ -4,7 +4,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject, fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus, preAnnotateProject } from '../api/client';
+import {
+  fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
+  fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus, preAnnotateProject,
+  acceptAllDrafts, clearAllModelDrafts,
+  fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun,
+} from '../api/client';
 import Spinner from '../components/Spinner';
 
 export default function ProjectDashboard() {
@@ -33,6 +38,13 @@ export default function ProjectDashboard() {
   const [preAnnotating, setPreAnnotating] = useState(false);
   const [preAnnotateResult, setPreAnnotateResult] = useState(null);
   const [preAnnotateError, setPreAnnotateError] = useState('');
+  const [includePreLabeledInPreAnnotate, setIncludePreLabeledInPreAnnotate] = useState(false);
+  const [draftActionBusy, setDraftActionBusy] = useState(false);
+  const [draftActionMessage, setDraftActionMessage] = useState('');
+  const [inferenceSettings, setInferenceSettings] = useState(null);
+  const [asyncPreAnnotating, setAsyncPreAnnotating] = useState(false);
+  const [activeAsyncRunId, setActiveAsyncRunId] = useState(null);
+  const [asyncRunMessage, setAsyncRunMessage] = useState('');
 
   // Gallery state
   const [gallerySamples, setGallerySamples] = useState([]);
@@ -66,11 +78,13 @@ export default function ProjectDashboard() {
       fetchProject(projectId),
       fetchProjectStats(projectId),
       fetchDetailedProjectStats(projectId),
+      fetchInferenceSettings(projectId).catch(() => null),
     ])
-      .then(([proj, st, detailed]) => {
+      .then(([proj, st, detailed, inf]) => {
         setProject(proj);
         setStats(st);
         setDetailedStats(detailed);
+        setInferenceSettings(inf);
       })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
@@ -82,6 +96,33 @@ export default function ProjectDashboard() {
       .then(setEndpointStatus)
       .catch(() => setEndpointStatus({ status: 'error', error: 'Could not check endpoint' }));
   }, [project, projectId]);
+
+  useEffect(() => {
+    if (!activeAsyncRunId) return;
+    const tick = async () => {
+      try {
+        const r = await fetchPreannotateRun(projectId, activeAsyncRunId);
+        if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
+          setActiveAsyncRunId(null);
+          setAsyncRunMessage(
+            r.status === 'succeeded'
+              ? `Background pre-label finished (${r.completed} samples pre-labeled, ${r.skipped} skipped, ${r.failed} failed).`
+              : `Background pre-label ended: ${r.status}${r.error_message ? ` — ${r.error_message}` : ''}`,
+          );
+          const [st, detailed] = await Promise.all([
+            fetchProjectStats(projectId),
+            fetchDetailedProjectStats(projectId),
+          ]);
+          setStats(st);
+          setDetailedStats(detailed);
+          setGalleryPage(0);
+        }
+      } catch (_) { /* still running */ }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => clearInterval(id);
+  }, [activeAsyncRunId, projectId]);
 
   const handleClone = async () => {
     if (cloning) return;
@@ -97,16 +138,43 @@ export default function ProjectDashboard() {
     }
   };
 
+  const handleAsyncPreAnnotate = async () => {
+    if (asyncPreAnnotating) return;
+    const scope = includePreLabeledInPreAnnotate
+      ? 'unlabeled and pre-labeled rows (model drafts on pre-labeled will be replaced)'
+      : 'unlabeled rows only';
+    if (!confirm(`Start a Databricks Job to pre-label ${scope}? You can close this page; progress updates every few seconds.\n\nContinue?`)) return;
+    setAsyncPreAnnotating(true);
+    setAsyncRunMessage('');
+    try {
+      const r = await enqueuePreannotateJob(projectId, {
+        include_pre_labeled: includePreLabeledInPreAnnotate,
+        max_samples: 0,
+      });
+      setActiveAsyncRunId(r.id);
+      setAsyncRunMessage(`Job queued (run record #${r.id}, Databricks run ${r.databricks_run_id ?? '—'}).`);
+    } catch (err) {
+      setAsyncRunMessage(err.response?.data?.detail || err.message || 'Failed to start job');
+    } finally {
+      setAsyncPreAnnotating(false);
+    }
+  };
+
   const handlePreAnnotate = async () => {
     if (preAnnotating) return;
+    const scope = includePreLabeledInPreAnnotate
+      ? 'unlabeled and pre-labeled images (model drafts on pre-labeled rows will be replaced)'
+      : 'unlabeled images only';
     if (!confirm(
-      'This will send all unlabeled images to the model endpoint for pre-labeling. This may take a while for large projects.\n\nContinue?'
+      `This will send ${scope} to the model endpoint for pre-labeling. This may take a while for large projects.\n\nContinue?`
     )) return;
     setPreAnnotating(true);
     setPreAnnotateError('');
     setPreAnnotateResult(null);
     try {
-      const result = await preAnnotateProject(projectId);
+      const result = await preAnnotateProject(projectId, {
+        include_pre_labeled: includePreLabeledInPreAnnotate,
+      });
       setPreAnnotateResult(result);
       const st = await fetchProjectStats(projectId);
       setStats(st);
@@ -115,6 +183,50 @@ export default function ProjectDashboard() {
       setPreAnnotateError(err.response?.data?.detail || err.message);
     } finally {
       setPreAnnotating(false);
+    }
+  };
+
+  const handleAcceptAllDrafts = async () => {
+    if (draftActionBusy) return;
+    if (!confirm('Confirm all draft (model suggestion) annotations in this project? They will count as human-approved labels.')) return;
+    setDraftActionBusy(true);
+    setDraftActionMessage('');
+    try {
+      const r = await acceptAllDrafts(projectId);
+      setDraftActionMessage(`Accepted ${r.annotations_affected} draft(s) across ${r.samples_touched} sample(s).`);
+      const [st, detailed] = await Promise.all([
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setStats(st);
+      setDetailedStats(detailed);
+      setGalleryPage(0);
+    } catch (err) {
+      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+    } finally {
+      setDraftActionBusy(false);
+    }
+  };
+
+  const handleClearAllDrafts = async () => {
+    if (draftActionBusy) return;
+    if (!confirm('Delete ALL model draft annotations project-wide? Human labels are kept. This cannot be undone.')) return;
+    setDraftActionBusy(true);
+    setDraftActionMessage('');
+    try {
+      const r = await clearAllModelDrafts(projectId);
+      setDraftActionMessage(`Removed ${r.annotations_affected} draft(s) from ${r.samples_touched} sample(s).`);
+      const [st, detailed] = await Promise.all([
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setStats(st);
+      setDetailedStats(detailed);
+      setGalleryPage(0);
+    } catch (err) {
+      setDraftActionMessage(err.response?.data?.detail || err.message || 'Failed');
+    } finally {
+      setDraftActionBusy(false);
     }
   };
 
@@ -286,16 +398,59 @@ export default function ProjectDashboard() {
             Created by {project.created_by || 'unknown'} on {new Date(project.created_at).toLocaleDateString()}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          {endpointStatus && endpointStatus.status === 'ready' && stats && stats.unlabeled > 0 && (
-            <button
-              className="btn-secondary"
-              onClick={handlePreAnnotate}
-              disabled={preAnnotating}
-              style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-            >
-              {preAnnotating ? 'Pre-labeling...' : 'Pre-label'}
-            </button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+          {endpointStatus && endpointStatus.status === 'ready' && stats && (stats.unlabeled > 0 || (includePreLabeledInPreAnnotate && stats.pre_labeled > 0)) && (
+            <>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={includePreLabeledInPreAnnotate}
+                  onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
+                />
+                Include pre-labeled
+              </label>
+              <button
+                className="btn-secondary"
+                onClick={handlePreAnnotate}
+                disabled={preAnnotating}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+              >
+                {preAnnotating ? 'Pre-labeling...' : 'Pre-label'}
+              </button>
+              {inferenceSettings?.async_preannotate_job_configured && (
+                <button
+                  className="btn-secondary"
+                  onClick={handleAsyncPreAnnotate}
+                  disabled={asyncPreAnnotating || Boolean(activeAsyncRunId)}
+                  style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                  title="Runs the bundle-deployed Databricks Job (non-blocking)"
+                >
+                  {asyncPreAnnotating ? 'Queueing…' : activeAsyncRunId ? 'Job running…' : 'Pre-label (job)'}
+                </button>
+              )}
+            </>
+          )}
+          {stats && stats.pre_labeled > 0 && (
+            <>
+              <button
+                className="btn-secondary"
+                onClick={handleAcceptAllDrafts}
+                disabled={draftActionBusy}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                title="Confirm every draft annotation in this project"
+              >
+                {draftActionBusy ? '…' : 'Accept all drafts'}
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={handleClearAllDrafts}
+                disabled={draftActionBusy}
+                style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', color: '#f97316' }}
+                title="Remove all model-generated draft rows"
+              >
+                Clear model drafts
+              </button>
+            </>
           )}
           <button
             className="btn-secondary"
@@ -485,8 +640,34 @@ export default function ProjectDashboard() {
         }}>
           <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Pre-annotation complete: </span>
           <span style={{ color: 'var(--text-secondary)' }}>
-            {preAnnotateResult.completed} labeled, {preAnnotateResult.skipped} below threshold, {preAnnotateResult.failed} failed
+            {preAnnotateResult.completed} pre-labeled, {preAnnotateResult.skipped} below threshold / empty, {preAnnotateResult.failed} failed
           </span>
+        </div>
+      )}
+      {draftActionMessage && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(59, 130, 246, 0.08)',
+          border: '1px solid rgba(59, 130, 246, 0.25)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+          color: 'var(--text-secondary)',
+        }}>
+          {draftActionMessage}
+        </div>
+      )}
+      {asyncRunMessage && (
+        <div style={{
+          padding: '0.5rem 0.75rem',
+          borderRadius: 4,
+          background: 'rgba(59, 130, 246, 0.08)',
+          border: '1px solid rgba(59, 130, 246, 0.25)',
+          fontSize: '0.8rem',
+          marginBottom: '1rem',
+          color: 'var(--text-secondary)',
+        }}>
+          {asyncRunMessage}
         </div>
       )}
 

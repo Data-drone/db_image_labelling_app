@@ -2,7 +2,9 @@
 Project CRUD routes.
 """
 
+import logging
 import math
+import os
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,7 +19,12 @@ from ..schemas import (
 )
 from ..volumes import scan_volume_for_samples
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _project_out(p, total=None, labeled=None):
@@ -66,6 +73,30 @@ def create_project(
     db.flush()
 
     sample_count = scan_volume_for_samples(db, project.id, payload.source_volume)
+
+    if _env_truthy("PRE_ANNOTATE_ON_IMPORT"):
+        from ..inference import check_endpoint_health, resolve_endpoint
+        from ..preannotate import run_preannotate_for_samples
+
+        ep = resolve_endpoint(project)
+        if ep and check_endpoint_health(ep).get("status") == "ready":
+            try:
+                max_n = int(os.environ.get("PRE_ANNOTATE_ON_IMPORT_MAX_SAMPLES", "50"))
+            except ValueError:
+                max_n = 50
+            q = (
+                db.query(ProjectSample)
+                .filter_by(project_id=project.id, status="unlabeled")
+                .order_by(ProjectSample.id)
+            )
+            if max_n > 0:
+                q = q.limit(max_n)
+            samples = q.all()
+            if samples:
+                try:
+                    run_preannotate_for_samples(db, project, samples, min_confidence=None)
+                except Exception as e:
+                    log.warning("PRE_ANNOTATE_ON_IMPORT failed: %s", e)
 
     db.commit()
     db.refresh(project)
@@ -255,6 +286,7 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
     user_rows = (
         db.query(Annotation.created_by, func.count(Annotation.id))
         .filter(Annotation.project_id == project_id)
+        .filter(Annotation.is_draft.is_(False))
         .group_by(Annotation.created_by)
         .all()
     )
@@ -295,10 +327,11 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
     skipped = db.query(ProjectSample).filter_by(project_id=project_id, status="skipped").count()
     unlabeled = total - labeled - skipped
 
-    # Per-class counts
+    # Per-class counts (human-confirmed only; excludes model drafts)
     class_rows = (
         db.query(Annotation.label, func.count(Annotation.id))
         .filter(Annotation.project_id == project_id)
+        .filter(Annotation.is_draft.is_(False))
         .group_by(Annotation.label)
         .all()
     )
@@ -318,6 +351,7 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
         .filter(
             Annotation.project_id == project_id,
             Annotation.created_at >= cutoff,
+            Annotation.is_draft.is_(False),
         )
         .group_by(func.date(Annotation.created_at))
         .order_by(func.date(Annotation.created_at))
@@ -332,6 +366,7 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
     user_rows = (
         db.query(Annotation.created_by, func.count(Annotation.id))
         .filter(Annotation.project_id == project_id)
+        .filter(Annotation.is_draft.is_(False))
         .group_by(Annotation.created_by)
         .all()
     )
@@ -361,6 +396,7 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
         .filter(
             Annotation.project_id == project_id,
             Annotation.created_at >= week_cutoff,
+            Annotation.is_draft.is_(False),
         )
         .scalar()
     ) or 0
@@ -368,6 +404,7 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
     first_ann = (
         db.query(func.min(Annotation.created_at))
         .filter(Annotation.project_id == project_id)
+        .filter(Annotation.is_draft.is_(False))
         .scalar()
     )
     days_active = 7

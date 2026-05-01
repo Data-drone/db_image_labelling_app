@@ -12,10 +12,13 @@ from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
 from ..models import ProjectSample, Annotation, AnnotationHistory
+from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
     SampleOut, SamplePage,
     AnnotationCreate, AnnotationBatchCreate, AnnotationOut,
     AnnotationHistoryOut,
+    BulkDraftSampleIds,
+    DraftMutationResult,
 )
 from ..volumes import read_image_bytes
 
@@ -122,6 +125,7 @@ def annotate_sample(
         label=payload.label,
         ann_type=payload.ann_type,
         bbox_json=payload.bbox_json,
+        is_draft=False,
         created_by=user_email,
     )
     db.add(ann)
@@ -197,6 +201,7 @@ def annotate_sample_batch(
             label=ann.label,
             ann_type=ann.ann_type,
             bbox_json=ann.bbox_json,
+            is_draft=False,
             created_by=user_email,
         )
         db.add(a)
@@ -211,6 +216,144 @@ def annotate_sample_batch(
         db.refresh(a)
 
     return [AnnotationOut.model_validate(a) for a in created]
+
+
+@router.post(
+    "/samples/{sample_id}/accept-drafts",
+    response_model=DraftMutationResult,
+)
+def accept_drafts_for_sample(
+    project_id: int,
+    sample_id: int,
+    db: Session = Depends(get_db),
+):
+    """Promote all draft annotations on this sample to confirmed (``is_draft=false``)."""
+    sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
+    if not sample:
+        raise HTTPException(status_code=404, detail="Sample not found.")
+
+    rows = (
+        db.query(Annotation)
+        .filter_by(sample_id=sample_id, project_id=project_id)
+        .filter(Annotation.is_draft.is_(True))
+        .all()
+    )
+    for a in rows:
+        a.is_draft = False
+    refresh_sample_status_after_annotation_change(db, project_id, sample_id)
+    db.commit()
+    return DraftMutationResult(
+        annotations_affected=len(rows),
+        samples_touched=1 if rows else 0,
+    )
+
+
+@router.post(
+    "/samples/{sample_id}/clear-drafts",
+    response_model=DraftMutationResult,
+)
+def clear_drafts_for_sample(
+    project_id: int,
+    sample_id: int,
+    db: Session = Depends(get_db),
+):
+    """Remove model draft annotations for this sample (``created_by`` like ``model:%``)."""
+    sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
+    if not sample:
+        raise HTTPException(status_code=404, detail="Sample not found.")
+
+    rows = (
+        db.query(Annotation)
+        .filter_by(sample_id=sample_id, project_id=project_id)
+        .filter(Annotation.is_draft.is_(True))
+        .filter(Annotation.created_by.like("model:%"))
+        .all()
+    )
+    n = len(rows)
+    for a in rows:
+        db.delete(a)
+    refresh_sample_status_after_annotation_change(db, project_id, sample_id)
+    db.commit()
+    return DraftMutationResult(annotations_affected=n, samples_touched=1 if n else 0)
+
+
+@router.post("/drafts/bulk-accept", response_model=DraftMutationResult)
+def bulk_accept_drafts(
+    project_id: int,
+    payload: BulkDraftSampleIds,
+    db: Session = Depends(get_db),
+):
+    """Accept drafts for the given sample IDs (same semantics as ``accept-drafts`` per sample)."""
+    if not payload.sample_ids:
+        return DraftMutationResult()
+
+    touched = set()
+    ann_count = 0
+    for sid in payload.sample_ids:
+        sample = db.query(ProjectSample).filter_by(id=sid, project_id=project_id).first()
+        if not sample:
+            continue
+        rows = (
+            db.query(Annotation)
+            .filter_by(sample_id=sid, project_id=project_id)
+            .filter(Annotation.is_draft.is_(True))
+            .all()
+        )
+        if not rows:
+            continue
+        for a in rows:
+            a.is_draft = False
+        ann_count += len(rows)
+        touched.add(sid)
+        refresh_sample_status_after_annotation_change(db, project_id, sid)
+
+    db.commit()
+    return DraftMutationResult(
+        annotations_affected=ann_count,
+        samples_touched=len(touched),
+    )
+
+
+@router.post("/drafts/accept-all", response_model=DraftMutationResult)
+def accept_all_drafts(project_id: int, db: Session = Depends(get_db)):
+    """Confirm every draft annotation in the project."""
+    rows = (
+        db.query(Annotation)
+        .filter_by(project_id=project_id)
+        .filter(Annotation.is_draft.is_(True))
+        .all()
+    )
+    touched = set()
+    for a in rows:
+        a.is_draft = False
+        touched.add(a.sample_id)
+    for sid in touched:
+        refresh_sample_status_after_annotation_change(db, project_id, sid)
+    db.commit()
+    return DraftMutationResult(
+        annotations_affected=len(rows),
+        samples_touched=len(touched),
+    )
+
+
+@router.post("/drafts/clear-all", response_model=DraftMutationResult)
+def clear_all_model_drafts(project_id: int, db: Session = Depends(get_db)):
+    """Delete all model draft annotations project-wide."""
+    rows = (
+        db.query(Annotation)
+        .filter_by(project_id=project_id)
+        .filter(Annotation.is_draft.is_(True))
+        .filter(Annotation.created_by.like("model:%"))
+        .all()
+    )
+    touched = {a.sample_id for a in rows}
+    n = len(rows)
+    for a in rows:
+        db.delete(a)
+    for sid in touched:
+        refresh_sample_status_after_annotation_change(db, project_id, sid)
+    db.commit()
+    return DraftMutationResult(annotations_affected=n, samples_touched=len(touched))
 
 
 @router.post("/samples/{sample_id}/skip")

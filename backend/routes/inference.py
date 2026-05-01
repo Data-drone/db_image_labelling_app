@@ -3,8 +3,10 @@ Pre-annotation routes — predict, batch pre-annotate, endpoint health.
 """
 
 import logging
+import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..deps import get_db
@@ -13,13 +15,18 @@ from ..inference import (
     check_endpoint_health,
     predict_sample,
     get_default_endpoint,
+    resolve_use_data_plane,
 )
-from ..models import LabelingProject, ProjectSample, Annotation
+from ..inference_adapters import UnknownInferenceAdapterError
+from ..models import LabelingProject, ProjectSample
+from ..preannotate import run_preannotate_for_samples
+from ..preannotate_triggers import resolve_preannotate_job_id
 from ..schemas import (
     PredictionOut,
     PreAnnotateRequest,
     PreAnnotateProgress,
     EndpointStatus,
+    InferenceDefaultsOut,
 )
 from ..volumes import read_image_bytes
 
@@ -33,6 +40,10 @@ def _get_project(project_id: int, db: Session) -> LabelingProject:
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
     return p
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @router.get("/endpoint-status", response_model=EndpointStatus)
@@ -91,6 +102,8 @@ def predict_single_sample(
             class_list=list(project.class_list),
             endpoint_config=project.endpoint_config,
         )
+    except UnknownInferenceAdapterError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         log.error("Prediction failed for sample %d: %s", sample_id, e)
         raise HTTPException(
@@ -105,13 +118,13 @@ def predict_single_sample(
 def pre_annotate_project(
     project_id: int,
     payload: PreAnnotateRequest,
-    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Batch pre-annotate unlabeled samples using the configured model endpoint.
+    """Batch pre-annotate samples using the configured model endpoint.
 
-    This is a synchronous endpoint that processes samples sequentially.
-    For large projects, consider running with a limited max_samples.
+    Replaces prior **model** draft rows on each sample before inserting new ones
+    (idempotent re-run). When ``include_pre_labeled`` is true, includes
+    ``pre_labeled`` samples so you can refresh model suggestions.
     """
     project = _get_project(project_id, db)
     endpoint_name = resolve_endpoint(project)
@@ -128,72 +141,48 @@ def pre_annotate_project(
             detail=f"Endpoint '{endpoint_name}' is not ready: {health.get('error') or health.get('state', 'unknown')}",
         )
 
-    query = (
-        db.query(ProjectSample)
-        .filter_by(project_id=project_id, status="unlabeled")
-        .order_by(ProjectSample.id)
-    )
+    if payload.include_pre_labeled:
+        query = (
+            db.query(ProjectSample)
+            .filter(
+                ProjectSample.project_id == project_id,
+                or_(
+                    ProjectSample.status == "unlabeled",
+                    ProjectSample.status == "pre_labeled",
+                ),
+            )
+            .order_by(ProjectSample.id)
+        )
+    else:
+        query = (
+            db.query(ProjectSample)
+            .filter_by(project_id=project_id, status="unlabeled")
+            .order_by(ProjectSample.id)
+        )
+
     if payload.max_samples and payload.max_samples > 0:
         query = query.limit(payload.max_samples)
 
     samples = query.all()
-    created_by = f"model:{endpoint_name}"
 
-    endpoint_config = dict(project.endpoint_config or {})
-    if payload.min_confidence is not None:
-        endpoint_config["min_confidence"] = payload.min_confidence
-
-    completed = 0
-    failed = 0
-    skipped = 0
-
-    for sample in samples:
-        image_bytes = read_image_bytes(sample.filepath)
-        if not image_bytes:
-            failed += 1
-            continue
-
-        try:
-            predictions = predict_sample(
-                endpoint_name=endpoint_name,
-                image_bytes=image_bytes,
-                task_type=project.task_type,
-                class_list=list(project.class_list),
-                endpoint_config=endpoint_config,
-            )
-        except Exception as e:
-            log.warning("Pre-annotate failed for sample %d: %s", sample.id, e)
-            failed += 1
-            continue
-
-        if not predictions:
-            skipped += 1
-            continue
-
-        for pred in predictions:
-            ann = Annotation(
-                sample_id=sample.id,
-                project_id=project_id,
-                label=pred["label"],
-                ann_type=pred["ann_type"],
-                bbox_json=pred.get("bbox_json"),
-                created_by=created_by,
-            )
-            db.add(ann)
-
-        sample.status = "pre_labeled"
-        completed += 1
-
-        if completed % 50 == 0:
-            db.flush()
+    try:
+        result = run_preannotate_for_samples(
+            db,
+            project,
+            samples,
+            min_confidence=payload.min_confidence,
+        )
+    except UnknownInferenceAdapterError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     db.commit()
 
     return PreAnnotateProgress(
-        completed=completed,
-        failed=failed,
-        skipped=skipped,
-        total=len(samples),
+        completed=result["completed"],
+        failed=result["failed"],
+        skipped=result["skipped"],
+        total=result["total"],
     )
 
 
@@ -205,10 +194,32 @@ def get_project_inference_settings(
     """Return inference settings for a project, including defaults."""
     project = _get_project(project_id, db)
     endpoint_name = resolve_endpoint(project)
+    cfg = project.endpoint_config if isinstance(project.endpoint_config, dict) else None
     return {
         "serving_endpoint": project.serving_endpoint,
         "default_serving_endpoint": get_default_endpoint(),
         "resolved_endpoint": endpoint_name,
         "endpoint_config": project.endpoint_config,
         "pre_annotation_enabled": endpoint_name is not None,
+        "use_data_plane_resolved": resolve_use_data_plane(cfg),
+        "pre_annotate_on_import": _env_truthy("PRE_ANNOTATE_ON_IMPORT"),
+        "pre_annotate_on_import_max_samples": os.environ.get(
+            "PRE_ANNOTATE_ON_IMPORT_MAX_SAMPLES", "50",
+        ),
+        "sam31_note": (
+            "Use endpoint_config {\"adapter\": \"sam31\"} for route-optimized "
+            "serving_endpoints_data_plane.query (OAuth dataplane)."
+        ),
+        "async_preannotate_job_configured": resolve_preannotate_job_id() is not None,
+        "pre_annotate_databricks_job_id": resolve_preannotate_job_id(),
     }
+
+
+# Project-less routes (e.g. new-project form cannot call /projects/{id}/settings).
+defaults_router = APIRouter(prefix="/api", tags=["inference"])
+
+
+@defaults_router.get("/inference-defaults", response_model=InferenceDefaultsOut)
+def get_inference_defaults():
+    """Expose ``SERVING_ENDPOINT`` (and similar) for UI pre-fill. No secrets."""
+    return InferenceDefaultsOut(default_serving_endpoint=get_default_endpoint())

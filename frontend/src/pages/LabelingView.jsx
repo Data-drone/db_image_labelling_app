@@ -22,6 +22,8 @@ import {
   fetchSampleHistory,
   predictSample,
   fetchEndpointStatus,
+  acceptDraftsSample,
+  clearDraftsSample,
 } from '../api/client';
 
 export default function LabelingView() {
@@ -71,6 +73,7 @@ export default function LabelingView() {
 
   const isDetection = project?.task_type === 'detection';
   const total = sampleList.length;
+  const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
   // Load project info
   useEffect(() => {
@@ -146,6 +149,7 @@ export default function LabelingView() {
             id: `existing-${nextBoxId.current++}`,
             label: a.label,
             classIndex: Math.max(0, (project?.class_list || []).indexOf(a.label)),
+            isDraft: Boolean(a.is_draft),
             ...a.bbox_json,
           }));
         setBoxes(existingBoxes);
@@ -290,6 +294,43 @@ export default function LabelingView() {
       setSaving(false);
     }
   };
+
+  const handleAcceptDraftsOnly = useCallback(async () => {
+    if (!sample || saving || currentIndex < 0) return;
+    const sid = sampleList[currentIndex]?.id;
+    if (sid == null) return;
+    setSaving(true);
+    try {
+      await acceptDraftsSample(projectId, sid);
+      await loadSampleAtIndex(currentIndex);
+      const s = await fetchSample(projectId, sid);
+      setSampleList((prev) => prev.map((row) => (row.id === sid ? { ...row, status: s.status } : row)));
+      loadStats();
+    } catch (err) {
+      console.error('Accept drafts failed:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, projectId, currentIndex, sampleList, loadSampleAtIndex, loadStats]);
+
+  const handleClearDraftsOnly = useCallback(async () => {
+    if (!sample || saving || currentIndex < 0) return;
+    const sid = sampleList[currentIndex]?.id;
+    if (sid == null) return;
+    if (!confirm('Remove model draft suggestions on this image?')) return;
+    setSaving(true);
+    try {
+      await clearDraftsSample(projectId, sid);
+      await loadSampleAtIndex(currentIndex);
+      const s = await fetchSample(projectId, sid);
+      setSampleList((prev) => prev.map((row) => (row.id === sid ? { ...row, status: s.status } : row)));
+      loadStats();
+    } catch (err) {
+      console.error('Clear drafts failed:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, projectId, currentIndex, sampleList, loadSampleAtIndex, loadStats]);
 
   // Add new class
   const handleAddClass = async () => {
@@ -640,6 +681,22 @@ export default function LabelingView() {
             {currentStatus === 'pre_labeled' ? 'pre-labeled' : currentStatus}
           </span>
         )}
+        {sample?.annotations?.some(a => a.is_draft) && (
+          <span
+            title="Model suggestions are drafts until you save"
+            style={{
+              fontSize: '0.65rem',
+              fontWeight: 600,
+              padding: '0.15rem 0.45rem',
+              borderRadius: 4,
+              background: 'rgba(167, 139, 250, 0.2)',
+              color: '#a78bfa',
+              border: '1px solid rgba(167, 139, 250, 0.45)',
+            }}
+          >
+            draft
+          </span>
+        )}
         {currentStatus === 'labeled' && (
           <span style={{
             fontSize: '0.7rem',
@@ -921,6 +978,29 @@ export default function LabelingView() {
                     </button>
                   )}
 
+                  {hasDraftAnnotations && (
+                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleAcceptDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem' }}
+                      >
+                        Accept drafts
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleClearDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem', color: '#f97316' }}
+                      >
+                        Clear drafts
+                      </button>
+                    </div>
+                  )}
+
                   {/* Save & Next + Skip */}
                   <button
                     className="btn-primary"
@@ -1072,6 +1152,29 @@ export default function LabelingView() {
                   </div>
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0 0.75rem' }} />
+
+                  {hasDraftAnnotations && (
+                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleAcceptDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem' }}
+                      >
+                        Accept drafts
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleClearDraftsOnly}
+                        disabled={saving}
+                        style={{ flex: 1, fontSize: '0.75rem', padding: '0.4rem', color: '#f97316' }}
+                      >
+                        Clear drafts
+                      </button>
+                    </div>
+                  )}
 
                   {/* Save & Next */}
                   <button

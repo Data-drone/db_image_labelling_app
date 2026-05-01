@@ -64,6 +64,21 @@ The FastAPI backend serves the React SPA as static files and provides the `/api/
 3. The app auto-starts via `app.yaml` → `python start.py` → FastAPI + Uvicorn
 4. On first boot, Lakebase is auto-provisioned (unless `LAKEBASE_AUTO_PROVISION=false`) and tables are created
 
+### App icon (Apps overview thumbnail)
+
+The tile on the **Databricks Apps** overview is an **app thumbnail** on the workspace object, not a static file served by FastAPI.
+
+1. **Store the image in this repo** as **`assets/databricks-app-thumbnail.jpg`** (or `.jpeg` / `.png` with that basename). Any reasonable resolution and modest file size is fine.
+2. **Upload it once per app** (after the app exists in the workspace):
+
+   ```bash
+   python scripts/upload_app_thumbnail.py <your-app-name>
+   ```
+
+   Or with a custom path: `python scripts/upload_app_thumbnail.py <your-app-name> --image /path/to/icon.png`
+
+   This wraps `databricks apps update-app-thumbnail` with the JSON shape `{"app_thumbnail":{"thumbnail":"<base64>"}}` required by the [Apps API](https://docs.databricks.com/api/workspace/apps/updateappthumbnail).
+
 ### App Resources
 
 The app needs a Databricks App service principal with:
@@ -80,6 +95,7 @@ The app needs a Databricks App service principal with:
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Lakebase project identifier |
 | `LAKEBASE_DISPLAY_NAME` | `CV Explorer` | Lakebase project display name |
 | `LAKEBASE_AUTO_PROVISION` | `true` | Set to `"false"` to require a pre-existing Lakebase project (e.g. when managed by a Databricks Asset Bundle). If the project is missing at startup, the app exits with an error instead of creating it. |
+| `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(unset)_ | Numeric Databricks Job id for async pre-labeling (`databricks bundle deploy` of `resources/preannotate_job.job.yml`). |
 
 ## Using with Databricks Asset Bundles
 
@@ -101,6 +117,16 @@ With `LAKEBASE_AUTO_PROVISION=false`, the app:
 3. Exits with a clear error if it does not (instead of creating one)
 
 See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
+
+### Async pre-label (Databricks Job)
+
+This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and API routes so large pre-label batches run on a cluster instead of inside the app HTTP worker.
+
+1. From the repo root: `databricks bundle deploy` (with a configured profile).
+2. Copy the deployed job’s **numeric id** from the workspace Jobs UI.
+3. Set **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** on the app (same service principal should be allowed to **run** the job; the job cluster needs UC / volume access like the app).
+
+The dashboard shows **Pre-label (job)** when that env var is set. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
 
 ## Importing annotations
 

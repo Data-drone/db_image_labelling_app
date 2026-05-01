@@ -1,0 +1,28 @@
+# Declarative Automation Bundle — CV Explorer app + async pre-annotate job.
+# Validate: databricks bundle validate
+# Deploy:   databricks bundle deploy --target dev
+
+bundle:
+  name: cv_explorer
+
+include:
+  - resources/*.yml
+
+variables:
+  spark_version:
+    default: "15.4.x-scala2.12"
+  node_type_id:
+    default: "i3.xlarge"
+  num_workers:
+    default: 0
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://fevm-classic-stable-hdtwu7.cloud.databricks.com
+      # Pick the ~/.databrickscfg stanza for this host (you had both fevm-classic-stable and dev).
+      profile: fevm-classic-stable
+
+  prod:
+    mode: production

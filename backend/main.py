@@ -14,8 +14,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .models import Base
-from .routes import projects, labeling, admin, export, browse, import_routes, inference
+from .models import Base, ensure_annotations_is_draft_column, ensure_preannotate_runs_table
+from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
     print("[STARTUP] Creating tables...", flush=True)
     try:
         Base.metadata.create_all(engine)
+        ensure_annotations_is_draft_column(engine)
+        ensure_preannotate_runs_table(engine)
         print("[STARTUP] Tables created OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] create_all failed: {e}", flush=True)
@@ -111,7 +113,9 @@ app.add_middleware(
 # Register routers
 app.include_router(projects.router)
 app.include_router(labeling.router)
+app.include_router(inference.defaults_router)
 app.include_router(inference.router)
+app.include_router(preannotate_runs.router)
 app.include_router(admin.router)
 app.include_router(export.router)
 app.include_router(browse.router)

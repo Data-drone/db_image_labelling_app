@@ -91,8 +91,9 @@ class PredictionOut(BaseModel):
 
 
 class PreAnnotateRequest(BaseModel):
-    max_samples: int = 0  # 0 = all unlabeled
+    max_samples: int = 0  # 0 = all matching samples
     min_confidence: Optional[float] = None
+    include_pre_labeled: bool = False  # also re-run on pre_labeled (replaces model drafts)
 
 
 class PreAnnotateProgress(BaseModel):
@@ -102,11 +103,55 @@ class PreAnnotateProgress(BaseModel):
     total: int
 
 
+class PreAnnotateAsyncRequest(BaseModel):
+    """Same options as synchronous pre-annotate, executed by a Databricks Job."""
+
+    max_samples: int = 0
+    min_confidence: Optional[float] = None
+    include_pre_labeled: bool = False
+
+
+class PreannotateRunOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    max_samples: int
+    include_pre_labeled: bool
+    min_confidence: Optional[float] = None
+    completed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    total_planned: int = 0
+    databricks_run_id: Optional[int] = None
+    error_message: Optional[str] = None
+    created_by: str = ""
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
 class EndpointStatus(BaseModel):
     status: str  # ready, not_ready, not_found, error, not_configured
     endpoint: Optional[str] = None
     state: Optional[str] = None
     error: Optional[str] = None
+
+
+class InferenceDefaultsOut(BaseModel):
+    """Workspace-level inference defaults (from env), for forms before a project exists."""
+
+    default_serving_endpoint: Optional[str] = None
+
+
+class BulkDraftSampleIds(BaseModel):
+    sample_ids: list[int]
+
+
+class DraftMutationResult(BaseModel):
+    annotations_affected: int = 0
+    samples_touched: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +198,7 @@ class AnnotationOut(BaseModel):
     label: str
     ann_type: str
     bbox_json: Optional[dict] = None
+    is_draft: bool = False
     created_by: str
     created_at: datetime
 

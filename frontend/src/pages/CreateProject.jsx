@@ -10,6 +10,7 @@ import {
   fetchSchemas,
   fetchVolumes,
   browseDirectory,
+  fetchInferenceDefaults,
 } from '../api/client';
 import Spinner from '../components/Spinner';
 import FilterableSelect from '../components/FilterableSelect';
@@ -44,6 +45,23 @@ export default function CreateProject() {
   // Submit
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+
+  // Pre-fill serving endpoint from app env (e.g. SERVING_ENDPOINT via valueFrom)
+  useEffect(() => {
+    let cancelled = false;
+    fetchInferenceDefaults()
+      .then((data) => {
+        if (cancelled) return;
+        const d = (data?.default_serving_endpoint || '').trim();
+        if (!d) return;
+        setServingEndpoint(d);
+        setShowAdvanced(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load catalogs for picker mode
   useEffect(() => {
@@ -497,6 +515,7 @@ export default function CreateProject() {
               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
                 Name of a Databricks Model Serving endpoint for pre-labeling. Leave blank to skip.
                 The endpoint must be added as a resource in the Databricks Apps UI with "Can query" permission.
+                If the app sets <code style={{ fontSize: '0.65rem' }}>SERVING_ENDPOINT</code>, this field is pre-filled automatically.
               </div>
             </div>
           )}
