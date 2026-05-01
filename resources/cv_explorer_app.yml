@@ -1,6 +1,6 @@
 # Databricks App with declarative resources (visible in Apps UI).
 # Requires bundle variables (see databricks.yml defaults); override per workspace if needed.
-# Git + source_code_path: platform deploys from the branch; app.yaml valueFrom keys match resource `name`.
+# Git + source_code_path: platform deploys from the branch; app.yml valueFrom keys match resource `name`.
 
 resources:
   apps:
