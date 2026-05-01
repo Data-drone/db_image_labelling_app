@@ -41,11 +41,6 @@ def trigger_finetune_job(run_db_id: int, export_path: str) -> int:
         "run_id": str(run_db_id),
         "export_path": export_path,
     }
-    sp_client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")
-    sp_client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
-    if sp_client_id and sp_client_secret:
-        job_params["sp_client_id"] = sp_client_id
-        job_params["sp_client_secret"] = sp_client_secret
 
     resp = w.jobs.run_now(
         job_id=job_id,
