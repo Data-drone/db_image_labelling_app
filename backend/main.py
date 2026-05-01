@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .models import Base, ensure_annotations_is_draft_column, ensure_preannotate_runs_table
+from .models import Base
 from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs, finetune_runs
 
 log = logging.getLogger(__name__)
@@ -137,6 +137,7 @@ def health():
 @app.get("/api/config")
 def app_config():
     """Public app configuration exposed to the frontend."""
+    from .deps import is_lakebase
     from .finetune_triggers import resolve_finetune_job_id
     export_vol = os.environ.get("EXPORT_VOLUME_PATH", "")
     if not export_vol:
@@ -145,6 +146,7 @@ def app_config():
         "demo_volume_path": os.environ.get("DEMO_VOLUME_PATH", ""),
         "export_volume_path": export_vol,
         "finetune_job_configured": resolve_finetune_job_id() is not None,
+        "db_backend": "lakebase" if is_lakebase() else "sqlite",
     }
 
 

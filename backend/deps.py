@@ -36,6 +36,10 @@ def get_session_factory():
     return _session_factory
 
 
+def is_lakebase():
+    return _use_lakebase
+
+
 def get_db():
     """Yield a database session."""
     if _use_lakebase:
