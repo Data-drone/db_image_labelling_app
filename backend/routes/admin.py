@@ -179,7 +179,8 @@ def admin_connect_lakebase(body: dict):
 
         cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
         host = endpoint.status.hosts.host
-        conn_url = f"postgresql://token:{cred.token}@{host}:5432/databricks_postgres"
+        from urllib.parse import quote
+        conn_url = f"postgresql://token:{quote(cred.token, safe='')}@{host}:5432/databricks_postgres"
 
         from sqlalchemy import create_engine
         new_engine = create_engine(conn_url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
