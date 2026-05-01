@@ -28,7 +28,7 @@ variables:
   serving_endpoint_name:
     default: cv-sam31-cv_manufacturing
   finetune_job_id:
-    default: "0"
+    default: "318435402424260"
   app_name:
     default: cv-explorer-dev
 targets:
