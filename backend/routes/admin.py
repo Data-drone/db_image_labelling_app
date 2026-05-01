@@ -193,7 +193,7 @@ def admin_connect_lakebase(body: dict):
 
         old_engine = get_engine()
         new_factory = sessionmaker(bind=new_engine)
-        configure_db(new_engine, new_factory, use_lakebase=False)
+        configure_db(new_engine, new_factory, use_lakebase=True)
         if old_engine:
             old_engine.dispose()
 
