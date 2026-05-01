@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .models import Base, ensure_annotations_is_draft_column, ensure_preannotate_runs_table
-from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs
+from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs, finetune_runs
 
 log = logging.getLogger(__name__)
 
@@ -77,9 +77,8 @@ async def lifespan(app: FastAPI):
 
     print("[STARTUP] Creating tables...", flush=True)
     try:
-        Base.metadata.create_all(engine)
-        ensure_annotations_is_draft_column(engine)
-        ensure_preannotate_runs_table(engine)
+        from .models import init_db
+        init_db(engine)
         print("[STARTUP] Tables created OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] create_all failed: {e}", flush=True)
@@ -123,6 +122,7 @@ app.include_router(preannotate_runs.router)
 app.include_router(admin.router)
 app.include_router(export.router)
 app.include_router(browse.router)
+app.include_router(finetune_runs.router)
 app.include_router(import_routes.router)
 
 
@@ -132,6 +132,20 @@ app.include_router(import_routes.router)
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+def app_config():
+    """Public app configuration exposed to the frontend."""
+    from .finetune_triggers import resolve_finetune_job_id
+    export_vol = os.environ.get("EXPORT_VOLUME_PATH", "")
+    if not export_vol:
+        export_vol = os.environ.get("DEMO_VOLUME_PATH", "")
+    return {
+        "demo_volume_path": os.environ.get("DEMO_VOLUME_PATH", ""),
+        "export_volume_path": export_vol,
+        "finetune_job_configured": resolve_finetune_job_id() is not None,
+    }
 
 
 @app.get("/api/debug/logs")

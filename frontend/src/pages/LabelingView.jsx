@@ -25,6 +25,7 @@ import {
   acceptDraftsSample,
   clearDraftsSample,
 } from '../api/client';
+import { humanizeApiError } from '../api/errors';
 
 export default function LabelingView() {
   const { id: projectId } = useParams();
@@ -71,6 +72,9 @@ export default function LabelingView() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  /** Shown when an API call fails (502, timeout, validation, etc.) */
+  const [actionError, setActionError] = useState('');
+
   const isDetection = project?.task_type === 'detection';
   const total = sampleList.length;
   const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
@@ -79,7 +83,7 @@ export default function LabelingView() {
   useEffect(() => {
     fetchProject(projectId)
       .then(setProject)
-      .catch(() => navigate('/'));
+      .catch(() => navigate('/projects'));
   }, [projectId, navigate]);
 
   // Check endpoint status
@@ -131,6 +135,10 @@ export default function LabelingView() {
     }
   }, [sampleList]); // Only run when sampleList first loads
 
+  useEffect(() => {
+    setActionError('');
+  }, [sample?.id]);
+
   // Load sample when currentIndex changes
   const loadSampleAtIndex = useCallback(async (idx) => {
     if (idx < 0 || idx >= sampleList.length) return;
@@ -168,6 +176,7 @@ export default function LabelingView() {
       undoStack.current = [];
     } catch (err) {
       console.error('Failed to load sample:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setLoading(false);
     }
@@ -263,6 +272,7 @@ export default function LabelingView() {
   const handleSaveClassification = useCallback(async () => {
     if (!sample || saving || selectedLabels.size === 0) return;
     setSaving(true);
+    setActionError('');
     try {
       const annotations = [...selectedLabels].map(label => ({
         label,
@@ -272,6 +282,7 @@ export default function LabelingView() {
       markCurrentAndAdvance();
     } catch (err) {
       console.error('Annotation failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -281,6 +292,7 @@ export default function LabelingView() {
   const handleSkip = async () => {
     if (!sample || saving) return;
     setSaving(true);
+    setActionError('');
     try {
       await skipSample(projectId, sample.id);
       setSampleList(prev => prev.map((s, i) =>
@@ -290,6 +302,7 @@ export default function LabelingView() {
       goNext();
     } catch (err) {
       console.error('Skip failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -300,6 +313,7 @@ export default function LabelingView() {
     const sid = sampleList[currentIndex]?.id;
     if (sid == null) return;
     setSaving(true);
+    setActionError('');
     try {
       await acceptDraftsSample(projectId, sid);
       await loadSampleAtIndex(currentIndex);
@@ -308,6 +322,7 @@ export default function LabelingView() {
       loadStats();
     } catch (err) {
       console.error('Accept drafts failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -319,6 +334,7 @@ export default function LabelingView() {
     if (sid == null) return;
     if (!confirm('Remove model draft suggestions on this image?')) return;
     setSaving(true);
+    setActionError('');
     try {
       await clearDraftsSample(projectId, sid);
       await loadSampleAtIndex(currentIndex);
@@ -327,6 +343,7 @@ export default function LabelingView() {
       loadStats();
     } catch (err) {
       console.error('Clear drafts failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -341,12 +358,14 @@ export default function LabelingView() {
       return;
     }
     setAddingClass(true);
+    setActionError('');
     try {
       const result = await addProjectClass(projectId, trimmed);
       setProject({ ...project, class_list: result.class_list });
       setNewClassName('');
     } catch (err) {
       console.error('Failed to add class:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setAddingClass(false);
     }
@@ -357,6 +376,7 @@ export default function LabelingView() {
     if (!sample || predicting) return;
     setPredicting(true);
     setPredictions(null);
+    setActionError('');
     try {
       const preds = await predictSample(projectId, sample.id);
       setPredictions(preds);
@@ -373,6 +393,7 @@ export default function LabelingView() {
       }
     } catch (err) {
       console.error('Prediction failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setPredicting(false);
     }
@@ -385,6 +406,7 @@ export default function LabelingView() {
       return;
     }
     setSaving(true);
+    setActionError('');
     try {
       const annotations = predictions.map(p => ({
         label: p.label,
@@ -395,6 +417,7 @@ export default function LabelingView() {
       markCurrentAndAdvance();
     } catch (err) {
       console.error('Accept failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -467,6 +490,7 @@ export default function LabelingView() {
   const handleSaveBoxes = async () => {
     if (!sample || saving || boxes.length === 0) return;
     setSaving(true);
+    setActionError('');
     try {
       const annotations = boxes.map(b => ({
         label: b.label,
@@ -477,6 +501,7 @@ export default function LabelingView() {
       markCurrentAndAdvance();
     } catch (err) {
       console.error('Save failed:', err);
+      setActionError(humanizeApiError(err));
     } finally {
       setSaving(false);
     }
@@ -572,6 +597,44 @@ export default function LabelingView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 4rem)' }}>
+      {actionError && (
+        <div
+          role="alert"
+          style={{
+            marginBottom: '0.75rem',
+            padding: '0.65rem 0.9rem',
+            borderRadius: 8,
+            background: 'rgba(255, 50, 50, 0.1)',
+            border: '1px solid rgba(255, 50, 50, 0.35)',
+            color: '#ffb4b4',
+            fontSize: '0.85rem',
+            lineHeight: 1.45,
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ flex: 1 }}>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError('')}
+            style={{
+              flexShrink: 0,
+              background: 'transparent',
+              border: '1px solid rgba(255,255,255,0.25)',
+              color: 'inherit',
+              borderRadius: 4,
+              cursor: 'pointer',
+              fontSize: '0.75rem',
+              padding: '0.15rem 0.45rem',
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Top bar */}
       <div
         style={{

@@ -7,8 +7,10 @@ import os
 
 from fastapi import APIRouter, HTTPException
 
+from sqlalchemy.orm import sessionmaker
+
 from ..deps import get_engine, get_session_factory
-from ..models import Base, LabelingProject, ProjectSample, Annotation
+from ..models import Base, LabelingProject, ProjectSample, Annotation, init_db
 from ..volumes import _get_workspace_client
 
 log = logging.getLogger(__name__)
@@ -135,6 +137,19 @@ def admin_provision_lakebase(body: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/reset-database")
+def admin_reset_database():
+    """Drop all tables and recreate them (destructive — dev/test only)."""
+    engine = get_engine()
+    if engine is None:
+        raise HTTPException(status_code=500, detail="No database engine available")
+
+    log.warning("ADMIN: dropping all tables and recreating schema")
+    Base.metadata.drop_all(engine)
+    init_db(engine)
+    return {"status": "ok", "message": "All tables dropped and recreated."}
+
+
 @router.post("/connect-lakebase")
 def admin_connect_lakebase(body: dict):
     """Switch the app's database backend to an existing Lakebase project."""
@@ -191,3 +206,55 @@ def admin_connect_lakebase(body: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test-serving")
+def admin_test_serving():
+    """Quick check: send first sample through the model and return the raw response."""
+    from ..inference import resolve_use_data_plane, predict_sample
+    from ..deps import get_db
+    import traceback
+
+    w = _get_workspace_client()
+    auth_type = w.config.auth_type
+
+    db = next(get_db())
+    from ..models import LabelingProject, ProjectSample
+    project = db.query(LabelingProject).first()
+    if not project:
+        return {"status": "error", "error": "No projects in DB"}
+
+    sample = db.query(ProjectSample).filter_by(project_id=project.id).first()
+    if not sample:
+        return {"status": "error", "error": "No samples in DB"}
+
+    from ..volumes import read_image_bytes
+    img = read_image_bytes(sample.filepath)
+    if not img:
+        return {"status": "error", "error": f"Cannot read {sample.filepath}"}
+
+    try:
+        preds = predict_sample(
+            endpoint_name=project.serving_endpoint,
+            image_bytes=img,
+            task_type=project.task_type,
+            class_list=list(project.class_list),
+            endpoint_config=project.endpoint_config,
+        )
+        return {
+            "status": "ok",
+            "endpoint": project.serving_endpoint,
+            "auth_type": auth_type,
+            "use_data_plane": resolve_use_data_plane(project.endpoint_config),
+            "adapter": (project.endpoint_config or {}).get("adapter", "generic"),
+            "predictions": preds[:10],
+            "sample_filepath": sample.filepath,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "endpoint": project.serving_endpoint,
+            "auth_type": auth_type,
+            "error": str(e)[:500],
+            "traceback": traceback.format_exc()[-1000:],
+        }

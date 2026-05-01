@@ -64,8 +64,10 @@ def resolve_use_data_plane(endpoint_config: Optional[dict]) -> bool:
     """Use ``serving_endpoints_data_plane.query`` (route-optimized / OAuth dataplane).
 
     Project ``endpoint_config["use_data_plane"]`` overrides when set to a boolean-like
-    value; otherwise ``USE_SERVING_DATA_PLANE`` or ``SERVING_ROUTE_OPTIMIZED`` env
-    (truthy) enables the dataplane client.
+    value; otherwise defaults to **True** (all new Databricks endpoints are
+    route-optimized and require the data-plane client). Set the env var
+    ``USE_SERVING_DATA_PLANE=false`` or project config ``use_data_plane: false``
+    to force the legacy control-plane path.
     """
     cfg = endpoint_config or {}
     explicit = _truthy_config(cfg.get("use_data_plane"))
@@ -73,9 +75,41 @@ def resolve_use_data_plane(endpoint_config: Optional[dict]) -> bool:
         return explicit
     for key in ("USE_SERVING_DATA_PLANE", "SERVING_ROUTE_OPTIMIZED"):
         v = os.environ.get(key, "")
-        if v.strip().lower() in ("1", "true", "yes", "on"):
-            return True
-    return False
+        t = _truthy_config(v)
+        if t is not None:
+            return t
+    return True
+
+
+_sp_workspace_client = None
+
+
+def _get_sp_workspace_client():
+    """Create a WorkspaceClient using injected SP OAuth credentials (M2M).
+
+    Used when the default client (unified auth on serverless) can't access
+    route-optimized serving endpoints that require OAuth data-plane tokens.
+    """
+    global _sp_workspace_client
+    if _sp_workspace_client is not None:
+        return _sp_workspace_client
+
+    from databricks.sdk import WorkspaceClient
+
+    sp_id = os.environ.get("SP_SERVING_CLIENT_ID", "")
+    sp_secret = os.environ.get("SP_SERVING_CLIENT_SECRET", "")
+    if not sp_id or not sp_secret:
+        return None
+
+    host = os.environ.get("DATABRICKS_HOST") or _get_workspace_client().config.host
+    _sp_workspace_client = WorkspaceClient(
+        host=host,
+        client_id=sp_id,
+        client_secret=sp_secret,
+    )
+    log.info("Created SP OAuth WorkspaceClient for data-plane serving (auth_type=%s)",
+             _sp_workspace_client.config.auth_type)
+    return _sp_workspace_client
 
 
 def query_serving_endpoint(
@@ -84,21 +118,35 @@ def query_serving_endpoint(
     *,
     use_data_plane: bool,
 ) -> dict:
-    """Query a serving endpoint; dataplane path for route-optimized endpoints."""
+    """Query a serving endpoint with automatic fallback for route-optimized endpoints.
+
+    Tries: SDK data-plane OAuth → SP OAuth data-plane → SDK control plane.
+    """
     w = _get_workspace_client()
+
     if use_data_plane:
         dp = getattr(w, "serving_endpoints_data_plane", None)
-        if dp is None:
-            raise RuntimeError(
-                "WorkspaceClient has no serving_endpoints_data_plane; "
-                "upgrade databricks-sdk for route-optimized (OAuth dataplane) endpoints."
-            )
-        resp = dp.query(name=endpoint_name, dataframe_records=dataframe_records)
-    else:
-        resp = w.serving_endpoints.query(
-            name=endpoint_name,
-            dataframe_records=dataframe_records,
-        )
+        if dp is not None:
+            try:
+                resp = dp.query(name=endpoint_name, dataframe_records=dataframe_records)
+                return resp.as_dict() if hasattr(resp, "as_dict") else resp
+            except Exception as e:
+                if "OAuth tokens are not available" not in str(e):
+                    raise
+                log.info("Data-plane OAuth unavailable on default client")
+
+        sp_w = _get_sp_workspace_client()
+        if sp_w is not None:
+            sp_dp = getattr(sp_w, "serving_endpoints_data_plane", None)
+            if sp_dp is not None:
+                log.info("Trying SP OAuth data-plane for %s", endpoint_name)
+                resp = sp_dp.query(name=endpoint_name, dataframe_records=dataframe_records)
+                return resp.as_dict() if hasattr(resp, "as_dict") else resp
+
+    resp = w.serving_endpoints.query(
+        name=endpoint_name,
+        dataframe_records=dataframe_records,
+    )
     return resp.as_dict() if hasattr(resp, "as_dict") else resp
 
 
@@ -110,12 +158,12 @@ def check_endpoint_health(endpoint_name: str) -> dict:
     try:
         w = _get_workspace_client()
         ep = w.serving_endpoints.get(name=endpoint_name)
-        state = "unknown"
+        state_str = "unknown"
         if ep.state and ep.state.ready:
-            state = str(ep.state.ready)
-        if state == "READY":
-            return {"status": "ready", "endpoint": endpoint_name, "state": state}
-        return {"status": "not_ready", "endpoint": endpoint_name, "state": state}
+            state_str = str(ep.state.ready)
+        if "READY" in state_str.upper():
+            return {"status": "ready", "endpoint": endpoint_name, "state": state_str}
+        return {"status": "not_ready", "endpoint": endpoint_name, "state": state_str}
     except Exception as e:
         err_str = str(e)
         if "RESOURCE_DOES_NOT_EXIST" in err_str or "404" in err_str:

@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     Float,
@@ -110,11 +111,12 @@ class PreannotateRun(Base):
     max_samples = Column(Integer, default=0, nullable=False)  # 0 = all matching samples
     include_pre_labeled = Column(Boolean, default=False, nullable=False)
     min_confidence = Column(Float, nullable=True)
+    text_prompt = Column(Text, nullable=True)
     completed = Column(Integer, default=0, nullable=False)
     failed = Column(Integer, default=0, nullable=False)
     skipped = Column(Integer, default=0, nullable=False)
     total_planned = Column(Integer, default=0, nullable=False)
-    databricks_run_id = Column(Integer, nullable=True)  # jobs.run_now response (run id)
+    databricks_run_id = Column(BigInteger, nullable=True)  # jobs.run_now response (run id)
     error_message = Column(Text, nullable=True)
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -124,6 +126,28 @@ class PreannotateRun(Base):
     __table_args__ = (
         Index("ix_preannotate_runs_project", "project_id"),
         Index("ix_preannotate_runs_status", "status"),
+    )
+
+
+class FinetuneRun(Base):
+    """Tracks async (Databricks Job) finetuning runs triggered after dataset export."""
+
+    __tablename__ = "finetune_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    export_path = Column(Text, nullable=False)
+    databricks_run_id = Column(BigInteger, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_by = Column(String(255), default="")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_finetune_runs_project", "project_id"),
+        Index("ix_finetune_runs_status", "status"),
     )
 
 
@@ -158,6 +182,7 @@ TABLE_NAMES = [
     "annotations",
     "annotation_history",
     "preannotate_runs",
+    "finetune_runs",
 ]
 
 
@@ -216,10 +241,52 @@ def ensure_annotations_is_draft_column(engine) -> None:
     log.info("annotations.is_draft column added and model rows backfilled")
 
 
+def _ensure_missing_columns(engine) -> None:
+    """Add any columns defined in the models but absent from the DB (no Alembic).
+
+    Only handles simple ADD COLUMN — does not change types or drop columns.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    dialect = engine.dialect.name
+    existing_tables = set(insp.get_table_names())
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        existing_cols = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing_cols:
+                continue
+            col_type = col.type.compile(dialect=engine.dialect)
+            nullable = "NULL" if col.nullable else "NOT NULL"
+            default_clause = ""
+            if col.default is not None and col.default.is_scalar:
+                val = col.default.arg
+                if isinstance(val, str):
+                    default_clause = f" DEFAULT '{val}'"
+                elif isinstance(val, bool):
+                    if dialect == "postgresql":
+                        default_clause = f" DEFAULT {'true' if val else 'false'}"
+                    else:
+                        default_clause = f" DEFAULT {1 if val else 0}"
+                elif isinstance(val, (int, float)):
+                    default_clause = f" DEFAULT {val}"
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type} {nullable}{default_clause}'
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+                log.info("Added column %s.%s (%s)", table.name, col.name, col_type)
+            except Exception:
+                log.debug("Column %s.%s may already exist, skipping", table.name, col.name)
+
+
 def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
     Base.metadata.create_all(engine)
     log.info("Database tables created")
+    _ensure_missing_columns(engine)
     ensure_annotations_is_draft_column(engine)
     ensure_preannotate_runs_table(engine)
 

@@ -94,6 +94,7 @@ class PreAnnotateRequest(BaseModel):
     max_samples: int = 0  # 0 = all matching samples
     min_confidence: Optional[float] = None
     include_pre_labeled: bool = False  # also re-run on pre_labeled (replaces model drafts)
+    text_prompt: Optional[str] = None  # override SAM text prompt (default: class list)
 
 
 class PreAnnotateProgress(BaseModel):
@@ -109,6 +110,7 @@ class PreAnnotateAsyncRequest(BaseModel):
     max_samples: int = 0
     min_confidence: Optional[float] = None
     include_pre_labeled: bool = False
+    text_prompt: Optional[str] = None
 
 
 class PreannotateRunOut(BaseModel):
@@ -118,6 +120,7 @@ class PreannotateRunOut(BaseModel):
     max_samples: int
     include_pre_labeled: bool
     min_confidence: Optional[float] = None
+    text_prompt: Optional[str] = None
     completed: int = 0
     failed: int = 0
     skipped: int = 0
@@ -221,6 +224,24 @@ class AnnotationHistoryOut(BaseModel):
     new_bbox_json: Optional[dict] = None
     changed_by: str
     changed_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Finetuning
+# ---------------------------------------------------------------------------
+class FinetuneRunOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    export_path: str
+    databricks_run_id: Optional[int] = None
+    error_message: Optional[str] = None
+    created_by: str = ""
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
