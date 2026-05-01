@@ -3,31 +3,21 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
+
+from .job_utils import resolve_job_id, trigger_databricks_job
 
 log = logging.getLogger(__name__)
 
+_ENV_VARS = ["PRE_ANNOTATE_DATABRICKS_JOB_ID", "PRE_ANNOTATE_JOB_ID"]
+
 
 def resolve_preannotate_job_id() -> Optional[int]:
-    raw = os.environ.get("PRE_ANNOTATE_DATABRICKS_JOB_ID") or os.environ.get("PRE_ANNOTATE_JOB_ID")
-    if not raw or not str(raw).strip():
-        return None
-    try:
-        return int(str(raw).strip())
-    except ValueError:
-        log.warning("Invalid PRE_ANNOTATE_DATABRICKS_JOB_ID / PRE_ANNOTATE_JOB_ID: %r", raw)
-        return None
+    return resolve_job_id(_ENV_VARS)
 
 
 def trigger_preannotate_job(run_db_id: int) -> int:
-    """Call ``jobs.run_now`` so the cluster worker runs ``scripts/preannotate_job.py``.
-
-    Returns the **Databricks run id** (for linking to the Jobs UI).
-
-    Raises:
-        RuntimeError: if job id is not configured or the SDK call fails.
-    """
+    """Kick off the bundle-deployed pre-annotate job. Returns the Databricks run id."""
     job_id = resolve_preannotate_job_id()
     if job_id is None:
         raise RuntimeError(
@@ -35,25 +25,7 @@ def trigger_preannotate_job(run_db_id: int) -> int:
             "to the numeric Databricks job id (from the bundle-deployed pre-annotate job)."
         )
 
-    from .volumes import _get_workspace_client
-
-    w = _get_workspace_client()
-
     job_params = {"run_id": str(run_db_id)}
-    sp_client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")
-    sp_client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
-    if sp_client_id and sp_client_secret:
-        job_params["sp_client_id"] = sp_client_id
-        job_params["sp_client_secret"] = sp_client_secret
-
-    resp = w.jobs.run_now(
-        job_id=job_id,
-        job_parameters=job_params,
-    )
-    drid = getattr(resp, "run_id", None) or getattr(resp, "run_id_", None)
-    if drid is None and isinstance(resp, dict):
-        drid = resp.get("run_id")
-    if drid is None:
-        raise RuntimeError(f"jobs.run_now returned no run_id: {resp!r}")
+    drid = trigger_databricks_job(job_id, job_params)
     log.info("Submitted pre-annotate job_id=%s run_id=%s for db_run_id=%s", job_id, drid, run_db_id)
-    return int(drid)
+    return drid

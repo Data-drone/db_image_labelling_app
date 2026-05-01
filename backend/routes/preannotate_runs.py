@@ -1,6 +1,4 @@
-"""
-Async pre-annotation via Databricks Jobs — enqueue, status, list.
-"""
+"""Async pre-annotation via Databricks Jobs — enqueue, status, list."""
 
 import logging
 from datetime import datetime, timezone
@@ -10,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
 from ..inference import check_endpoint_health, resolve_endpoint
+from ..job_utils import get_project_or_404, sync_run_status
 from ..models import LabelingProject, PreannotateRun
 from ..preannotate_triggers import resolve_preannotate_job_id, trigger_preannotate_job
 from ..schemas import PreAnnotateAsyncRequest, PreannotateRunOut
@@ -17,57 +16,6 @@ from ..schemas import PreAnnotateAsyncRequest, PreannotateRunOut
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["preannotate-jobs"])
-
-_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
-
-
-def _get_project(project_id: int, db: Session) -> LabelingProject:
-    p = db.query(LabelingProject).filter_by(id=project_id).first()
-    if not p:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    return p
-
-
-def _sync_run_with_databricks(row: PreannotateRun, db: Session) -> None:
-    """If the DB row is non-terminal but the Databricks run has finished, update the row.
-
-    Handles the case where the serverless job crashed before the worker could
-    write back to the database (e.g. library install failure, OOM, timeout).
-    """
-    if row.status in _TERMINAL_STATUSES or not row.databricks_run_id:
-        return
-    try:
-        from ..volumes import _get_workspace_client
-        w = _get_workspace_client()
-        run = w.jobs.get_run(run_id=row.databricks_run_id)
-        state = run.state
-        if not state:
-            return
-        lcs = str(getattr(state, "life_cycle_state", "") or "").upper()
-        result = str(getattr(state, "result_state", "") or "").upper()
-        msg = str(getattr(state, "state_message", "") or "")
-
-        log.info(
-            "Cross-check run %s (db_run=%s): life_cycle=%s result=%s msg=%.120s",
-            row.id, row.databricks_run_id, lcs, result, msg,
-        )
-
-        if "FAILED" in result or "INTERNAL_ERROR" in lcs or "SKIPPED" in lcs or "BLOCKED" in lcs:
-            row.status = "failed"
-            row.error_message = (msg or f"Databricks run {lcs}/{result}")[:4000]
-            row.finished_at = datetime.now(timezone.utc)
-            db.commit()
-            log.info("Marked run %s as failed from Databricks state: %s / %s", row.id, lcs, result)
-        elif "CANCEL" in result:
-            row.status = "cancelled"
-            row.finished_at = datetime.now(timezone.utc)
-            db.commit()
-        elif "SUCCESS" in result and row.status in ("queued", "pending"):
-            row.status = "succeeded"
-            row.finished_at = datetime.now(timezone.utc)
-            db.commit()
-    except Exception:
-        log.warning("Could not cross-check Databricks run %s", row.databricks_run_id, exc_info=True)
 
 
 @router.post("/pre-annotate-async", response_model=PreannotateRunOut)
@@ -84,7 +32,7 @@ def enqueue_preannotate_job(
             detail="Async pre-annotate is not configured (set PRE_ANNOTATE_DATABRICKS_JOB_ID).",
         )
 
-    project = _get_project(project_id, db)
+    project = get_project_or_404(project_id, db, LabelingProject)
     endpoint_name = resolve_endpoint(project)
     if not endpoint_name:
         raise HTTPException(status_code=400, detail="No serving endpoint configured for this project.")
@@ -129,7 +77,7 @@ def enqueue_preannotate_job(
 
 @router.get("/pre-annotate-runs/latest", response_model=PreannotateRunOut)
 def get_latest_preannotate_run(project_id: int, db: Session = Depends(get_db)):
-    _get_project(project_id, db)
+    get_project_or_404(project_id, db, LabelingProject)
     row = (
         db.query(PreannotateRun)
         .filter_by(project_id=project_id)
@@ -138,13 +86,13 @@ def get_latest_preannotate_run(project_id: int, db: Session = Depends(get_db)):
     )
     if not row:
         raise HTTPException(status_code=404, detail="No pre-annotate runs for this project.")
-    _sync_run_with_databricks(row, db)
+    sync_run_status(row, db)
     return PreannotateRunOut.model_validate(row)
 
 
 @router.get("/pre-annotate-runs/{run_id}", response_model=PreannotateRunOut)
 def get_preannotate_run(project_id: int, run_id: int, db: Session = Depends(get_db)):
-    _get_project(project_id, db)
+    get_project_or_404(project_id, db, LabelingProject)
     row = (
         db.query(PreannotateRun)
         .filter_by(id=run_id, project_id=project_id)
@@ -152,5 +100,5 @@ def get_preannotate_run(project_id: int, run_id: int, db: Session = Depends(get_
     )
     if not row:
         raise HTTPException(status_code=404, detail="Run not found.")
-    _sync_run_with_databricks(row, db)
+    sync_run_status(row, db)
     return PreannotateRunOut.model_validate(row)
