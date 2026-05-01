@@ -23,6 +23,10 @@ resources:
               spark.master: local[*]
             custom_tags:
               ResourceClass: SingleNode
+            spark_env_vars:
+              USE_LAKEBASE: "true"
+              LAKEBASE_AUTO_PROVISION: "false"
+              LAKEBASE_PROJECT_ID: "cv-explorer"
       tasks:
         - task_key: main
           job_cluster_key: preann_cluster

@@ -50,9 +50,13 @@ async def lifespan(app: FastAPI):
 
     if use_lakebase:
         try:
-            print("[STARTUP] Attempting Lakebase init...", flush=True)
-            from .lakebase import init_lakebase
-            engine = init_lakebase()
+            from .lakebase import init_lakebase, init_lakebase_from_app_resource, uses_app_resource_postgres
+            if uses_app_resource_postgres():
+                print("[STARTUP] Lakebase via App postgres resource (PG* env)...", flush=True)
+                engine = init_lakebase_from_app_resource()
+            else:
+                print("[STARTUP] Attempting Lakebase SDK init...", flush=True)
+                engine = init_lakebase()
             lakebase_active = True
             print("[STARTUP] Lakebase init succeeded", flush=True)
             log.info("Connected to Lakebase")

@@ -142,6 +142,59 @@ def _build_engine(connection_url: str) -> Engine:
     )
 
 
+def uses_app_resource_postgres() -> bool:
+    """True when the app declares a Lakebase postgres resource (Databricks injects PG*)."""
+    return bool(
+        os.environ.get("PGHOST")
+        and os.environ.get("PGDATABASE")
+        and os.environ.get("PGUSER")
+    )
+
+
+def init_lakebase_from_app_resource() -> Engine:
+    """Connect via PG* env from a Databricks Apps Lakebase database resource.
+
+    No SDK project provisioning and no token refresh thread (SP database password).
+    """
+    global _engine, _session_factory, _token_refresh_thread, _current_connection_url
+    from urllib.parse import quote_plus
+
+    if not uses_app_resource_postgres():
+        raise RuntimeError("PGHOST/PGDATABASE/PGUSER must be set for app-resource Lakebase mode.")
+
+    host = os.environ["PGHOST"]
+    port = os.environ.get("PGPORT") or "5432"
+    user = os.environ["PGUSER"]
+    password = os.environ.get("PGPASSWORD", "")
+    database = os.environ["PGDATABASE"]
+    sslmode = os.environ.get("PGSSLMODE") or "require"
+
+    url = (
+        f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{quote_plus(database)}"
+    )
+
+    print(f"[LAKEBASE] App resource mode (host={host}, db={database})", flush=True)
+    with _lock:
+        _token_refresh_thread = None
+        _current_connection_url = url.split("@", 1)[-1]  # host/db tail only for debugging
+        _engine = create_engine(
+            url,
+            echo=False,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            connect_args={"sslmode": sslmode},
+        )
+        _session_factory = sessionmaker(bind=_engine)
+
+    with _engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    print("[LAKEBASE] App resource PostgreSQL connection OK", flush=True)
+    log.info("Lakebase initialized from App postgres resource (no token refresh)")
+    return _engine
+
+
 def _refresh_token_loop(endpoint, pg_username):
     """Background thread that refreshes the database token periodically.
 

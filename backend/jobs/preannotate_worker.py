@@ -23,9 +23,18 @@ def _configure_db():
 
     use_lakebase = os.environ.get("USE_LAKEBASE", "true").lower() != "false"
     if use_lakebase:
-        from ..lakebase import get_engine, get_session, init_lakebase
+        from ..lakebase import (
+            get_engine,
+            get_session,
+            init_lakebase,
+            init_lakebase_from_app_resource,
+            uses_app_resource_postgres,
+        )
 
-        init_lakebase()
+        if uses_app_resource_postgres():
+            init_lakebase_from_app_resource()
+        else:
+            init_lakebase()
         engine = get_engine()
         Base.metadata.create_all(engine)
         ensure_annotations_is_draft_column(engine)

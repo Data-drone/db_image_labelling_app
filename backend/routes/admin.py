@@ -3,6 +3,7 @@ Admin routes — database status, Lakebase provisioning.
 """
 
 import logging
+import os
 
 from fastapi import APIRouter, HTTPException
 
@@ -21,7 +22,13 @@ def admin_db_status():
     engine = get_engine()
     engine_url = str(engine.url) if engine else "none"
     is_sqlite = "sqlite" in engine_url
-    is_lakebase = "postgresql" in engine_url and "databricks" in engine_url
+    is_lakebase = (
+        "postgresql" in engine_url
+        and (
+            "databricks" in engine_url
+            or bool(os.environ.get("PGHOST"))
+        )
+    )
 
     result = {
         "backend": "sqlite" if is_sqlite else ("lakebase" if is_lakebase else "postgresql"),
