@@ -316,6 +316,7 @@ def _ensure_missing_columns(engine) -> None:
 
     Only handles simple ADD COLUMN — does not change types or drop columns.
     """
+    import warnings
     from sqlalchemy import inspect, text
 
     insp = inspect(engine)
@@ -325,7 +326,9 @@ def _ensure_missing_columns(engine) -> None:
     for table in Base.metadata.sorted_tables:
         if table.name not in existing_tables:
             continue
-        existing_cols = {c["name"] for c in insp.get_columns(table.name)}
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Did not recognize type")
+            existing_cols = {c["name"] for c in insp.get_columns(table.name)}
         for col in table.columns:
             if col.name in existing_cols:
                 continue
@@ -372,13 +375,15 @@ def _ensure_pgvector(engine) -> bool:
         log.warning("Could not enable pgvector extension: %s", e)
         return False
 
-    insp = inspect(engine)
-    if "project_samples" not in insp.get_table_names():
-        return True
+    # Check if embedding_vec column exists and has the right type using
+    # information_schema (avoids SQLAlchemy not recognizing the vector type).
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT udt_name FROM information_schema.columns "
+            "WHERE table_name = 'project_samples' AND column_name = 'embedding_vec'"
+        )).fetchone()
 
-    cols = {c["name"]: c for c in insp.get_columns("project_samples")}
-
-    if "embedding_vec" not in cols:
+    if row is None:
         try:
             with engine.begin() as conn:
                 conn.execute(text(
@@ -388,21 +393,21 @@ def _ensure_pgvector(engine) -> bool:
         except Exception as e:
             log.warning("Could not add embedding_vec column: %s", e)
             return False
+    elif row[0] != "vector":
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    'ALTER TABLE "project_samples" DROP COLUMN "embedding_vec"'
+                ))
+                conn.execute(text(
+                    f'ALTER TABLE "project_samples" ADD COLUMN "embedding_vec" vector({EMBEDDING_DIM})'
+                ))
+            log.info("Replaced embedding_vec column with vector(%d) type", EMBEDDING_DIM)
+        except Exception as e:
+            log.warning("Could not replace embedding_vec column: %s", e)
+            return False
     else:
-        col_type = str(cols["embedding_vec"]["type"]).lower()
-        if "vector" not in col_type:
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(
-                        'ALTER TABLE "project_samples" DROP COLUMN "embedding_vec"'
-                    ))
-                    conn.execute(text(
-                        f'ALTER TABLE "project_samples" ADD COLUMN "embedding_vec" vector({EMBEDDING_DIM})'
-                    ))
-                log.info("Replaced embedding_vec column with vector(%d) type", EMBEDDING_DIM)
-            except Exception as e:
-                log.warning("Could not replace embedding_vec column: %s", e)
-                return False
+        log.info("project_samples.embedding_vec already has vector type")
 
     return True
 
