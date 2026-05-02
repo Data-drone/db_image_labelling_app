@@ -36,3 +36,12 @@ class InferenceAdapter(ABC):
     ) -> list[dict]:
         """Query the serving endpoint and return AnnotationCreate-compatible dicts."""
         ...
+
+    def query_embedding(
+        self,
+        endpoint_name: str,
+        image_bytes: bytes,
+        endpoint_config: Optional[dict],
+    ) -> Optional[list[float]]:
+        """Query the serving endpoint for an embedding vector. Returns None if unsupported."""
+        return None

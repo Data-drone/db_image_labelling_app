@@ -27,6 +27,8 @@ from ..schemas import (
     PredictionOut,
     PreAnnotateRequest,
     PreAnnotateProgress,
+    EmbeddingGenerateRequest,
+    EmbeddingGenerateProgress,
     EndpointStatus,
     InferenceDefaultsOut,
 )
@@ -254,6 +256,105 @@ def pre_annotate_project(
                     created_by=created_by,
                 ))
             sample.status = "pre_labeled"
+            completed += 1
+
+            if completed % 25 == 0:
+                db.flush()
+
+            yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+
+        db.commit()
+        yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
+
+    return StreamingResponse(
+        _sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/generate-embeddings")
+def generate_embeddings(
+    project_id: int,
+    payload: EmbeddingGenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Generate embeddings for project samples with SSE progress streaming."""
+    from ..embeddings import resolve_embedding_endpoint, run_embedding_generation
+    from ..inference_adapters import get_embedding_adapter
+
+    project = _get_project(project_id, db)
+    endpoint_name = resolve_embedding_endpoint(project)
+    if not endpoint_name:
+        raise HTTPException(status_code=400, detail="No embedding endpoint configured.")
+
+    health = check_endpoint_health(endpoint_name)
+    if health["status"] != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding endpoint '{endpoint_name}' is not ready: {health.get('error') or health.get('state', 'unknown')}",
+        )
+
+    query = (
+        db.query(ProjectSample)
+        .filter_by(project_id=project_id)
+        .order_by(ProjectSample.id)
+    )
+    if not payload.force:
+        query = query.filter(ProjectSample.embedding.is_(None))
+    if payload.max_samples and payload.max_samples > 0:
+        query = query.limit(payload.max_samples)
+
+    samples = query.all()
+
+    wants_sse = "text/event-stream" in (request.headers.get("accept") or "")
+
+    if not wants_sse:
+        result = run_embedding_generation(db, project, samples, force=payload.force)
+        db.commit()
+        return EmbeddingGenerateProgress(**result)
+
+    def _sse_generator():
+        from ..embeddings import set_sample_embedding
+
+        adapter = get_embedding_adapter()
+        endpoint_config = dict(project.endpoint_config or {})
+
+        total = len(samples)
+        completed = failed = skipped = 0
+
+        def _emit(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        yield _emit("progress", {"completed": 0, "failed": 0, "skipped": 0, "total": total, "current": 0})
+
+        for idx, sample in enumerate(samples, 1):
+            if not payload.force and sample.embedding is not None:
+                skipped += 1
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            img = read_image_bytes(sample.filepath)
+            if not img:
+                failed += 1
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            try:
+                embedding = adapter.query_embedding(endpoint_name, img, endpoint_config)
+            except Exception as exc:
+                log.warning("Embedding failed for sample %d: %s", sample.id, exc)
+                failed += 1
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            if embedding is None:
+                failed += 1
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                continue
+
+            set_sample_embedding(sample, embedding, db)
             completed += 1
 
             if completed % 25 == 0:

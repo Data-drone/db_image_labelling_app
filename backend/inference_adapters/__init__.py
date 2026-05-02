@@ -24,16 +24,19 @@ import os
 from typing import Any, Optional
 
 from .base import InferenceAdapter, UnknownInferenceAdapterError
+from .dinov3 import DinOv3Adapter
 from .generic import GenericAdapter
 from .sam31 import Sam31Adapter
 
 __all__ = [
     "InferenceAdapter",
     "UnknownInferenceAdapterError",
+    "DinOv3Adapter",
     "GenericAdapter",
     "Sam31Adapter",
     "get_adapter_for_config",
     "get_adapter_for_project",
+    "get_embedding_adapter",
 ]
 
 
@@ -45,9 +48,11 @@ def _normalize_adapter_name(raw: Any) -> Optional[str]:
 
 _GENERIC = GenericAdapter()
 _SAM31 = Sam31Adapter()
+_DINOV3 = DinOv3Adapter()
 _ADAPTER_REGISTRY: dict[str, InferenceAdapter] = {
     "generic": _GENERIC,
     "sam31": _SAM31,
+    "dinov3": _DINOV3,
 }
 
 
@@ -73,3 +78,8 @@ def get_adapter_for_project(project: Any) -> InferenceAdapter:
     """Convenience: ``get_adapter_for_config(project.endpoint_config)``."""
     ec = getattr(project, "endpoint_config", None)
     return get_adapter_for_config(ec if isinstance(ec, dict) else None)
+
+
+def get_embedding_adapter() -> InferenceAdapter:
+    """Return the DINOv3 adapter (always supports embeddings)."""
+    return _DINOV3

@@ -27,6 +27,8 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 
 log = logging.getLogger(__name__)
 
+EMBEDDING_DIM = 1024  # DINOv3 output dimension
+
 
 class Base(DeclarativeBase):
     pass
@@ -66,6 +68,10 @@ class ProjectSample(Base):
     locked_by = Column(String(255), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default="unlabeled", nullable=False)  # unlabeled, pre_labeled, labeled, skipped
+    embedding = Column(JSON, nullable=True)
+    # Native pgvector column for indexed similarity search (Postgres only).
+    # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
+    embedding_vec = Column(JSON, nullable=True)  # placeholder type; overridden at runtime for Postgres
 
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
@@ -282,13 +288,125 @@ def _ensure_missing_columns(engine) -> None:
                 log.debug("Column %s.%s may already exist, skipping", table.name, col.name)
 
 
+def _ensure_pgvector(engine) -> bool:
+    """Install the pgvector extension and upgrade the embedding_vec column.
+
+    Returns True if pgvector is available (Postgres with extension), False otherwise.
+    """
+    if engine.dialect.name != "postgresql":
+        return False
+
+    from sqlalchemy import inspect, text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        log.info("pgvector extension enabled")
+    except Exception as e:
+        log.warning("Could not enable pgvector extension: %s", e)
+        return False
+
+    insp = inspect(engine)
+    if "project_samples" not in insp.get_table_names():
+        return True
+
+    cols = {c["name"]: c for c in insp.get_columns("project_samples")}
+
+    if "embedding_vec" not in cols:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f'ALTER TABLE "project_samples" ADD COLUMN "embedding_vec" vector({EMBEDDING_DIM})'
+                ))
+            log.info("Added project_samples.embedding_vec vector(%d) column", EMBEDDING_DIM)
+        except Exception as e:
+            log.warning("Could not add embedding_vec column: %s", e)
+            return False
+    else:
+        col_type = str(cols["embedding_vec"]["type"]).lower()
+        if "vector" not in col_type:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        'ALTER TABLE "project_samples" DROP COLUMN "embedding_vec"'
+                    ))
+                    conn.execute(text(
+                        f'ALTER TABLE "project_samples" ADD COLUMN "embedding_vec" vector({EMBEDDING_DIM})'
+                    ))
+                log.info("Replaced embedding_vec column with vector(%d) type", EMBEDDING_DIM)
+            except Exception as e:
+                log.warning("Could not replace embedding_vec column: %s", e)
+                return False
+
+    return True
+
+
+def _backfill_embedding_vec(engine) -> int:
+    """Copy existing JSON embeddings into the native vector column.
+
+    Returns the number of rows backfilled.
+    """
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, embedding FROM project_samples "
+            "WHERE embedding IS NOT NULL AND embedding_vec IS NULL"
+        )).fetchall()
+
+        if not rows:
+            return 0
+
+        count = 0
+        for row_id, emb_json in rows:
+            if isinstance(emb_json, str):
+                import json
+                emb_json = json.loads(emb_json)
+            if not isinstance(emb_json, list) or len(emb_json) != EMBEDDING_DIM:
+                continue
+            vec_literal = "[" + ",".join(str(float(v)) for v in emb_json) + "]"
+            conn.execute(
+                text("UPDATE project_samples SET embedding_vec = :vec WHERE id = :id"),
+                {"vec": vec_literal, "id": row_id},
+            )
+            count += 1
+            if count % 500 == 0:
+                conn.commit()
+        conn.commit()
+
+    log.info("Backfilled %d embedding_vec rows from JSON embeddings", count)
+    return count
+
+
+def _ensure_embedding_hnsw_index(engine) -> None:
+    """Create an HNSW index on embedding_vec for fast cosine similarity search."""
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_project_samples_embedding_hnsw "
+                "ON project_samples USING hnsw (embedding_vec vector_cosine_ops)"
+            ))
+        log.info("HNSW cosine index on project_samples.embedding_vec ready")
+    except Exception as e:
+        log.warning("Could not create HNSW index: %s", e)
+
+
 def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
+    pgvector_available = _ensure_pgvector(engine)
+
     Base.metadata.create_all(engine)
     log.info("Database tables created")
     _ensure_missing_columns(engine)
     ensure_annotations_is_draft_column(engine)
     ensure_preannotate_runs_table(engine)
+
+    if pgvector_available:
+        _ensure_pgvector(engine)
+        _backfill_embedding_vec(engine)
+        _ensure_embedding_hnsw_index(engine)
 
     try:
         from .lakebase import setup_replica_identity

@@ -213,6 +213,66 @@ export const browseDirectory = (path) =>
   api.get('/browse', { params: { path } }).then(r => r.data);
 
 // ---------------------------------------------------------------------------
+// Embeddings / Similarity
+// ---------------------------------------------------------------------------
+export const generateEmbeddings = (projectId, params = {}) =>
+  api.post(`/projects/${projectId}/generate-embeddings`, params, { timeout: 300000 }).then(r => r.data);
+
+export function generateEmbeddingsStream(projectId, params = {}, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    fetch(`/api/projects/${projectId}/generate-embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(params),
+      signal,
+    })
+      .then((res) => {
+        if (!res.ok) {
+          return res.text().then((body) => {
+            let detail = body;
+            try { detail = JSON.parse(body).detail || body; } catch {}
+            reject(new Error(detail));
+          });
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let lastData = null;
+
+        function pump() {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              resolve(lastData || { completed: 0, failed: 0, skipped: 0, total: 0 });
+              return;
+            }
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
+            let eventType = 'progress';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+              else if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  lastData = data;
+                  if (eventType === 'progress' && onProgress) onProgress(data);
+                  if (eventType === 'done') { resolve(data); return; }
+                } catch {}
+              }
+            }
+            pump();
+          }).catch(reject);
+        }
+        pump();
+      })
+      .catch(reject);
+  });
+}
+
+export const fetchSimilarSamples = (projectId, sampleId, limit = 24) =>
+  api.get(`/projects/${projectId}/samples/${sampleId}/similar`, { params: { limit } }).then(r => r.data);
+
+// ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
 export const fetchDbStatus = () => api.get('/admin/db-status').then(r => r.data);

@@ -19,6 +19,7 @@ from ..schemas import (
     AnnotationHistoryOut,
     BulkDraftSampleIds,
     DraftMutationResult,
+    SimilarSampleOut,
 )
 from ..volumes import read_image_bytes
 
@@ -495,3 +496,99 @@ def serve_sample_thumbnail(
     img.save(buf, format="JPEG", quality=85)
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/jpeg")
+
+
+def _find_similar_pgvector(
+    db: Session, project_id: int, target, limit: int,
+) -> list[SimilarSampleOut]:
+    """Use pgvector cosine distance operator for indexed ANN search."""
+    from sqlalchemy import text
+
+    if target.embedding is None:
+        return []
+    query_vec = "[" + ",".join(str(float(v)) for v in target.embedding) + "]"
+
+    rows = db.execute(
+        text(
+            "SELECT id, filename, status, 1 - (embedding_vec <=> :q) AS similarity "
+            "FROM project_samples "
+            "WHERE project_id = :pid AND embedding_vec IS NOT NULL AND id != :sid "
+            "ORDER BY embedding_vec <=> :q "
+            "LIMIT :lim"
+        ),
+        {"q": query_vec, "pid": project_id, "sid": target.id, "lim": limit},
+    ).fetchall()
+
+    return [
+        SimilarSampleOut(sample_id=r.id, filename=r.filename, similarity=round(r.similarity, 4), status=r.status)
+        for r in rows
+    ]
+
+
+def _find_similar_python(
+    db: Session, project_id: int, target, limit: int,
+) -> list[SimilarSampleOut]:
+    """Fallback: load JSON embeddings and compute cosine similarity in Python."""
+    candidates = (
+        db.query(ProjectSample.id, ProjectSample.filename, ProjectSample.status, ProjectSample.embedding)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+            ProjectSample.id != target.id,
+        )
+        .all()
+    )
+    if not candidates:
+        return []
+
+    target_emb = target.embedding
+    norm_t = sum(x * x for x in target_emb) ** 0.5
+    if norm_t == 0:
+        return []
+
+    scored = []
+    for cid, fname, status, emb in candidates:
+        dot = sum(a * b for a, b in zip(target_emb, emb))
+        norm_c = sum(x * x for x in emb) ** 0.5
+        if norm_c == 0:
+            continue
+        sim = dot / (norm_t * norm_c)
+        scored.append((sim, cid, fname, status))
+
+    scored.sort(reverse=True)
+    return [
+        SimilarSampleOut(sample_id=sid, filename=fn, similarity=round(s, 4), status=st)
+        for s, sid, fn, st in scored[:limit]
+    ]
+
+
+@router.get("/samples/{sample_id}/similar", response_model=list[SimilarSampleOut])
+def find_similar_samples(
+    project_id: int,
+    sample_id: int,
+    limit: int = Query(24, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Find visually similar samples by cosine similarity of embeddings.
+
+    Uses pgvector (indexed ANN) on Postgres, falls back to in-Python cosine on SQLite.
+    """
+    target = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Sample not found.")
+    if target.embedding is None:
+        raise HTTPException(status_code=400, detail="Sample has no embedding. Generate embeddings first.")
+
+    try:
+        dialect = db.bind.dialect.name
+    except Exception:
+        dialect = "sqlite"
+
+    if dialect == "postgresql":
+        try:
+            return _find_similar_pgvector(db, project_id, target, limit)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("pgvector similarity failed, falling back to Python: %s", exc)
+
+    return _find_similar_python(db, project_id, target, limit)

@@ -55,6 +55,7 @@ class ProjectStats(BaseModel):
     unlabeled: int
     skipped: int
     pre_labeled: int = 0
+    embedded: int = 0
     per_user: list[dict]  # [{"user": "...", "labeled": N, "skipped": N}]
 
 
@@ -146,6 +147,25 @@ class InferenceDefaultsOut(BaseModel):
     """Workspace-level inference defaults (from env), for forms before a project exists."""
 
     default_serving_endpoint: Optional[str] = None
+
+
+class EmbeddingGenerateRequest(BaseModel):
+    max_samples: int = 0
+    force: bool = False
+
+
+class EmbeddingGenerateProgress(BaseModel):
+    completed: int
+    failed: int
+    skipped: int
+    total: int
+
+
+class SimilarSampleOut(BaseModel):
+    sample_id: int
+    filename: str
+    similarity: float
+    status: str
 
 
 class BulkDraftSampleIds(BaseModel):

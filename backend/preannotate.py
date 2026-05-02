@@ -68,13 +68,18 @@ def run_preannotate_for_samples(
 
     Returns counters: completed, failed, skipped, total.
     """
+    from .embeddings import resolve_embedding_endpoint
     from .inference import predict_sample, resolve_endpoint
+    from .inference_adapters import get_embedding_adapter
     from .models import Annotation
     from .volumes import read_image_bytes
 
     endpoint_name = resolve_endpoint(project)
     if not endpoint_name:
         return {"completed": 0, "failed": 0, "skipped": 0, "total": len(samples)}
+
+    embedding_endpoint = resolve_embedding_endpoint(project)
+    embedding_adapter = get_embedding_adapter() if embedding_endpoint else None
 
     endpoint_config = dict(project.endpoint_config or {})
     if min_confidence is not None:
@@ -126,6 +131,18 @@ def run_preannotate_for_samples(
                 )
             )
         sample.status = "pre_labeled"
+
+        if sample.embedding is None and embedding_endpoint:
+            try:
+                emb = embedding_adapter.query_embedding(
+                    embedding_endpoint, image_bytes, endpoint_config,
+                )
+                if emb is not None:
+                    from .embeddings import set_sample_embedding
+                    set_sample_embedding(sample, emb, db)
+            except Exception as e:
+                log.debug("Embedding generation skipped for sample %d: %s", sample.id, e)
+
         completed += 1
         if completed % 50 == 0:
             db.flush()

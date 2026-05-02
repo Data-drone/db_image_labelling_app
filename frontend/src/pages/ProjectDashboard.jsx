@@ -11,6 +11,7 @@ import {
   acceptAllDrafts, clearAllModelDrafts,
   fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun,
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
+  generateEmbeddingsStream, fetchSimilarSamples,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
@@ -77,6 +78,14 @@ export default function ProjectDashboard() {
   const [filenameInput, setFilenameInput] = useState('');
   const galleryPageSize = 24;
   const debounceRef = useRef(null);
+
+  // Embedding / similarity state
+  const [embeddingGenerating, setEmbeddingGenerating] = useState(false);
+  const [embeddingProgress, setEmbeddingProgress] = useState(null);
+  const [embeddingError, setEmbeddingError] = useState('');
+  const [embeddingResult, setEmbeddingResult] = useState(null);
+  const [similarMode, setSimilarMode] = useState(null);
+  const [similarSamples, setSimilarSamples] = useState([]);
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -365,6 +374,42 @@ export default function ProjectDashboard() {
       if (finetunePollingRef.current) clearInterval(finetunePollingRef.current);
     };
   }, []);
+
+  const handleGenerateEmbeddings = async () => {
+    if (embeddingGenerating) return;
+    setEmbeddingGenerating(true);
+    setEmbeddingError('');
+    setEmbeddingResult(null);
+    setEmbeddingProgress(null);
+    try {
+      const result = await generateEmbeddingsStream(
+        projectId, {},
+        { onProgress: (p) => setEmbeddingProgress(p) },
+      );
+      setEmbeddingResult(result);
+      fetchProjectStats(projectId).then(setStats).catch(() => {});
+    } catch (e) {
+      setEmbeddingError(e.userMessage || e.message || 'Embedding generation failed');
+    } finally {
+      setEmbeddingGenerating(false);
+      setEmbeddingProgress(null);
+    }
+  };
+
+  const handleFindSimilar = async (sampleId, filename) => {
+    try {
+      const results = await fetchSimilarSamples(projectId, sampleId, galleryPageSize);
+      setSimilarSamples(results);
+      setSimilarMode({ sampleId, filename });
+    } catch (e) {
+      setEmbeddingError(e?.response?.data?.detail || 'Could not find similar samples. Generate embeddings first.');
+    }
+  };
+
+  const clearSimilarMode = () => {
+    setSimilarMode(null);
+    setSimilarSamples([]);
+  };
 
   // Load gallery
   useEffect(() => {
@@ -940,6 +985,68 @@ export default function ProjectDashboard() {
         </div>
       )}
 
+      {/* Embedding generation */}
+      {stats && (
+        <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={handleGenerateEmbeddings}
+            disabled={embeddingGenerating || !stats.total}
+            style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
+          >
+            {embeddingGenerating ? 'Generating Embeddings…' : 'Generate Embeddings'}
+          </button>
+          {stats.embedded > 0 && (
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              {stats.embedded} / {stats.total} samples embedded
+            </span>
+          )}
+        </div>
+      )}
+      {embeddingGenerating && embeddingProgress && embeddingProgress.total > 0 && (
+        <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Generating embeddings…</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              {embeddingProgress.current} / {embeddingProgress.total}
+              {' '}({Math.round((embeddingProgress.current / embeddingProgress.total) * 100)}%)
+            </span>
+          </div>
+          <div className="progress-bar" style={{ height: 8 }}>
+            <div className="progress-fill" style={{
+              width: `${(embeddingProgress.current / embeddingProgress.total) * 100}%`,
+              transition: 'width 0.2s ease',
+            }} />
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            <span style={{ color: 'var(--status-success)' }}>{embeddingProgress.completed} embedded</span>
+            <span>{embeddingProgress.skipped} skipped</span>
+            {embeddingProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{embeddingProgress.failed} failed</span>}
+          </div>
+        </div>
+      )}
+      {embeddingError && (
+        <div style={{
+          padding: '0.5rem 0.75rem', borderRadius: 4,
+          background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)',
+          color: '#ef4444', fontSize: '0.8rem', marginBottom: '1rem',
+        }}>
+          {embeddingError}
+        </div>
+      )}
+      {embeddingResult && (
+        <div style={{
+          padding: '0.5rem 0.75rem', borderRadius: 4,
+          background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)',
+          fontSize: '0.8rem', marginBottom: '1rem',
+        }}>
+          <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Embeddings generated: </span>
+          <span style={{ color: 'var(--text-secondary)' }}>
+            {embeddingResult.completed} new, {embeddingResult.skipped} already embedded, {embeddingResult.failed} failed
+          </span>
+        </div>
+      )}
+
       {/* Stats cards */}
       {stats && (
         <>
@@ -955,6 +1062,7 @@ export default function ProjectDashboard() {
               ...(stats.pre_labeled > 0 ? [{ label: 'Pre-labeled', value: stats.pre_labeled, color: '#a78bfa' }] : []),
               { label: 'Skipped', value: stats.skipped, color: 'var(--status-warning)' },
               { label: 'Remaining', value: stats.unlabeled, color: 'var(--accent-blue)' },
+              ...(stats.embedded > 0 ? [{ label: 'Embedded', value: stats.embedded, color: '#60a5fa' }] : []),
             ].map((card) => (
               <div key={card.label} className="card" style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 700, color: card.color, lineHeight: 1.2 }}>
@@ -1087,8 +1195,19 @@ export default function ProjectDashboard() {
           <div className="card" style={{ marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
               <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
-                Samples
+                {similarMode
+                  ? <>Similar to <span style={{ color: 'var(--accent-blue)' }}>{similarMode.filename}</span></>
+                  : 'Samples'}
               </h3>
+              {similarMode ? (
+                <button
+                  className="btn-secondary"
+                  onClick={clearSimilarMode}
+                  style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                >
+                  Back to gallery
+                </button>
+              ) : (
               <div style={{ display: 'flex', gap: '0.3rem' }}>
                 {['', 'unlabeled', 'pre_labeled', 'labeled', 'skipped'].map((f) => (
                   <button
@@ -1107,10 +1226,11 @@ export default function ProjectDashboard() {
                   </button>
                 ))}
               </div>
+              )}
             </div>
 
             {/* Search & filter bar */}
-            <div style={{
+            {!similarMode && <div style={{
               display: 'flex', flexWrap: 'wrap', gap: '0.5rem',
               alignItems: 'center', marginBottom: '0.75rem',
             }}>
@@ -1179,9 +1299,90 @@ export default function ProjectDashboard() {
                   Clear filters
                 </button>
               )}
-            </div>
+            </div>}
 
-            {gallerySamples.length === 0 ? (
+            {similarMode ? (
+              similarSamples.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
+                  No similar samples found
+                </div>
+              ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+                  gap: '0.5rem',
+                }}>
+                  {similarSamples.map((s) => (
+                    <div
+                      key={s.sample_id}
+                      onClick={() => navigate(`/projects/${projectId}/label?sample=${s.sample_id}`)}
+                      style={{
+                        cursor: 'pointer',
+                        borderRadius: 6,
+                        border: '1px solid var(--border-color)',
+                        overflow: 'hidden',
+                        background: 'var(--bg-secondary)',
+                        transition: 'border-color 0.15s',
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-blue)'}
+                      onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                    >
+                      <div style={{ position: 'relative', paddingTop: '100%' }}>
+                        <img
+                          src={sampleThumbnailUrl(projectId, s.sample_id, 200)}
+                          alt={s.filename}
+                          loading="lazy"
+                          style={{
+                            position: 'absolute',
+                            top: 0, left: 0,
+                            width: '100%', height: '100%',
+                            objectFit: 'cover',
+                          }}
+                        />
+                        <span style={{
+                          position: 'absolute',
+                          top: 4, left: 4,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: 3,
+                          fontSize: '0.6rem',
+                          fontWeight: 600,
+                          background: 'rgba(59,130,246,0.85)',
+                          color: '#fff',
+                        }}>
+                          {(s.similarity * 100).toFixed(1)}%
+                        </span>
+                        <span style={{
+                          position: 'absolute',
+                          top: 4, right: 4,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: 3,
+                          fontSize: '0.6rem',
+                          fontWeight: 600,
+                          background: s.status === 'labeled' ? 'var(--status-success)'
+                            : s.status === 'pre_labeled' ? '#a78bfa'
+                            : s.status === 'skipped' ? 'var(--status-warning)'
+                            : 'rgba(255,255,255,0.15)',
+                          color: s.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
+                        }}>
+                          {s.status}
+                        </span>
+                      </div>
+                      <div style={{ padding: '0.3rem 0.4rem' }}>
+                        <div style={{
+                          fontSize: '0.65rem',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}>
+                          {s.filename}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : gallerySamples.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
                 No samples found
               </div>
@@ -1194,9 +1395,7 @@ export default function ProjectDashboard() {
                 {gallerySamples.map((s) => (
                   <div
                     key={s.id}
-                    onClick={() => navigate(`/projects/${projectId}/label?sample=${s.id}`)}
                     style={{
-                      cursor: 'pointer',
                       borderRadius: 6,
                       border: '1px solid var(--border-color)',
                       overflow: 'hidden',
@@ -1206,7 +1405,10 @@ export default function ProjectDashboard() {
                     onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-blue)'}
                     onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
                   >
-                    <div style={{ position: 'relative', paddingTop: '100%' }}>
+                    <div
+                      onClick={() => navigate(`/projects/${projectId}/label?sample=${s.id}`)}
+                      style={{ cursor: 'pointer', position: 'relative', paddingTop: '100%' }}
+                    >
                       <img
                         src={sampleThumbnailUrl(projectId, s.id, 200)}
                         alt={s.filename}
@@ -1234,43 +1436,60 @@ export default function ProjectDashboard() {
                         {s.status}
                       </span>
                     </div>
-                    <div style={{ padding: '0.3rem 0.4rem' }}>
+                    <div style={{ padding: '0.3rem 0.4rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{
                         fontSize: '0.65rem',
                         color: 'var(--text-secondary)',
                         whiteSpace: 'nowrap',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
+                        flex: 1,
                       }}>
                         {s.filename}
                       </div>
-                      {s.labels && s.labels.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.15rem', marginTop: '0.2rem' }}>
-                          {s.labels.map((lbl) => (
-                            <span
-                              key={lbl}
-                              style={{
-                                padding: '0.05rem 0.3rem',
-                                borderRadius: 3,
-                                fontSize: '0.55rem',
-                                fontWeight: 600,
-                                background: 'rgba(59,130,246,0.15)',
-                                color: 'var(--accent-blue)',
-                              }}
-                            >
-                              {lbl}
-                            </span>
-                          ))}
-                        </div>
+                      {stats?.embedded > 0 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleFindSimilar(s.id, s.filename); }}
+                          title="Find similar"
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            padding: '0 0.15rem', color: 'var(--text-muted)',
+                            fontSize: '0.7rem', flexShrink: 0,
+                          }}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="M21 21l-4.35-4.35" />
+                          </svg>
+                        </button>
                       )}
                     </div>
+                    {s.labels && s.labels.length > 0 && (
+                      <div style={{ padding: '0 0.4rem 0.3rem', display: 'flex', flexWrap: 'wrap', gap: '0.15rem' }}>
+                        {s.labels.map((lbl) => (
+                          <span
+                            key={lbl}
+                            style={{
+                              padding: '0.05rem 0.3rem',
+                              borderRadius: 3,
+                              fontSize: '0.55rem',
+                              fontWeight: 600,
+                              background: 'rgba(59,130,246,0.15)',
+                              color: 'var(--accent-blue)',
+                            }}
+                          >
+                            {lbl}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             )}
 
             {/* Pagination */}
-            {galleryTotalPages > 1 && (
+            {!similarMode && galleryTotalPages > 1 && (
               <div style={{
                 display: 'flex',
                 justifyContent: 'center',
