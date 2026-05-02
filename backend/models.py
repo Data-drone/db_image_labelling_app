@@ -252,6 +252,8 @@ def _reassign_table_ownership(engine, table_names: list[str]) -> None:
 
     On Lakebase, tables created by a previous service principal identity
     are not owned by the current one. ALTER TABLE requires ownership.
+    Tries multiple strategies: direct OWNER TO, then REASSIGN OWNED BY
+    for each discovered previous owner.
     """
     if engine.dialect.name != "postgresql":
         return
@@ -265,13 +267,48 @@ def _reassign_table_ownership(engine, table_names: list[str]) -> None:
     except Exception:
         return
 
+    failed_tables = []
     for table in table_names:
         try:
             with engine.begin() as conn:
                 conn.execute(text(f'ALTER TABLE IF EXISTS "{table}" OWNER TO "{current_user}"'))
             log.info("Reassigned ownership of %s to %s", table, current_user)
         except Exception:
-            log.debug("Could not reassign ownership of %s (may already own it or lack superuser)", table)
+            failed_tables.append(table)
+
+    if not failed_tables:
+        return
+
+    # Strategy 2: find distinct owners of tables we couldn't reassign, then
+    # REASSIGN OWNED BY <old_owner> TO <current_user>
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT tableowner FROM pg_tables "
+                "WHERE tablename = ANY(:tables) AND tableowner != :me"
+            ), {"tables": failed_tables, "me": current_user}).fetchall()
+            old_owners = [r[0] for r in rows]
+    except Exception:
+        old_owners = []
+
+    for old_owner in old_owners:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f'REASSIGN OWNED BY "{old_owner}" TO "{current_user}"'
+                ))
+            log.info("Reassigned all objects owned by %s to %s", old_owner, current_user)
+        except Exception as e:
+            log.warning("Could not REASSIGN OWNED BY %s: %s", old_owner, e)
+
+    # Retry failed tables after REASSIGN
+    for table in failed_tables:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f'ALTER TABLE IF EXISTS "{table}" OWNER TO "{current_user}"'))
+            log.info("Reassigned ownership of %s to %s (after REASSIGN OWNED BY)", table, current_user)
+        except Exception as e:
+            log.warning("Could not reassign ownership of %s: %s", table, e)
 
 
 def _ensure_missing_columns(engine) -> None:
