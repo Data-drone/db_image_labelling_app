@@ -319,11 +319,15 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
         if user and user not in seen_users:
             per_user.append({"user": user, "labeled": 0, "skipped": count})
 
-    embedded = (
-        db.query(ProjectSample)
-        .filter(ProjectSample.project_id == project_id, ProjectSample.embedding.isnot(None))
-        .count()
-    )
+    try:
+        embedded = (
+            db.query(ProjectSample)
+            .filter(ProjectSample.project_id == project_id, ProjectSample.embedding.isnot(None))
+            .count()
+        )
+    except Exception:
+        db.rollback()
+        embedded = 0
 
     return ProjectStats(
         total=total, labeled=labeled, unlabeled=unlabeled,

@@ -23,7 +23,7 @@ from sqlalchemy import (
     Index,
     JSON,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 
 log = logging.getLogger(__name__)
 
@@ -68,10 +68,10 @@ class ProjectSample(Base):
     locked_by = Column(String(255), nullable=True)
     locked_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default="unlabeled", nullable=False)  # unlabeled, pre_labeled, labeled, skipped
-    embedding = Column(JSON, nullable=True)
+    embedding = deferred(Column(JSON, nullable=True))
     # Native pgvector column for indexed similarity search (Postgres only).
     # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
-    embedding_vec = Column(JSON, nullable=True)  # placeholder type; overridden at runtime for Postgres
+    embedding_vec = deferred(Column(JSON, nullable=True))  # placeholder type; overridden at runtime for Postgres
 
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
@@ -247,6 +247,33 @@ def ensure_annotations_is_draft_column(engine) -> None:
     log.info("annotations.is_draft column added and model rows backfilled")
 
 
+def _reassign_table_ownership(engine, table_names: list[str]) -> None:
+    """Reassign ownership of tables to the current Postgres user.
+
+    On Lakebase, tables created by a previous service principal identity
+    are not owned by the current one. ALTER TABLE requires ownership.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT current_user")).fetchone()
+            current_user = row[0]
+    except Exception:
+        return
+
+    for table in table_names:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f'ALTER TABLE IF EXISTS "{table}" OWNER TO "{current_user}"'))
+            log.info("Reassigned ownership of %s to %s", table, current_user)
+        except Exception:
+            log.debug("Could not reassign ownership of %s (may already own it or lack superuser)", table)
+
+
 def _ensure_missing_columns(engine) -> None:
     """Add any columns defined in the models but absent from the DB (no Alembic).
 
@@ -264,6 +291,8 @@ def _ensure_missing_columns(engine) -> None:
         existing_cols = {c["name"] for c in insp.get_columns(table.name)}
         for col in table.columns:
             if col.name in existing_cols:
+                continue
+            if col.name == "embedding_vec":
                 continue
             col_type = col.type.compile(dialect=engine.dialect)
             nullable = "NULL" if col.nullable else "NOT NULL"
@@ -284,8 +313,8 @@ def _ensure_missing_columns(engine) -> None:
                 with engine.begin() as conn:
                     conn.execute(text(ddl))
                 log.info("Added column %s.%s (%s)", table.name, col.name, col_type)
-            except Exception:
-                log.debug("Column %s.%s may already exist, skipping", table.name, col.name)
+            except Exception as e:
+                log.warning("Could not add column %s.%s: %s", table.name, col.name, e)
 
 
 def _ensure_pgvector(engine) -> bool:
@@ -395,6 +424,8 @@ def _ensure_embedding_hnsw_index(engine) -> None:
 
 def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
+    _reassign_table_ownership(engine, TABLE_NAMES)
+
     pgvector_available = _ensure_pgvector(engine)
 
     Base.metadata.create_all(engine)
