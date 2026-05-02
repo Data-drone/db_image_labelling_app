@@ -9,7 +9,7 @@ import {
   fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus,
   preAnnotateProject, preAnnotateProjectStream,
   acceptAllDrafts, clearAllModelDrafts,
-  fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun,
+  fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun, fetchLatestPreannotateRun,
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
   generateEmbeddingsStream, fetchSimilarSamples,
 } from '../api/client';
@@ -61,6 +61,7 @@ export default function ProjectDashboard() {
   const [asyncPreAnnotating, setAsyncPreAnnotating] = useState(false);
   const [activeAsyncRunId, setActiveAsyncRunId] = useState(null);
   const [asyncRunMessage, setAsyncRunMessage] = useState('');
+  const [asyncRunStatus, setAsyncRunStatus] = useState(null);
   const [asyncDatabricksRunId, setAsyncDatabricksRunId] = useState(null);
 
   // Actions dropdown state
@@ -139,6 +140,31 @@ export default function ProjectDashboard() {
   }, [project, projectId]);
 
   useEffect(() => {
+    if (!project || activeAsyncRunId) return;
+    fetchLatestPreannotateRun(projectId)
+      .then((r) => {
+        if (['pending', 'queued', 'running'].includes(r.status)) {
+          setActiveAsyncRunId(r.id);
+          if (r.databricks_run_id) setAsyncDatabricksRunId(r.databricks_run_id);
+          if (r.total_planned > 0) {
+            const done = r.completed + r.failed + r.skipped;
+            const pct = Math.round((done / r.total_planned) * 100);
+            setAsyncRunMessage(`Background job: ${done} / ${r.total_planned} (${pct}%) — ${r.completed} pre-labeled, ${r.skipped} skipped, ${r.failed} failed`);
+          } else {
+            setAsyncRunMessage(`Background job in progress (run #${r.id})…`);
+          }
+        } else if (r.status === 'failed' || r.status === 'cancelled') {
+          setAsyncRunStatus(r.status);
+          if (r.databricks_run_id) setAsyncDatabricksRunId(r.databricks_run_id);
+          setAsyncRunMessage(
+            `Background pre-label ${r.status}${r.error_message ? `: ${r.error_message.slice(0, 200)}` : ''}`,
+          );
+        }
+      })
+      .catch(() => {});
+  }, [project, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     if (!activeAsyncRunId) return;
     const tick = async () => {
       try {
@@ -150,10 +176,11 @@ export default function ProjectDashboard() {
         }
         if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
           setActiveAsyncRunId(null);
+          setAsyncRunStatus(r.status);
           setAsyncRunMessage(
             r.status === 'succeeded'
               ? `Background pre-label finished (${r.completed} samples pre-labeled, ${r.skipped} skipped, ${r.failed} failed).`
-              : `Background pre-label ended: ${r.status}${r.error_message ? ` — ${r.error_message.slice(0, 200)}` : ''}`,
+              : `Background pre-label ${r.status}${r.error_message ? `: ${r.error_message.slice(0, 200)}` : ''}`,
           );
           const [st, detailed] = await Promise.all([
             fetchProjectStats(projectId),
@@ -200,7 +227,7 @@ export default function ProjectDashboard() {
     const host = inferenceSettings?.workspace_host;
     const jobId = inferenceSettings?.pre_annotate_databricks_job_id;
     if (!host || !jobId || !databricksRunId) return null;
-    return `${host}/#job/${jobId}/run/${databricksRunId}`;
+    return `${host}/jobs/${jobId}/runs/${databricksRunId}`;
   };
 
   const handlePreAnnotate = async () => {
@@ -215,6 +242,7 @@ export default function ProjectDashboard() {
       if (!confirm(msg)) return;
       setAsyncPreAnnotating(true);
       setAsyncRunMessage('');
+      setAsyncRunStatus(null);
       setAsyncDatabricksRunId(null);
       try {
         const r = await enqueuePreannotateJob(projectId, {
@@ -960,11 +988,21 @@ export default function ProjectDashboard() {
         <div style={{
           padding: '0.5rem 0.75rem',
           borderRadius: 4,
-          background: 'rgba(59, 130, 246, 0.08)',
-          border: '1px solid rgba(59, 130, 246, 0.25)',
+          background: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
+            ? 'rgba(239, 68, 68, 0.1)'
+            : asyncRunStatus === 'succeeded'
+              ? 'rgba(34, 197, 94, 0.1)'
+              : 'rgba(59, 130, 246, 0.08)',
+          border: `1px solid ${asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
+            ? 'rgba(239, 68, 68, 0.3)'
+            : asyncRunStatus === 'succeeded'
+              ? 'rgba(34, 197, 94, 0.3)'
+              : 'rgba(59, 130, 246, 0.25)'}`,
           fontSize: '0.8rem',
           marginBottom: '1rem',
-          color: 'var(--text-secondary)',
+          color: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
+            ? '#ef4444'
+            : 'var(--text-secondary)',
         }}>
           {asyncRunMessage}
           {asyncDatabricksRunId && buildJobRunUrl(asyncDatabricksRunId) && (

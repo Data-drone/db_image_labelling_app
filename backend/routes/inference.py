@@ -50,6 +50,23 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _resolve_workspace_host() -> str | None:
+    """Return the Databricks workspace URL (with https:// scheme)."""
+    host = os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
+    if not host:
+        try:
+            from ..volumes import _get_workspace_client
+            w = _get_workspace_client()
+            host = (w.config.host or "").strip().rstrip("/")
+        except Exception:
+            return None
+    if not host:
+        return None
+    if not host.startswith("https://") and not host.startswith("http://"):
+        host = f"https://{host}"
+    return host
+
+
 @router.get("/endpoint-status", response_model=EndpointStatus)
 def get_endpoint_status(project_id: int, db: Session = Depends(get_db)):
     """Check the health of the serving endpoint configured for this project."""
@@ -398,7 +415,7 @@ def get_project_inference_settings(
         ),
         "async_preannotate_job_configured": resolve_preannotate_job_id() is not None,
         "pre_annotate_databricks_job_id": resolve_preannotate_job_id(),
-        "workspace_host": os.environ.get("DATABRICKS_HOST", "").rstrip("/") or None,
+        "workspace_host": _resolve_workspace_host(),
     }
 
 

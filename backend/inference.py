@@ -143,6 +143,12 @@ def query_serving_endpoint(
                 resp = sp_dp.query(name=endpoint_name, dataframe_records=dataframe_records)
                 return resp.as_dict() if hasattr(resp, "as_dict") else resp
 
+        raise RuntimeError(
+            f"Endpoint '{endpoint_name}' requires data-plane OAuth but no valid OAuth "
+            f"client is available. Ensure SP_SERVING_CLIENT_ID / SP_SERVING_CLIENT_SECRET "
+            f"are set, or that the runtime supports data-plane tokens."
+        )
+
     resp = w.serving_endpoints.query(
         name=endpoint_name,
         dataframe_records=dataframe_records,

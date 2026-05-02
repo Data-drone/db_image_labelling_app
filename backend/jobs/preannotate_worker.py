@@ -17,8 +17,12 @@ log = logging.getLogger(__name__)
 BATCH_SIZE = int(os.environ.get("PRE_ANNOTATE_JOB_BATCH_SIZE", "50"))
 
 
-def _configure_db():
-    """Return a SQLAlchemy session (caller must close)."""
+def _init_db_backend():
+    """Initialize the DB engine/tables and return a session factory callable.
+
+    Returning a factory (instead of a single session) lets the worker obtain
+    fresh sessions per batch chunk, surviving Lakebase SSL/token drops.
+    """
     from ..models import Base, ensure_annotations_is_draft_column, ensure_preannotate_runs_table
 
     use_lakebase = os.environ.get("USE_LAKEBASE", "true").lower() != "false"
@@ -39,7 +43,7 @@ def _configure_db():
         Base.metadata.create_all(engine)
         ensure_annotations_is_draft_column(engine)
         ensure_preannotate_runs_table(engine)
-        return get_session()
+        return get_session
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -48,7 +52,8 @@ def _configure_db():
     Base.metadata.create_all(engine)
     ensure_annotations_is_draft_column(engine)
     ensure_preannotate_runs_table(engine)
-    return sessionmaker(bind=engine)()
+    factory = sessionmaker(bind=engine)
+    return factory
 
 
 def main(run_id: int) -> None:
@@ -63,7 +68,9 @@ def main(run_id: int) -> None:
     from ..models import LabelingProject, PreannotateRun, ProjectSample
     from ..preannotate import run_preannotate_for_samples
 
-    db = _configure_db()
+    new_session = _init_db_backend()
+
+    db = new_session()
     try:
         run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
         if not run_row:
@@ -78,17 +85,28 @@ def main(run_id: int) -> None:
         run_row.started_at = datetime.now(timezone.utc)
         db.commit()
 
-        project = db.query(LabelingProject).filter_by(id=run_row.project_id).first()
+        project_id = run_row.project_id
+        include_pre_labeled = run_row.include_pre_labeled
+        max_samples = run_row.max_samples
+        min_confidence = run_row.min_confidence
+        text_prompt = run_row.text_prompt
+    finally:
+        db.close()
+
+    db = new_session()
+    try:
+        project = db.query(LabelingProject).filter_by(id=project_id).first()
         if not project:
+            run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
             run_row.status = "failed"
             run_row.error_message = "Project not found."
             run_row.finished_at = datetime.now(timezone.utc)
             db.commit()
             sys.exit(1)
 
-        if run_row.include_pre_labeled:
+        if include_pre_labeled:
             base = db.query(ProjectSample).filter(
-                ProjectSample.project_id == run_row.project_id,
+                ProjectSample.project_id == project_id,
                 or_(
                     ProjectSample.status == "unlabeled",
                     ProjectSample.status == "pre_labeled",
@@ -96,58 +114,113 @@ def main(run_id: int) -> None:
             )
         else:
             base = db.query(ProjectSample).filter_by(
-                project_id=run_row.project_id,
+                project_id=project_id,
                 status="unlabeled",
             )
 
         base = base.order_by(ProjectSample.id)
-        if run_row.max_samples and run_row.max_samples > 0:
-            base = base.limit(run_row.max_samples)
+        if max_samples and max_samples > 0:
+            base = base.limit(max_samples)
 
-        total_planned = base.count()
+        sample_ids = [s.id for s in base.all()]
+    finally:
+        db.close()
+
+    total_planned = len(sample_ids)
+    db = new_session()
+    try:
+        run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
         run_row.total_planned = total_planned
         db.commit()
+    finally:
+        db.close()
 
-        completed = failed = skipped = 0
-        offset = 0
-        while offset < total_planned:
-            chunk = base.offset(offset).limit(BATCH_SIZE).all()
+    completed = failed = skipped = 0
+    last_error = ""
+    for batch_start in range(0, total_planned, BATCH_SIZE):
+        batch_ids = sample_ids[batch_start : batch_start + BATCH_SIZE]
+        db = new_session()
+        try:
+            project = db.query(LabelingProject).filter_by(id=project_id).first()
+            chunk = (
+                db.query(ProjectSample)
+                .filter(ProjectSample.id.in_(batch_ids))
+                .order_by(ProjectSample.id)
+                .all()
+            )
             if not chunk:
                 break
             stats = run_preannotate_for_samples(
                 db,
                 project,
                 chunk,
-                min_confidence=run_row.min_confidence,
-                text_prompt=run_row.text_prompt,
+                min_confidence=min_confidence,
+                text_prompt=text_prompt,
             )
+            db.commit()
             completed += stats["completed"]
             failed += stats["failed"]
             skipped += stats["skipped"]
+        except Exception as e:
+            log.exception("Batch starting at offset %d failed", batch_start)
+            failed += len(batch_ids)
+            last_error = str(e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+        db = new_session()
+        try:
+            run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
             run_row.completed = completed
             run_row.failed = failed
             run_row.skipped = skipped
             db.commit()
-            offset += len(chunk)
+        except Exception:
+            log.warning("Could not update progress counters", exc_info=True)
+        finally:
+            db.close()
 
-        run_row.status = "succeeded"
+    db = new_session()
+    try:
+        run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
+        if completed == 0 and failed > 0:
+            run_row.status = "failed"
+            run_row.error_message = (
+                f"All {failed} sample(s) failed. Last error: {last_error[:500]}"
+            ) if last_error else (
+                f"All {failed} sample(s) failed inference. "
+                "Check endpoint configuration and data-plane OAuth credentials."
+            )
+        elif failed > 0 and completed > 0:
+            run_row.status = "succeeded"
+            run_row.error_message = f"{failed}/{failed + completed + skipped} samples failed."
+        else:
+            run_row.status = "succeeded"
+        run_row.completed = completed
+        run_row.failed = failed
+        run_row.skipped = skipped
         run_row.finished_at = datetime.now(timezone.utc)
         db.commit()
         log.info(
-            "Preannotate run %s done: completed=%s failed=%s skipped=%s total=%s",
-            run_id, completed, failed, skipped, run_row.total_planned,
+            "Preannotate run %s done: status=%s completed=%s failed=%s skipped=%s total=%s",
+            run_id, run_row.status, completed, failed, skipped, total_planned,
         )
     except Exception as e:
-        log.exception("Preannotate job failed")
+        log.exception("Failed to write final status")
         try:
-            failed_row = db.query(PreannotateRun).filter_by(id=run_id).first()
-            if failed_row:
-                failed_row.status = "failed"
-                failed_row.error_message = str(e)[:4000]
-                failed_row.finished_at = datetime.now(timezone.utc)
+            db.rollback()
+            run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
+            if run_row:
+                run_row.status = "failed"
+                run_row.error_message = str(e)[:4000]
+                run_row.finished_at = datetime.now(timezone.utc)
                 db.commit()
         except Exception:
-            db.rollback()
+            pass
         sys.exit(1)
     finally:
         db.close()
