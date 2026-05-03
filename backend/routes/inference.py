@@ -354,6 +354,7 @@ def generate_embeddings(
     ep_config = dict(project.endpoint_config or {})
 
     def _background_worker():
+        import time as _time
         from datetime import datetime, timezone
         from ..deps import is_lakebase, get_session_factory
         from ..embeddings import set_sample_embedding, _prefetch_images
@@ -361,11 +362,48 @@ def generate_embeddings(
         from ..inference_adapters.dinov3 import BATCH_SIZE
         from ..models import EmbeddingRun as ER
 
-        if is_lakebase():
-            from ..lakebase import get_session
-            gen_db = get_session()
-        else:
-            gen_db = get_session_factory()()
+        # Brief pause so the request's DB session can fully commit and
+        # return its connection to the pool before we grab one.
+        _time.sleep(0.5)
+
+        def _open_session():
+            if is_lakebase():
+                from ..lakebase import get_session
+                return get_session()
+            return get_session_factory()()
+
+        # Retry session acquisition — Lakebase may still be provisioning
+        # a new pooled connection (ISCE error).
+        gen_db = None
+        for attempt in range(5):
+            try:
+                gen_db = _open_session()
+                gen_db.execute(__import__("sqlalchemy").text("SELECT 1"))
+                break
+            except Exception as sess_err:
+                log.warning("Embedding worker session attempt %d failed: %s", attempt + 1, sess_err)
+                if gen_db is not None:
+                    try:
+                        gen_db.close()
+                    except Exception:
+                        pass
+                    gen_db = None
+                _time.sleep(2 * (attempt + 1))
+        if gen_db is None:
+            log.error("Could not open DB session for embedding run %d after retries", run_id)
+            # Last-ditch attempt to mark the run as failed
+            try:
+                s = _open_session()
+                r = s.get(ER, run_id)
+                if r:
+                    r.status = "failed"
+                    r.error_message = "Could not acquire database connection"
+                    r.finished_at = datetime.now(timezone.utc)
+                    s.commit()
+                s.close()
+            except Exception:
+                pass
+            return
 
         try:
             adapter = _get_embedding_adapter()
