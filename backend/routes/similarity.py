@@ -477,6 +477,7 @@ def detect_near_duplicates(
         try:
             return _detect_duplicates_pgvector(db, project_id, threshold, limit)
         except Exception as exc:
+            db.rollback()
             log.warning("pgvector duplicate detection failed, falling back to Python: %s", exc)
 
     return _detect_duplicates_python(db, project_id, threshold, limit)
@@ -655,6 +656,7 @@ def diversity_queue(
         try:
             return _diversity_pgvector(db, project_id, limit)
         except Exception as exc:
+            db.rollback()
             log.warning("pgvector diversity sampling failed, falling back to Python: %s", exc)
 
     return _diversity_python(db, project_id, limit)
@@ -671,17 +673,19 @@ def _outlier_pgvector(
     percentile: float,
 ) -> OutlierDetectionResult:
     """Score each sample by avg distance to K nearest neighbors (pgvector)."""
-    # Use LATERAL join to compute avg distance to K nearest neighbors
+    # Use LATERAL join: inner subquery gets K nearest rows, outer computes AVG
     rows = db.execute(
         text(
             "SELECT s.id, s.filename, s.status, knn.avg_dist AS avg_knn_distance "
             "FROM project_samples s "
             "CROSS JOIN LATERAL ( "
-            "  SELECT AVG(s.embedding_vec <=> n.embedding_vec) AS avg_dist "
-            "  FROM project_samples n "
-            "  WHERE n.project_id = :pid AND n.embedding_vec IS NOT NULL AND n.id != s.id "
-            "  ORDER BY s.embedding_vec <=> n.embedding_vec "
-            "  LIMIT :k "
+            "  SELECT AVG(dist) AS avg_dist FROM ( "
+            "    SELECT n.embedding_vec <=> s.embedding_vec AS dist "
+            "    FROM project_samples n "
+            "    WHERE n.project_id = :pid AND n.embedding_vec IS NOT NULL AND n.id != s.id "
+            "    ORDER BY n.embedding_vec <=> s.embedding_vec "
+            "    LIMIT :k "
+            "  ) top_k "
             ") knn "
             "WHERE s.project_id = :pid AND s.embedding_vec IS NOT NULL "
             "  AND knn.avg_dist IS NOT NULL "
@@ -827,6 +831,7 @@ def detect_outliers(
         try:
             return _outlier_pgvector(db, project_id, k, percentile)
         except Exception as exc:
+            db.rollback()
             log.warning("pgvector outlier detection failed, falling back to Python: %s", exc)
 
     return _outlier_python(db, project_id, k, percentile)
