@@ -55,16 +55,26 @@ def set_sample_embedding(sample: Any, embedding: list[float], db: Session) -> No
 
 
 def _prefetch_images(samples: list) -> dict[int, Optional[bytes]]:
-    """Download images concurrently from UC Volumes. Returns {sample.id: bytes|None}."""
+    """Download images concurrently from UC Volumes. Returns {sample.id: bytes|None}.
+
+    Extracts plain id/filepath values up-front so worker threads never
+    touch SQLAlchemy ORM objects (sessions are not thread-safe).
+    """
+    items = [(s.id, s.filepath) for s in samples]
+    return _prefetch_images_from_meta(items)
+
+
+def _prefetch_images_from_meta(items: list[tuple[int, str]]) -> dict[int, Optional[bytes]]:
+    """Download images concurrently given a list of (sample_id, filepath) tuples."""
     from .volumes import read_image_bytes
 
     result: dict[int, Optional[bytes]] = {}
 
-    def _read(s):
-        return s.id, read_image_bytes(s.filepath)
+    def _read(sid: int, path: str):
+        return sid, read_image_bytes(path)
 
     with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as pool:
-        futures = {pool.submit(_read, s): s.id for s in samples}
+        futures = {pool.submit(_read, sid, path): sid for sid, path in items}
         for fut in as_completed(futures):
             try:
                 sid, data = fut.result()

@@ -357,7 +357,7 @@ def generate_embeddings(
         import time as _time
         from datetime import datetime, timezone
         from ..deps import is_lakebase, get_session_factory
-        from ..embeddings import set_sample_embedding, _prefetch_images
+        from ..embeddings import set_sample_embedding, _prefetch_images_from_meta
         from ..inference_adapters import get_embedding_adapter as _get_embedding_adapter
         from ..inference_adapters.dinov3 import BATCH_SIZE
         from ..models import EmbeddingRun as ER
@@ -422,18 +422,24 @@ def generate_embeddings(
                 else:
                     eligible.append(sample)
 
+            # Snapshot id/filepath before any commit expires ORM state.
+            # _prefetch_images uses these plain values in worker threads
+            # so it never touches the session from another thread.
+            eligible_meta = [(s.id, s.filepath) for s in eligible]
+
             run = gen_db.get(ER, run_id)
             run.skipped = skipped
             gen_db.commit()
 
-            for batch_start in range(0, len(eligible), BATCH_SIZE):
-                batch = eligible[batch_start:batch_start + BATCH_SIZE]
-                images = _prefetch_images(batch)
+            for batch_start in range(0, len(eligible_meta), BATCH_SIZE):
+                batch_meta = eligible_meta[batch_start:batch_start + BATCH_SIZE]
+                batch_samples = eligible[batch_start:batch_start + BATCH_SIZE]
+                images = _prefetch_images_from_meta(batch_meta)
 
                 ready_samples = []
                 ready_bytes = []
-                for s in batch:
-                    img = images.get(s.id)
+                for (sid, _fp), s in zip(batch_meta, batch_samples):
+                    img = images.get(sid)
                     if not img:
                         failed += 1
                     else:
