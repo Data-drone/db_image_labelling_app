@@ -40,11 +40,16 @@ def list_volumes(catalog: str = Query(...), schema: str = Query(...)):
 
 
 @router.get("/browse")
-def browse_directory(path: str = Query(...)):
+def browse_directory(
+    path: str = Query(...),
+    page: int = Query(0, ge=0),
+    page_size: int = Query(50, ge=1, le=500),
+):
     """Browse a UC Volume or local directory for images.
 
     Local filesystem browsing is restricted to /Volumes and /tmp to
-    prevent arbitrary path traversal.
+    prevent arbitrary path traversal.  Files are paginated; folders are
+    always returned in full.
     """
     ALLOWED_LOCAL_PREFIXES = ("/Volumes/", "/tmp/")
 
@@ -61,10 +66,17 @@ def browse_directory(path: str = Query(...)):
                         files.append({"name": entry.name, "path": path.rstrip("/") + "/" + entry.name})
                     elif entry.name.endswith(".json"):
                         files.append({"name": entry.name, "path": path.rstrip("/") + "/" + entry.name})
+            files_sorted = sorted(files, key=lambda x: x["name"])
+            total_files = len(files_sorted)
+            start = page * page_size
+            page_files = files_sorted[start : start + page_size]
             return {
                 "path": path,
                 "folders": sorted(folders, key=lambda x: x["name"]),
-                "files": sorted(files, key=lambda x: x["name"]),
+                "files": page_files,
+                "total_files": total_files,
+                "page": page,
+                "page_size": page_size,
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -81,4 +93,14 @@ def browse_directory(path: str = Query(...)):
                 folders.append({"name": entry, "image_count": 0})
             elif os.path.splitext(entry)[1].lower() in IMAGE_EXTENSIONS:
                 files.append({"name": entry, "path": full})
-        return {"path": path, "folders": folders, "files": files}
+        total_files = len(files)
+        start = page * page_size
+        page_files = files[start : start + page_size]
+        return {
+            "path": path,
+            "folders": folders,
+            "files": page_files,
+            "total_files": total_files,
+            "page": page,
+            "page_size": page_size,
+        }
