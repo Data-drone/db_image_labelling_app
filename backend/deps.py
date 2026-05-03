@@ -41,10 +41,34 @@ def is_lakebase():
 
 
 def get_db():
-    """Yield a database session."""
+    """Yield a database session.
+
+    For Lakebase, retries session creation if the pool is still
+    provisioning a connection (ISCE / InvalidCachedStatementError).
+    """
+    import time
+    from sqlalchemy import text
+
     if _use_lakebase:
         from .lakebase import get_session
-        db = get_session()
+        last_err = None
+        for attempt in range(4):
+            db = get_session()
+            try:
+                db.execute(text("SELECT 1"))
+                break
+            except Exception as exc:
+                last_err = exc
+                log.warning("get_db: session probe failed (attempt %d): %s", attempt + 1, exc)
+                try:
+                    db.close()
+                except Exception:
+                    pass
+                time.sleep(1.0 * (attempt + 1))
+        else:
+            raise RuntimeError(
+                f"Could not acquire a healthy Lakebase session after retries: {last_err}"
+            ) from last_err
     else:
         db = _session_factory()
     try:
