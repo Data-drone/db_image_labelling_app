@@ -161,6 +161,22 @@ class EmbeddingGenerateProgress(BaseModel):
     total: int
 
 
+class EmbeddingRunOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    completed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    total_planned: int = 0
+    force: bool = False
+    error_message: Optional[str] = None
+    created_by: str = ""
+    created_at: datetime
+    finished_at: Optional[datetime] = None
+    model_config = {"from_attributes": True}
+
+
 class SimilarSampleOut(BaseModel):
     sample_id: int
     filename: str

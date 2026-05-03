@@ -81,12 +81,11 @@ export default function ProjectDashboard() {
   const debounceRef = useRef(null);
 
   // Embedding / similarity state
-  const [embeddingGenerating, setEmbeddingGenerating] = useState(false);
-  const [embeddingProgress, setEmbeddingProgress] = useState(null);
+  const [embeddingRun, setEmbeddingRun] = useState(null);
   const [embeddingError, setEmbeddingError] = useState('');
-  const [embeddingResult, setEmbeddingResult] = useState(null);
   const [similarMode, setSimilarMode] = useState(null);
   const [similarSamples, setSimilarSamples] = useState([]);
+  const embeddingPollRef = useRef(null);
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -124,8 +123,9 @@ export default function ProjectDashboard() {
     setPreAnnotateProgress(null);
     setFinetuneRun(null);
     setFinetuneError('');
-    setEmbeddingResult(null);
+    setEmbeddingRun(null);
     setEmbeddingError('');
+    if (embeddingPollRef.current) { clearInterval(embeddingPollRef.current); embeddingPollRef.current = null; }
     setProject(null);
     setLoading(true);
 
@@ -419,24 +419,57 @@ export default function ProjectDashboard() {
     };
   }, []);
 
+  const startEmbeddingPolling = useCallback((runId) => {
+    if (embeddingPollRef.current) clearInterval(embeddingPollRef.current);
+    embeddingPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetchEmbeddingRun(projectId, runId);
+        setEmbeddingRun(r);
+        if (['succeeded', 'failed'].includes(r.status)) {
+          clearInterval(embeddingPollRef.current);
+          embeddingPollRef.current = null;
+          fetchProjectStats(projectId).then(setStats).catch(() => {});
+        }
+      } catch {
+        if (embeddingPollRef.current) {
+          clearInterval(embeddingPollRef.current);
+          embeddingPollRef.current = null;
+        }
+      }
+    }, 2500);
+  }, [projectId]);
+
+  useEffect(() => () => {
+    if (embeddingPollRef.current) {
+      clearInterval(embeddingPollRef.current);
+      embeddingPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!project) return;
+    fetchLatestEmbeddingRun(projectId)
+      .then((r) => {
+        if (r.status === 'running') {
+          setEmbeddingRun(r);
+          startEmbeddingPolling(r.id);
+        }
+      })
+      .catch(() => {});
+  }, [project, projectId, startEmbeddingPolling]);
+
   const handleGenerateEmbeddings = async () => {
-    if (embeddingGenerating) return;
-    setEmbeddingGenerating(true);
+    if (embeddingRun?.status === 'running') return;
     setEmbeddingError('');
-    setEmbeddingResult(null);
-    setEmbeddingProgress(null);
     try {
-      const result = await generateEmbeddingsStream(
-        projectId, {},
-        { onProgress: (p) => setEmbeddingProgress(p) },
-      );
-      setEmbeddingResult(result);
+      const run = await startEmbeddingRun(projectId, {});
+      setEmbeddingRun(run);
+      if (run.status === 'running') {
+        startEmbeddingPolling(run.id);
+      }
       fetchProjectStats(projectId).then(setStats).catch(() => {});
     } catch (e) {
-      setEmbeddingError(e.userMessage || e.message || 'Embedding generation failed');
-    } finally {
-      setEmbeddingGenerating(false);
-      setEmbeddingProgress(null);
+      setEmbeddingError(humanizeApiError(e) || e?.response?.data?.detail || e.message || 'Embedding generation failed');
     }
   };
 
@@ -808,10 +841,10 @@ export default function ProjectDashboard() {
                   <button
                     className="btn-primary"
                     onClick={handleGenerateEmbeddings}
-                    disabled={embeddingGenerating}
+                    disabled={embeddingRun?.status === 'running'}
                     style={{ padding: '0.35rem 0.85rem', fontSize: '0.8rem' }}
                   >
-                    {embeddingGenerating ? 'Generating…'
+                    {embeddingRun?.status === 'running' ? 'Generating…'
                       : stats.embedded >= stats.total ? 'Regenerate Embeddings'
                       : stats.embedded > 0 ? `Resume (${stats.total - stats.embedded} remaining)`
                       : 'Generate Embeddings'}
@@ -829,26 +862,35 @@ export default function ProjectDashboard() {
               )}
 
               {/* Embedding progress */}
-              {embeddingGenerating && embeddingProgress && embeddingProgress.total > 0 && (
-                <div style={{ marginTop: '0.5rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
-                    <span>Generating…</span>
-                    <span>{embeddingProgress.current} / {embeddingProgress.total} ({Math.round((embeddingProgress.current / embeddingProgress.total) * 100)}%)</span>
+              {embeddingRun?.status === 'running' && embeddingRun.total_planned > 0 && (() => {
+                const done = embeddingRun.completed + embeddingRun.failed + embeddingRun.skipped;
+                const pct = Math.round((done / embeddingRun.total_planned) * 100);
+                return (
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
+                      <span>Generating…</span>
+                      <span>{done} / {embeddingRun.total_planned} ({pct}%)</span>
+                    </div>
+                    <div className="progress-bar" style={{ height: 6 }}>
+                      <div className="progress-fill" style={{ width: `${(done / embeddingRun.total_planned) * 100}%`, transition: 'width 0.2s ease', background: '#60a5fa' }} />
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                      <span style={{ color: 'var(--status-success)' }}>{embeddingRun.completed} done</span>
+                      <span>{embeddingRun.skipped} skipped</span>
+                      {embeddingRun.failed > 0 && <span style={{ color: '#ef4444' }}>{embeddingRun.failed} failed</span>}
+                    </div>
                   </div>
-                  <div className="progress-bar" style={{ height: 6 }}>
-                    <div className="progress-fill" style={{ width: `${(embeddingProgress.current / embeddingProgress.total) * 100}%`, transition: 'width 0.2s ease', background: '#60a5fa' }} />
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                    <span style={{ color: 'var(--status-success)' }}>{embeddingProgress.completed} done</span>
-                    <span>{embeddingProgress.skipped} skipped</span>
-                    {embeddingProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{embeddingProgress.failed} failed</span>}
-                  </div>
-                </div>
-              )}
-              {embeddingResult && (
+                );
+              })()}
+              {embeddingRun?.status === 'succeeded' && (
                 <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(34,197,94,0.08)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                   <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Done: </span>
-                  {embeddingResult.completed} new, {embeddingResult.skipped} already done, {embeddingResult.failed} failed
+                  {embeddingRun.completed} new, {embeddingRun.skipped} skipped, {embeddingRun.failed} failed
+                </div>
+              )}
+              {embeddingRun?.status === 'failed' && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                  {embeddingRun.error_message || 'Embedding generation failed.'}
                 </div>
               )}
               {embeddingError && (
