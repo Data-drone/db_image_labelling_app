@@ -113,6 +113,22 @@ export default function ProjectDashboard() {
   }, [actionsOpen]);
 
   useEffect(() => {
+    setActiveAsyncRunId(null);
+    setAsyncRunMessage('');
+    setAsyncRunStatus(null);
+    setAsyncDatabricksRunId(null);
+    setAsyncPreAnnotating(false);
+    setPreAnnotating(false);
+    setPreAnnotateResult(null);
+    setPreAnnotateError('');
+    setPreAnnotateProgress(null);
+    setFinetuneRun(null);
+    setFinetuneError('');
+    setEmbeddingResult(null);
+    setEmbeddingError('');
+    setProject(null);
+    setLoading(true);
+
     Promise.all([
       fetchProject(projectId),
       fetchProjectStats(projectId),
