@@ -56,6 +56,28 @@ def refresh_sample_status_after_annotation_change(db: Session, project_id: int, 
     s.status = "pre_labeled" if drafts else "labeled"
 
 
+def _generate_embedding(
+    sample,
+    image_bytes: bytes,
+    embedding_adapter,
+    embedding_endpoint,
+    endpoint_config: dict,
+    db: Session,
+) -> None:
+    """Generate and store an embedding for a sample, if possible."""
+    if sample.embedding is not None or not embedding_endpoint or not embedding_adapter:
+        return
+    try:
+        emb = embedding_adapter.query_embedding(
+            embedding_endpoint, image_bytes, endpoint_config,
+        )
+        if emb is not None:
+            from .embeddings import set_sample_embedding
+            set_sample_embedding(sample, emb, db)
+    except Exception as e:
+        log.warning("Embedding generation failed for sample %d: %s", sample.id, e)
+
+
 def run_preannotate_for_samples(
     db: Session,
     project: Any,
@@ -110,11 +132,17 @@ def run_preannotate_for_samples(
         except Exception as e:
             log.warning("Pre-annotate failed for sample %d: %s", sample.id, e)
             failed += 1
+            _generate_embedding(
+                sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+            )
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
 
         if not predictions:
             skipped += 1
+            _generate_embedding(
+                sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+            )
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
 
@@ -132,16 +160,9 @@ def run_preannotate_for_samples(
             )
         sample.status = "pre_labeled"
 
-        if sample.embedding is None and embedding_endpoint:
-            try:
-                emb = embedding_adapter.query_embedding(
-                    embedding_endpoint, image_bytes, endpoint_config,
-                )
-                if emb is not None:
-                    from .embeddings import set_sample_embedding
-                    set_sample_embedding(sample, emb, db)
-            except Exception as e:
-                log.debug("Embedding generation skipped for sample %d: %s", sample.id, e)
+        _generate_embedding(
+            sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+        )
 
         completed += 1
         if completed % 50 == 0:
