@@ -307,3 +307,35 @@ class ImportResponse(BaseModel):
     samples_skipped: int = 0
     samples_created: int = 0
     warnings: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Label Propagation
+# ---------------------------------------------------------------------------
+class LabelPropagateRequest(BaseModel):
+    """Propagate labels from labeled samples to similar unlabeled ones."""
+
+    similarity_threshold: float = 0.85
+    max_targets: int = 0  # 0 = all eligible
+    source_statuses: list[str] = ["labeled"]  # which statuses to copy from
+
+
+class LabelPropagateResult(BaseModel):
+    propagated: int = 0
+    skipped: int = 0
+    total_candidates: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Near-Duplicate Detection
+# ---------------------------------------------------------------------------
+class NearDuplicateGroup(BaseModel):
+    representative_id: int
+    representative_filename: str
+    members: list[SimilarSampleOut]
+
+
+class NearDuplicateResult(BaseModel):
+    groups: list[NearDuplicateGroup]
+    total_duplicates: int = 0
+    threshold: float
