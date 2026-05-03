@@ -81,10 +81,7 @@ export default function CreateProject() {
       hasAutoScanned.current = true;
       browseDirectory(volumeFromBrowser)
         .then((data) => {
-          const imageCount = (data.files || []).filter(f => {
-            const ext = f.name.split('.').pop()?.toLowerCase();
-            return ['jpg','jpeg','png','gif','webp','bmp','tiff','tif'].includes(ext);
-          }).length;
+          const imageCount = data.total_files ?? (data.files || []).length;
           setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
         })
         .catch(() => {});
@@ -199,10 +196,7 @@ export default function CreateProject() {
     setBrowseResult(null);
     try {
       const data = await browseDirectory(sourceVolume);
-      const imageCount = (data.files || []).filter(f => {
-        const ext = f.name.split('.').pop()?.toLowerCase();
-        return ['jpg','jpeg','png','gif','webp','bmp','tiff','tif'].includes(ext);
-      }).length;
+      const imageCount = data.total_files ?? (data.files || []).length;
       setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
     } catch (e) {
       setBrowseResult({ error: humanizeApiError(e) });

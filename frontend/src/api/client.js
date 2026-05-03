@@ -209,8 +209,8 @@ export const fetchSchemas = (catalog) =>
 export const fetchVolumes = (catalog, schema) =>
   api.get('/volumes', { params: { catalog, schema } }).then(r => r.data);
 
-export const browseDirectory = (path) =>
-  api.get('/browse', { params: { path } }).then(r => r.data);
+export const browseDirectory = (path, { page, page_size } = {}) =>
+  api.get('/browse', { params: { path, page, page_size } }).then(r => r.data);
 
 // ---------------------------------------------------------------------------
 // Embeddings / Similarity

@@ -45,6 +45,9 @@ export default function BrowseVolumes() {
   const [subpath, setSubpath] = useState('');
   const [folders, setFolders] = useState([]);
   const [files, setFiles] = useState([]);
+  const [totalFiles, setTotalFiles] = useState(0);
+  const [filePage, setFilePage] = useState(0);
+  const filePageSize = 50;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -92,6 +95,8 @@ export default function BrowseVolumes() {
     setSubpath('');
     setFolders([]);
     setFiles([]);
+    setTotalFiles(0);
+    setFilePage(0);
     setHasBrowsed(false);
   }, [catalog, schema, volume, mode]);
 
@@ -108,22 +113,25 @@ export default function BrowseVolumes() {
     : '';
 
   // Browse directory
-  const loadDirectory = useCallback(async () => {
+  const loadDirectory = useCallback(async (pageOverride) => {
     if (!currentPath) return;
     setLoading(true);
     setError('');
+    const page = pageOverride ?? filePage;
     try {
-      const data = await browseDirectory(currentPath);
+      const data = await browseDirectory(currentPath, { page, page_size: filePageSize });
       setFolders(data.folders || []);
       setFiles(data.files || []);
+      setTotalFiles(data.total_files ?? (data.files || []).length);
     } catch (e) {
       setError('Could not browse: ' + humanizeApiError(e));
       setFolders([]);
       setFiles([]);
+      setTotalFiles(0);
     } finally {
       setLoading(false);
     }
-  }, [currentPath]);
+  }, [currentPath, filePage]);
 
   const [hasBrowsed, setHasBrowsed] = useState(false);
 
@@ -136,10 +144,12 @@ export default function BrowseVolumes() {
   const breadcrumbs = ['Root', ...(subpath ? subpath.split('/') : [])];
 
   const navigateToFolder = (folderName) => {
+    setFilePage(0);
     setSubpath(subpath ? `${subpath}/${folderName}` : folderName);
   };
 
   const navigateToCrumb = (index) => {
+    setFilePage(0);
     if (index === 0) {
       setSubpath('');
     } else {
@@ -152,8 +162,10 @@ export default function BrowseVolumes() {
     setSubpath('');
     setFolders([]);
     setFiles([]);
+    setTotalFiles(0);
+    setFilePage(0);
     setHasBrowsed(true);
-    loadDirectory();
+    loadDirectory(0);
   };
 
   return (
@@ -363,27 +375,21 @@ export default function BrowseVolumes() {
           )}
 
           {/* Files */}
-          {files.length > 0 && (
+          {(files.length > 0 || totalFiles > 0) && (
             <div style={{ marginBottom: '2rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
                 <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
-                  Files ({files.length})
+                  Files ({totalFiles})
                 </h3>
-                {(() => {
-                  const imageCount = files.filter(f => {
-                    const ext = f.name.split('.').pop()?.toLowerCase();
-                    return ['jpg','jpeg','png','gif','webp','bmp','tiff','tif'].includes(ext);
-                  }).length;
-                  return imageCount > 0 ? (
-                    <button
-                      className="btn-primary"
-                      onClick={() => navigate(`/projects/new?volume=${encodeURIComponent(currentPath)}`)}
-                      style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
-                    >
-                      Create Project ({imageCount} images)
-                    </button>
-                  ) : null;
-                })()}
+                {totalFiles > 0 && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => navigate(`/projects/new?volume=${encodeURIComponent(currentPath)}`)}
+                    style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
+                  >
+                    Create Project ({totalFiles} files)
+                  </button>
+                )}
               </div>
               <div style={{
                 display: 'grid',
@@ -437,13 +443,47 @@ export default function BrowseVolumes() {
                 })}
               </div>
 
+              {/* Pagination */}
+              {totalFiles > filePageSize && (() => {
+                const totalPages = Math.ceil(totalFiles / filePageSize);
+                return (
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    marginTop: '1rem',
+                    fontSize: '0.8rem',
+                  }}>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => setFilePage(p => Math.max(0, p - 1))}
+                      disabled={filePage === 0 || loading}
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                    >
+                      Prev
+                    </button>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      Page {filePage + 1} / {totalPages}
+                    </span>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => setFilePage(p => Math.min(totalPages - 1, p + 1))}
+                      disabled={filePage >= totalPages - 1 || loading}
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                    >
+                      Next
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </>
       )}
 
       {/* Empty state */}
-      {!loading && currentPath && folders.length === 0 && files.length === 0 && !error && (
+      {!loading && currentPath && folders.length === 0 && totalFiles === 0 && !error && (
         <div style={{
           textAlign: 'center',
           padding: '3rem',
