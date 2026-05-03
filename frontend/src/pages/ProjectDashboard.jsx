@@ -779,7 +779,7 @@ export default function ProjectDashboard() {
             )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', minHeight: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: project.task_type === 'classification' ? '1fr 1fr 1fr' : '1fr 1fr', minHeight: 0 }}>
             {/* Pre-label section */}
             <div style={{ padding: '0.75rem 1rem', borderRight: '1px solid var(--border-color)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
@@ -885,7 +885,7 @@ export default function ProjectDashboard() {
             </div>
 
             {/* Embeddings section */}
-            <div style={{ padding: '0.75rem 1rem', borderRight: '1px solid var(--border-color)' }}>
+            <div style={{ padding: '0.75rem 1rem', ...(project.task_type === 'classification' ? { borderRight: '1px solid var(--border-color)' } : {}) }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
                 <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Embeddings</span>
                 {stats.embedded > 0 && (
@@ -964,8 +964,8 @@ export default function ProjectDashboard() {
               )}
             </div>
 
-            {/* Label Propagation section */}
-            <div style={{ padding: '0.75rem 1rem' }}>
+            {/* Label Propagation section — classification only */}
+            {project.task_type === 'classification' && <div style={{ padding: '0.75rem 1rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
                 <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Propagate Labels</span>
                 {stats.embedded > 0 && stats.labeled > 0 && stats.unlabeled > 0 && (
@@ -1031,7 +1031,7 @@ export default function ProjectDashboard() {
                   {propagateError}
                 </div>
               )}
-            </div>
+            </div>}
           </div>
 
           {/* Draft actions row */}

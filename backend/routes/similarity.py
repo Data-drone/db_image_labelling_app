@@ -259,10 +259,20 @@ def propagate_labels(
     For each unlabeled sample with an embedding, finds the closest labeled
     neighbor. If similarity >= threshold, copies the neighbor's annotations
     as draft annotations (``is_draft=True``, ``created_by=propagate:<user>``).
+
+    Only supported for classification projects — bounding box coordinates
+    are image-specific and not transferable between images.
     """
     project = db.query(LabelingProject).filter_by(id=project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+
+    if project.task_type != "classification":
+        raise HTTPException(
+            status_code=400,
+            detail="Label propagation is only supported for classification projects. "
+            "Bounding box coordinates from one image are not transferable to another.",
+        )
 
     embedded_count = (
         db.query(ProjectSample)
