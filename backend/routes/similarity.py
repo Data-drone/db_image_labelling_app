@@ -1,5 +1,6 @@
 """
-Label Propagation and Near-Duplicate Detection — powered by DINO embeddings + pgvector.
+Label Propagation, Near-Duplicate Detection, Diversity Sampling, and Outlier Detection
+— powered by DINO embeddings + pgvector.
 """
 
 import logging
@@ -13,10 +14,14 @@ from ..deps import get_db, get_user_email
 from ..models import Annotation, LabelingProject, ProjectSample
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
+    DiversitySampleOut,
+    DiversitySamplingResult,
     LabelPropagateRequest,
     LabelPropagateResult,
     NearDuplicateGroup,
     NearDuplicateResult,
+    OutlierDetectionResult,
+    OutlierSampleOut,
     SimilarSampleOut,
 )
 
@@ -475,3 +480,353 @@ def detect_near_duplicates(
             log.warning("pgvector duplicate detection failed, falling back to Python: %s", exc)
 
     return _detect_duplicates_python(db, project_id, threshold, limit)
+
+
+# ---------------------------------------------------------------------------
+# Diversity Sampling (Smart Queue)
+# ---------------------------------------------------------------------------
+
+def _diversity_pgvector(
+    db: Session,
+    project_id: int,
+    limit: int,
+) -> DiversitySamplingResult:
+    """Rank unlabeled samples by max cosine distance from any labeled sample (pgvector)."""
+    labeled_count = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.status == "labeled",
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    if labeled_count == 0:
+        # No labeled samples — fall back to random unlabeled with embeddings
+        unlabeled = (
+            db.query(ProjectSample.id, ProjectSample.filename, ProjectSample.status)
+            .filter(
+                ProjectSample.project_id == project_id,
+                ProjectSample.status.in_(["unlabeled", "pre_labeled"]),
+                ProjectSample.embedding.isnot(None),
+            )
+            .order_by(ProjectSample.id)
+            .limit(limit)
+            .all()
+        )
+        items = [
+            DiversitySampleOut(sample_id=s.id, filename=s.filename, diversity_score=1.0, status=s.status)
+            for s in unlabeled
+        ]
+        return DiversitySamplingResult(items=items, total=len(items))
+
+    # For each unlabeled sample, compute min cosine similarity to any labeled sample.
+    # Diversity score = 1 - min_similarity (i.e. max distance).
+    # We use a lateral join / subquery approach via raw SQL for efficiency.
+    rows = db.execute(
+        text(
+            "WITH labeled AS ( "
+            "  SELECT id, embedding_vec FROM project_samples "
+            "  WHERE project_id = :pid AND status = 'labeled' AND embedding_vec IS NOT NULL "
+            "), "
+            "unlabeled AS ( "
+            "  SELECT id, filename, status, embedding_vec FROM project_samples "
+            "  WHERE project_id = :pid AND status IN ('unlabeled', 'pre_labeled') "
+            "    AND embedding_vec IS NOT NULL "
+            ") "
+            "SELECT u.id, u.filename, u.status, "
+            "  (SELECT MIN(u.embedding_vec <=> l.embedding_vec) FROM labeled l) AS min_distance "
+            "FROM unlabeled u "
+            "ORDER BY min_distance DESC "
+            "LIMIT :lim"
+        ),
+        {"pid": project_id, "lim": limit},
+    ).fetchall()
+
+    items = [
+        DiversitySampleOut(
+            sample_id=r.id,
+            filename=r.filename,
+            diversity_score=round(float(r.min_distance), 4),
+            status=r.status,
+        )
+        for r in rows
+    ]
+    total = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.status.in_(["unlabeled", "pre_labeled"]),
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    return DiversitySamplingResult(items=items, total=total)
+
+
+def _diversity_python(
+    db: Session,
+    project_id: int,
+    limit: int,
+) -> DiversitySamplingResult:
+    """Fallback: compute diversity scores in Python."""
+    all_samples = (
+        db.query(ProjectSample.id, ProjectSample.filename, ProjectSample.status, ProjectSample.embedding)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .all()
+    )
+
+    labeled = [(s.id, s.embedding) for s in all_samples if s.status == "labeled"]
+    unlabeled = [(s.id, s.filename, s.status, s.embedding) for s in all_samples if s.status in ("unlabeled", "pre_labeled")]
+
+    if not unlabeled:
+        return DiversitySamplingResult(items=[], total=0)
+
+    if not labeled:
+        items = [
+            DiversitySampleOut(sample_id=s[0], filename=s[1], diversity_score=1.0, status=s[2])
+            for s in unlabeled[:limit]
+        ]
+        return DiversitySamplingResult(items=items, total=len(unlabeled))
+
+    # Precompute labeled norms
+    labeled_data = []
+    for sid, emb in labeled:
+        norm = sum(x * x for x in emb) ** 0.5
+        labeled_data.append((emb, norm))
+
+    scored = []
+    for uid, fname, status, uemb in unlabeled:
+        unorm = sum(x * x for x in uemb) ** 0.5
+        if unorm == 0:
+            scored.append((0.0, uid, fname, status))
+            continue
+        # max distance = 1 - max_similarity = 1 - max(cos_sim)
+        max_sim = -1.0
+        for lemb, lnorm in labeled_data:
+            if lnorm == 0:
+                continue
+            dot = sum(a * b for a, b in zip(uemb, lemb))
+            sim = dot / (unorm * lnorm)
+            if sim > max_sim:
+                max_sim = sim
+        # diversity = distance from closest labeled sample
+        diversity = 1.0 - max_sim if max_sim > -1.0 else 1.0
+        scored.append((diversity, uid, fname, status))
+
+    scored.sort(reverse=True)
+    items = [
+        DiversitySampleOut(sample_id=sid, filename=fn, diversity_score=round(score, 4), status=st)
+        for score, sid, fn, st in scored[:limit]
+    ]
+    return DiversitySamplingResult(items=items, total=len(unlabeled))
+
+
+@router.get("/diversity-queue", response_model=DiversitySamplingResult)
+def diversity_queue(
+    project_id: int,
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Rank unlabeled samples by diversity — most visually different from labeled set first.
+
+    Each sample is scored by its maximum cosine distance to any labeled sample.
+    Higher score = more different from what's already been labeled = higher priority.
+    """
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    embedded_count = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    if embedded_count == 0:
+        raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+    if _is_pgvector(db):
+        try:
+            return _diversity_pgvector(db, project_id, limit)
+        except Exception as exc:
+            log.warning("pgvector diversity sampling failed, falling back to Python: %s", exc)
+
+    return _diversity_python(db, project_id, limit)
+
+
+# ---------------------------------------------------------------------------
+# Outlier Detection
+# ---------------------------------------------------------------------------
+
+def _outlier_pgvector(
+    db: Session,
+    project_id: int,
+    k: int,
+    percentile: float,
+) -> OutlierDetectionResult:
+    """Score each sample by avg distance to K nearest neighbors (pgvector)."""
+    # Use LATERAL join to compute avg distance to K nearest neighbors
+    rows = db.execute(
+        text(
+            "SELECT s.id, s.filename, s.status, knn.avg_dist AS avg_knn_distance "
+            "FROM project_samples s "
+            "CROSS JOIN LATERAL ( "
+            "  SELECT AVG(s.embedding_vec <=> n.embedding_vec) AS avg_dist "
+            "  FROM project_samples n "
+            "  WHERE n.project_id = :pid AND n.embedding_vec IS NOT NULL AND n.id != s.id "
+            "  ORDER BY s.embedding_vec <=> n.embedding_vec "
+            "  LIMIT :k "
+            ") knn "
+            "WHERE s.project_id = :pid AND s.embedding_vec IS NOT NULL "
+            "  AND knn.avg_dist IS NOT NULL "
+            "ORDER BY knn.avg_dist DESC"
+        ),
+        {"pid": project_id, "k": k},
+    ).fetchall()
+
+    if not rows:
+        return OutlierDetectionResult(items=[], total=0, threshold=0.0, outlier_count=0)
+
+    scores = [float(r.avg_knn_distance) for r in rows]
+    # Threshold at given percentile
+    sorted_scores = sorted(scores)
+    threshold_idx = int(len(sorted_scores) * percentile)
+    threshold_idx = min(threshold_idx, len(sorted_scores) - 1)
+    threshold_val = sorted_scores[threshold_idx]
+
+    items = []
+    outlier_count = 0
+    for r in rows:
+        is_outlier = float(r.avg_knn_distance) >= threshold_val
+        if is_outlier:
+            outlier_count += 1
+        items.append(OutlierSampleOut(
+            sample_id=r.id,
+            filename=r.filename,
+            outlier_score=round(float(r.avg_knn_distance), 4),
+            is_outlier=is_outlier,
+            status=r.status,
+        ))
+
+    return OutlierDetectionResult(
+        items=items,
+        total=len(items),
+        threshold=round(threshold_val, 4),
+        outlier_count=outlier_count,
+    )
+
+
+def _outlier_python(
+    db: Session,
+    project_id: int,
+    k: int,
+    percentile: float,
+) -> OutlierDetectionResult:
+    """Fallback: compute KNN outlier scores in Python."""
+    samples = (
+        db.query(ProjectSample.id, ProjectSample.filename, ProjectSample.status, ProjectSample.embedding)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .all()
+    )
+
+    if not samples:
+        return OutlierDetectionResult(items=[], total=0, threshold=0.0, outlier_count=0)
+
+    # Precompute norms
+    data = []
+    for s in samples:
+        norm = sum(x * x for x in s.embedding) ** 0.5
+        data.append((s.id, s.filename, s.status, s.embedding, norm))
+
+    scored = []
+    for i, (sid, fname, status, emb, norm) in enumerate(data):
+        if norm == 0:
+            scored.append((sid, fname, status, 2.0))
+            continue
+        # Compute cosine distance to all others
+        distances = []
+        for j, (_, _, _, oemb, onorm) in enumerate(data):
+            if i == j or onorm == 0:
+                continue
+            dot = sum(a * b for a, b in zip(emb, oemb))
+            cos_dist = 1.0 - (dot / (norm * onorm))
+            distances.append(cos_dist)
+        distances.sort()
+        knn_distances = distances[:k]
+        avg_dist = sum(knn_distances) / len(knn_distances) if knn_distances else 0.0
+        scored.append((sid, fname, status, avg_dist))
+
+    # Sort by score descending
+    scored.sort(key=lambda x: x[3], reverse=True)
+
+    # Compute threshold
+    all_scores = sorted(x[3] for x in scored)
+    threshold_idx = int(len(all_scores) * percentile)
+    threshold_idx = min(threshold_idx, len(all_scores) - 1)
+    threshold_val = all_scores[threshold_idx]
+
+    items = []
+    outlier_count = 0
+    for sid, fname, status, score in scored:
+        is_outlier = score >= threshold_val
+        if is_outlier:
+            outlier_count += 1
+        items.append(OutlierSampleOut(
+            sample_id=sid,
+            filename=fname,
+            outlier_score=round(score, 4),
+            is_outlier=is_outlier,
+            status=status,
+        ))
+
+    return OutlierDetectionResult(
+        items=items,
+        total=len(items),
+        threshold=round(threshold_val, 4),
+        outlier_count=outlier_count,
+    )
+
+
+@router.get("/outliers", response_model=OutlierDetectionResult)
+def detect_outliers(
+    project_id: int,
+    k: int = Query(5, ge=1, le=50),
+    percentile: float = Query(0.95, ge=0.5, le=0.99),
+    db: Session = Depends(get_db),
+):
+    """Detect outlier samples by average distance to K nearest neighbors.
+
+    Samples with unusually high average KNN distance are flagged as outliers.
+    The threshold is set at the given percentile of all scores.
+    """
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    embedded_count = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    if embedded_count == 0:
+        raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+    if _is_pgvector(db):
+        try:
+            return _outlier_pgvector(db, project_id, k, percentile)
+        except Exception as exc:
+            log.warning("pgvector outlier detection failed, falling back to Python: %s", exc)
+
+    return _outlier_python(db, project_id, k, percentile)

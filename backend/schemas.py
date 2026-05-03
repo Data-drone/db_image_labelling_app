@@ -339,3 +339,36 @@ class NearDuplicateResult(BaseModel):
     groups: list[NearDuplicateGroup]
     total_duplicates: int = 0
     threshold: float
+
+
+# ---------------------------------------------------------------------------
+# Diversity Sampling (Smart Queue)
+# ---------------------------------------------------------------------------
+class DiversitySampleOut(BaseModel):
+    sample_id: int
+    filename: str
+    diversity_score: float
+    status: str
+
+
+class DiversitySamplingResult(BaseModel):
+    items: list[DiversitySampleOut]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Outlier Detection
+# ---------------------------------------------------------------------------
+class OutlierSampleOut(BaseModel):
+    sample_id: int
+    filename: str
+    outlier_score: float
+    is_outlier: bool
+    status: str
+
+
+class OutlierDetectionResult(BaseModel):
+    items: list[OutlierSampleOut]
+    total: int
+    threshold: float
+    outlier_count: int

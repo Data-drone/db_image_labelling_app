@@ -13,6 +13,7 @@ import {
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
   startEmbeddingRun, fetchEmbeddingRun, fetchLatestEmbeddingRun, fetchSimilarSamples,
   propagateLabels, detectNearDuplicates,
+  fetchDiversityQueue, fetchOutliers,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
@@ -101,6 +102,18 @@ export default function ProjectDashboard() {
   const [dupTotalDuplicates, setDupTotalDuplicates] = useState(0);
   const [dupThreshold, setDupThreshold] = useState(0.95);
   const [dupError, setDupError] = useState('');
+
+  // Diversity queue (Smart Queue) state
+  const [diversityLoading, setDiversityLoading] = useState(false);
+  const [diversityQueue, setDiversityQueue] = useState(null);
+  const [diversityError, setDiversityError] = useState('');
+
+  // Outlier detection state
+  const [outlierMode, setOutlierMode] = useState(false);
+  const [outlierLoading, setOutlierLoading] = useState(false);
+  const [outlierData, setOutlierData] = useState(null);
+  const [outlierError, setOutlierError] = useState('');
+  const [outlierIds, setOutlierIds] = useState(new Set());
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -552,6 +565,48 @@ export default function ProjectDashboard() {
     setDupTotalDuplicates(0);
   };
 
+  const handleSmartQueue = async () => {
+    setDiversityLoading(true);
+    setDiversityError('');
+    try {
+      const result = await fetchDiversityQueue(projectId, 50);
+      setDiversityQueue(result);
+      if (result.items.length > 0) {
+        // Navigate to labeling with the first diverse sample
+        navigate(`/projects/${projectId}/label?sample=${result.items[0].sample_id}&mode=diversity`);
+      } else {
+        setDiversityError('No unlabeled samples with embeddings found.');
+      }
+    } catch (e) {
+      setDiversityError(humanizeApiError(e) || 'Diversity sampling failed. Generate embeddings first.');
+    } finally {
+      setDiversityLoading(false);
+    }
+  };
+
+  const handleDetectOutliers = async () => {
+    setOutlierLoading(true);
+    setOutlierError('');
+    setOutlierData(null);
+    try {
+      const result = await fetchOutliers(projectId, { k: 5, percentile: 0.95 });
+      setOutlierData(result);
+      setOutlierMode(true);
+      const ids = new Set(result.items.filter(i => i.is_outlier).map(i => i.sample_id));
+      setOutlierIds(ids);
+    } catch (e) {
+      setOutlierError(humanizeApiError(e) || 'Outlier detection failed. Generate embeddings first.');
+    } finally {
+      setOutlierLoading(false);
+    }
+  };
+
+  const clearOutlierMode = () => {
+    setOutlierMode(false);
+    setOutlierData(null);
+    setOutlierIds(new Set());
+  };
+
   // Load gallery
   useEffect(() => {
     if (!project) return;
@@ -741,15 +796,44 @@ export default function ProjectDashboard() {
               </div>
             )}
           </div>
-          <button
-            className="btn-primary"
-            onClick={() => navigate(`/projects/${projectId}/label`)}
-            style={{ padding: '0.6rem 1.5rem' }}
-          >
-            Start Labeling
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            {stats?.embedded > 0 && (
+              <button
+                className="btn-secondary"
+                onClick={handleSmartQueue}
+                disabled={diversityLoading}
+                style={{
+                  padding: '0.6rem 1rem',
+                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                  border: '1px solid rgba(168,85,247,0.3)',
+                  color: '#a855f7',
+                }}
+                title="Label the most visually diverse samples first"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
+                </svg>
+                {diversityLoading ? 'Loading…' : 'Smart Queue'}
+              </button>
+            )}
+            <button
+              className="btn-primary"
+              onClick={() => navigate(`/projects/${projectId}/label`)}
+              style={{ padding: '0.6rem 1.5rem' }}
+            >
+              Start Labeling
+            </button>
+          </div>
         </div>
       </div>
+
+      {diversityError && (
+        <div style={{ marginBottom: '1rem', padding: '0.5rem 0.75rem', borderRadius: 6, background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', fontSize: '0.8rem', color: '#a855f7' }}>
+          {diversityError}
+        </div>
+      )}
 
       {/* AI Tools panel */}
       {stats && (
@@ -1402,6 +1486,8 @@ export default function ProjectDashboard() {
                   ? <>Similar to <span style={{ color: 'var(--accent-blue)' }}>{similarMode.filename}</span></>
                   : dupMode
                     ? <>Near Duplicates <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({dupGroups.length} groups, {dupTotalDuplicates} duplicates)</span></>
+                  : outlierMode && outlierData
+                    ? <>Outliers <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({outlierData.outlier_count} flagged of {outlierData.total})</span></>
                     : 'Samples'}
               </h3>
               {similarMode ? (
@@ -1416,6 +1502,14 @@ export default function ProjectDashboard() {
                 <button
                   className="btn-secondary"
                   onClick={clearDupMode}
+                  style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                >
+                  Back to gallery
+                </button>
+              ) : outlierMode ? (
+                <button
+                  className="btn-secondary"
+                  onClick={clearOutlierMode}
                   style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
                 >
                   Back to gallery
@@ -1444,6 +1538,27 @@ export default function ProjectDashboard() {
                         <rect x="8" y="14" width="8" height="8" rx="1" />
                       </svg>
                       {dupLoading ? 'Scanning…' : 'Find Duplicates'}
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={handleDetectOutliers}
+                      disabled={outlierLoading}
+                      style={{
+                        padding: '0.25rem 0.6rem',
+                        fontSize: '0.75rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        border: '1px solid rgba(239,68,68,0.3)',
+                        color: '#ef4444',
+                      }}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" y1="8" x2="12" y2="12" />
+                        <line x1="12" y1="16" x2="12.01" y2="16" />
+                      </svg>
+                      {outlierLoading ? 'Scanning…' : 'Find Outliers'}
                     </button>
                   </div>
                 )}
@@ -1507,8 +1622,14 @@ export default function ProjectDashboard() {
               </div>
             )}
 
+            {outlierError && (
+              <div style={{ marginBottom: '0.75rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                {outlierError}
+              </div>
+            )}
+
             {/* Search & filter bar */}
-            {!similarMode && !dupMode && <div style={{
+            {!similarMode && !dupMode && !outlierMode && <div style={{
               display: 'flex', flexWrap: 'wrap', gap: '0.5rem',
               alignItems: 'center', marginBottom: '0.75rem',
             }}>
@@ -1795,6 +1916,87 @@ export default function ProjectDashboard() {
                   ))}
                 </div>
               )
+            ) : outlierMode && outlierData ? (
+              outlierData.items.filter(i => i.is_outlier).length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
+                  No outliers detected at the 95th percentile threshold.
+                </div>
+              ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+                  gap: '0.5rem',
+                }}>
+                  {outlierData.items.filter(i => i.is_outlier).map((s) => (
+                    <div
+                      key={s.sample_id}
+                      onClick={() => navigate(`/projects/${projectId}/label?sample=${s.sample_id}`)}
+                      style={{
+                        cursor: 'pointer',
+                        borderRadius: 6,
+                        border: '1px solid rgba(239,68,68,0.3)',
+                        overflow: 'hidden',
+                        background: 'var(--bg-secondary)',
+                        transition: 'border-color 0.15s',
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.borderColor = '#ef4444'}
+                      onMouseLeave={(e) => e.currentTarget.style.borderColor = 'rgba(239,68,68,0.3)'}
+                    >
+                      <div style={{ position: 'relative', paddingTop: '100%' }}>
+                        <img
+                          src={sampleThumbnailUrl(projectId, s.sample_id, 200)}
+                          alt={s.filename}
+                          loading="lazy"
+                          style={{
+                            position: 'absolute',
+                            top: 0, left: 0,
+                            width: '100%', height: '100%',
+                            objectFit: 'cover',
+                          }}
+                        />
+                        <span style={{
+                          position: 'absolute',
+                          top: 4, left: 4,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: 3,
+                          fontSize: '0.6rem',
+                          fontWeight: 600,
+                          background: 'rgba(239,68,68,0.85)',
+                          color: '#fff',
+                        }}>
+                          {(s.outlier_score * 100).toFixed(1)}
+                        </span>
+                        <span style={{
+                          position: 'absolute',
+                          top: 4, right: 4,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: 3,
+                          fontSize: '0.6rem',
+                          fontWeight: 600,
+                          background: s.status === 'labeled' ? 'var(--status-success)'
+                            : s.status === 'pre_labeled' ? '#a78bfa'
+                            : s.status === 'skipped' ? 'var(--status-warning)'
+                            : 'rgba(255,255,255,0.15)',
+                          color: s.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
+                        }}>
+                          {s.status}
+                        </span>
+                      </div>
+                      <div style={{ padding: '0.3rem 0.4rem' }}>
+                        <div style={{
+                          fontSize: '0.65rem',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}>
+                          {s.filename}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
             ) : gallerySamples.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
                 No samples found
@@ -1849,6 +2051,21 @@ export default function ProjectDashboard() {
                       }}>
                         {s.status}
                       </span>
+                      {outlierIds.has(s.id) && (
+                        <span style={{
+                          position: 'absolute',
+                          top: 4, left: 4,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: 3,
+                          fontSize: '0.55rem',
+                          fontWeight: 700,
+                          background: 'rgba(239,68,68,0.85)',
+                          color: '#fff',
+                          letterSpacing: '0.02em',
+                        }}>
+                          OUTLIER
+                        </span>
+                      )}
                       {stats?.embedded > 0 && (
                         <button
                           className="find-similar-overlay"
