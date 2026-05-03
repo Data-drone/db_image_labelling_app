@@ -654,50 +654,220 @@ export default function ProjectDashboard() {
         </div>
       </div>
 
-      {/* Pre-annotation toolbar */}
-      {endpointStatus && endpointStatus.status === 'ready' && stats && eligibleCount > 0 && (
-        <div className="card" style={{
-          marginBottom: '1rem',
-          padding: '0.6rem 1rem',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.75rem',
-          flexWrap: 'wrap',
-        }}>
-          <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-            Pre-label
-          </span>
-          <input
-            type="text"
-            value={preAnnotatePrompt}
-            onChange={(e) => setPreAnnotatePrompt(e.target.value)}
-            placeholder={project.class_list?.join('. ') || 'Detection prompt…'}
-            className="input"
-            style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', flex: '1 1 180px', minWidth: 140 }}
-            title="Text prompt sent to the model. Leave blank to use class list."
-          />
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none', whiteSpace: 'nowrap' }}>
-            <input
-              type="checkbox"
-              checked={includePreLabeledInPreAnnotate}
-              onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
-            />
-            Include pre-labeled
-          </label>
-          <button
-            className="btn-primary"
-            onClick={handlePreAnnotate}
-            disabled={preAnnotating || asyncPreAnnotating || Boolean(activeAsyncRunId)}
-            style={{ padding: '0.4rem 1rem', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
-            title={willUseJob
-              ? `${eligibleCount} samples → runs as background Databricks Job`
-              : `${eligibleCount} samples → runs in-app with live progress`}
-          >
-            {preAnnotating ? 'Pre-labeling…'
-              : asyncPreAnnotating ? 'Queueing…'
-              : activeAsyncRunId ? 'Job running…'
-              : `Run (${eligibleCount})`}
-          </button>
+      {/* AI Tools panel */}
+      {stats && (
+        <div className="card" style={{ marginBottom: '1rem', padding: 0, overflow: 'hidden' }}>
+          <div style={{ padding: '0.6rem 1rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <span style={{ fontSize: '0.95rem', fontWeight: 700 }}>AI Tools</span>
+            {endpointStatus && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                fontSize: '0.7rem', color: 'var(--text-muted)',
+                padding: '0.15rem 0.5rem', borderRadius: 99,
+                background: endpointStatus.status === 'ready' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                border: `1px solid ${endpointStatus.status === 'ready' ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: endpointStatus.status === 'ready' ? 'var(--status-success)'
+                    : endpointStatus.status === 'not_ready' ? 'var(--status-warning)'
+                    : endpointStatus.status === 'not_configured' ? 'var(--text-muted)'
+                    : '#ef4444',
+                }} />
+                {endpointStatus.status === 'ready' ? endpointStatus.endpoint
+                  : endpointStatus.status === 'not_ready' ? 'Endpoint updating'
+                  : endpointStatus.status === 'not_configured' ? 'Not configured'
+                  : 'Endpoint error'}
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0 }}>
+            {/* Pre-label section */}
+            <div style={{ padding: '0.75rem 1rem', borderRight: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Pre-label</span>
+                {stats && (
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    {eligibleCount > 0 ? `${eligibleCount} eligible` : 'none eligible'}
+                  </span>
+                )}
+              </div>
+
+              {endpointStatus?.status === 'ready' && eligibleCount > 0 ? (
+                <>
+                  <input
+                    type="text"
+                    value={preAnnotatePrompt}
+                    onChange={(e) => setPreAnnotatePrompt(e.target.value)}
+                    placeholder={project.class_list?.join('. ') || 'Detection prompt…'}
+                    className="input"
+                    style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', width: '100%', marginBottom: '0.5rem' }}
+                    title="Text prompt sent to the model. Leave blank to use class list."
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      className="btn-primary"
+                      onClick={handlePreAnnotate}
+                      disabled={preAnnotating || asyncPreAnnotating || Boolean(activeAsyncRunId)}
+                      style={{ padding: '0.35rem 0.85rem', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
+                      title={willUseJob
+                        ? `${eligibleCount} samples → runs as background Databricks Job`
+                        : `${eligibleCount} samples → runs in-app with live progress`}
+                    >
+                      {preAnnotating ? 'Running…'
+                        : asyncPreAnnotating ? 'Queueing…'
+                        : activeAsyncRunId ? 'Job running…'
+                        : willUseJob ? `Run Job (${eligibleCount})` : `Run (${eligibleCount})`}
+                    </button>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', color: 'var(--text-muted)', userSelect: 'none', whiteSpace: 'nowrap' }}>
+                      <input
+                        type="checkbox"
+                        checked={includePreLabeledInPreAnnotate}
+                        onChange={(e) => setIncludePreLabeledInPreAnnotate(e.target.checked)}
+                        style={{ width: 13, height: 13 }}
+                      />
+                      Re-run pre-labeled
+                    </label>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0.5rem 0' }}>
+                  {!endpointStatus || endpointStatus.status === 'not_configured'
+                    ? 'Configure a serving endpoint to enable pre-labeling.'
+                    : endpointStatus.status !== 'ready'
+                      ? 'Waiting for endpoint to become ready…'
+                      : 'All samples already labeled.'}
+                </div>
+              )}
+
+              {/* Pre-label progress */}
+              {preAnnotating && preAnnotateProgress && preAnnotateProgress.total > 0 && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
+                    <span>Pre-labeling…</span>
+                    <span>{preAnnotateProgress.current} / {preAnnotateProgress.total} ({Math.round((preAnnotateProgress.current / preAnnotateProgress.total) * 100)}%)</span>
+                  </div>
+                  <div className="progress-bar" style={{ height: 6 }}>
+                    <div className="progress-fill" style={{ width: `${(preAnnotateProgress.current / preAnnotateProgress.total) * 100}%`, transition: 'width 0.2s ease' }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                    <span style={{ color: 'var(--status-success)' }}>{preAnnotateProgress.completed} done</span>
+                    <span>{preAnnotateProgress.skipped} skipped</span>
+                    {preAnnotateProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{preAnnotateProgress.failed} failed</span>}
+                  </div>
+                </div>
+              )}
+              {preAnnotateResult && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(34,197,94,0.08)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                  <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Done: </span>
+                  {preAnnotateResult.completed} pre-labeled, {preAnnotateResult.skipped} skipped, {preAnnotateResult.failed} failed
+                </div>
+              )}
+              {preAnnotateError && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                  {preAnnotateError}
+                </div>
+              )}
+              {asyncRunMessage && (
+                <div style={{
+                  marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, fontSize: '0.75rem',
+                  background: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled' ? 'rgba(239,68,68,0.08)'
+                    : asyncRunStatus === 'succeeded' ? 'rgba(34,197,94,0.08)' : 'rgba(59,130,246,0.06)',
+                  color: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled' ? '#ef4444' : 'var(--text-secondary)',
+                }}>
+                  {asyncRunMessage}
+                  {asyncDatabricksRunId && buildJobRunUrl(asyncDatabricksRunId) && (
+                    <a href={buildJobRunUrl(asyncDatabricksRunId)} target="_blank" rel="noopener noreferrer"
+                      style={{ marginLeft: '0.4rem', color: 'var(--accent-blue)', textDecoration: 'underline', fontSize: '0.7rem' }}>
+                      View Job ↗
+                    </a>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Embeddings section */}
+            <div style={{ padding: '0.75rem 1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Embeddings</span>
+                {stats.embedded > 0 && (
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    {stats.embedded} / {stats.total} embedded
+                  </span>
+                )}
+              </div>
+
+              {stats.total > 0 ? (
+                <>
+                  {stats.embedded > 0 && stats.total > 0 && (
+                    <div className="progress-bar" style={{ height: 4, marginBottom: '0.5rem' }}>
+                      <div className="progress-fill" style={{ width: `${(stats.embedded / stats.total) * 100}%`, background: '#60a5fa' }} />
+                    </div>
+                  )}
+                  <button
+                    className="btn-primary"
+                    onClick={handleGenerateEmbeddings}
+                    disabled={embeddingGenerating}
+                    style={{ padding: '0.35rem 0.85rem', fontSize: '0.8rem' }}
+                  >
+                    {embeddingGenerating ? 'Generating…'
+                      : stats.embedded >= stats.total ? 'Regenerate Embeddings'
+                      : stats.embedded > 0 ? `Resume (${stats.total - stats.embedded} remaining)`
+                      : 'Generate Embeddings'}
+                  </button>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                    {stats.embedded > 0
+                      ? 'Enables "Find Similar" on each sample in the gallery below.'
+                      : 'Build a vector index with DINOv3 to enable visual similarity search.'}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0.5rem 0' }}>
+                  No samples to embed.
+                </div>
+              )}
+
+              {/* Embedding progress */}
+              {embeddingGenerating && embeddingProgress && embeddingProgress.total > 0 && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
+                    <span>Generating…</span>
+                    <span>{embeddingProgress.current} / {embeddingProgress.total} ({Math.round((embeddingProgress.current / embeddingProgress.total) * 100)}%)</span>
+                  </div>
+                  <div className="progress-bar" style={{ height: 6 }}>
+                    <div className="progress-fill" style={{ width: `${(embeddingProgress.current / embeddingProgress.total) * 100}%`, transition: 'width 0.2s ease', background: '#60a5fa' }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                    <span style={{ color: 'var(--status-success)' }}>{embeddingProgress.completed} done</span>
+                    <span>{embeddingProgress.skipped} skipped</span>
+                    {embeddingProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{embeddingProgress.failed} failed</span>}
+                  </div>
+                </div>
+              )}
+              {embeddingResult && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(34,197,94,0.08)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                  <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Done: </span>
+                  {embeddingResult.completed} new, {embeddingResult.skipped} already done, {embeddingResult.failed} failed
+                </div>
+              )}
+              {embeddingError && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                  {embeddingError}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Draft actions row */}
+          {draftActionMessage && (
+            <div style={{
+              padding: '0.4rem 1rem', borderTop: '1px solid var(--border-color)',
+              fontSize: '0.75rem', color: 'var(--text-secondary)', background: 'rgba(59,130,246,0.04)',
+            }}>
+              {draftActionMessage}
+            </div>
+          )}
         </div>
       )}
 
@@ -902,202 +1072,6 @@ export default function ProjectDashboard() {
               {exportResult ? 'Done' : 'Cancel'}
             </button>
           </div>
-        </div>
-      )}
-
-      {/* Endpoint status badge */}
-      {endpointStatus && (
-        <div className="card" style={{ marginBottom: '1rem', padding: '0.6rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-            background:
-              endpointStatus.status === 'ready' ? 'var(--status-success)'
-              : endpointStatus.status === 'not_ready' ? 'var(--status-warning)'
-              : endpointStatus.status === 'not_configured' ? 'var(--text-muted)'
-              : '#ef4444',
-          }} />
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-            Pre-annotation:{' '}
-            {endpointStatus.status === 'ready' && (
-              <span style={{ color: 'var(--status-success)' }}>Ready ({endpointStatus.endpoint})</span>
-            )}
-            {endpointStatus.status === 'not_ready' && (
-              <span style={{ color: 'var(--status-warning)' }}>Endpoint updating ({endpointStatus.endpoint})</span>
-            )}
-            {endpointStatus.status === 'not_configured' && (
-              <span style={{ color: 'var(--text-muted)' }}>Not configured</span>
-            )}
-            {(endpointStatus.status === 'not_found' || endpointStatus.status === 'error') && (
-              <span style={{ color: '#ef4444' }}>{endpointStatus.error || 'Endpoint unreachable'}</span>
-            )}
-          </span>
-        </div>
-      )}
-
-      {/* Pre-annotate live progress */}
-      {preAnnotating && preAnnotateProgress && preAnnotateProgress.total > 0 && (
-        <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem 1rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Pre-labeling in progress…</span>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              {preAnnotateProgress.current} / {preAnnotateProgress.total}
-              {' '}({Math.round((preAnnotateProgress.current / preAnnotateProgress.total) * 100)}%)
-            </span>
-          </div>
-          <div className="progress-bar" style={{ height: 8 }}>
-            <div className="progress-fill" style={{
-              width: `${(preAnnotateProgress.current / preAnnotateProgress.total) * 100}%`,
-              transition: 'width 0.2s ease',
-            }} />
-          </div>
-          <div style={{ display: 'flex', gap: '1rem', marginTop: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            <span style={{ color: 'var(--status-success)' }}>{preAnnotateProgress.completed} pre-labeled</span>
-            <span>{preAnnotateProgress.skipped} skipped</span>
-            {preAnnotateProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{preAnnotateProgress.failed} failed</span>}
-          </div>
-        </div>
-      )}
-
-      {/* Pre-annotate result/error */}
-      {preAnnotateError && (
-        <div style={{
-          padding: '0.5rem 0.75rem',
-          borderRadius: 4,
-          background: 'rgba(239, 68, 68, 0.1)',
-          border: '1px solid rgba(239, 68, 68, 0.3)',
-          color: '#ef4444',
-          fontSize: '0.8rem',
-          marginBottom: '1rem',
-        }}>
-          Pre-annotation failed: {preAnnotateError}
-        </div>
-      )}
-      {preAnnotateResult && (
-        <div style={{
-          padding: '0.5rem 0.75rem',
-          borderRadius: 4,
-          background: 'rgba(34, 197, 94, 0.1)',
-          border: '1px solid rgba(34, 197, 94, 0.3)',
-          fontSize: '0.8rem',
-          marginBottom: '1rem',
-        }}>
-          <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Pre-annotation complete: </span>
-          <span style={{ color: 'var(--text-secondary)' }}>
-            {preAnnotateResult.completed} pre-labeled, {preAnnotateResult.skipped} below threshold / empty, {preAnnotateResult.failed} failed
-          </span>
-        </div>
-      )}
-      {draftActionMessage && (
-        <div style={{
-          padding: '0.5rem 0.75rem',
-          borderRadius: 4,
-          background: 'rgba(59, 130, 246, 0.08)',
-          border: '1px solid rgba(59, 130, 246, 0.25)',
-          fontSize: '0.8rem',
-          marginBottom: '1rem',
-          color: 'var(--text-secondary)',
-        }}>
-          {draftActionMessage}
-        </div>
-      )}
-      {asyncRunMessage && (
-        <div style={{
-          padding: '0.5rem 0.75rem',
-          borderRadius: 4,
-          background: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
-            ? 'rgba(239, 68, 68, 0.1)'
-            : asyncRunStatus === 'succeeded'
-              ? 'rgba(34, 197, 94, 0.1)'
-              : 'rgba(59, 130, 246, 0.08)',
-          border: `1px solid ${asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
-            ? 'rgba(239, 68, 68, 0.3)'
-            : asyncRunStatus === 'succeeded'
-              ? 'rgba(34, 197, 94, 0.3)'
-              : 'rgba(59, 130, 246, 0.25)'}`,
-          fontSize: '0.8rem',
-          marginBottom: '1rem',
-          color: asyncRunStatus === 'failed' || asyncRunStatus === 'cancelled'
-            ? '#ef4444'
-            : 'var(--text-secondary)',
-        }}>
-          {asyncRunMessage}
-          {asyncDatabricksRunId && buildJobRunUrl(asyncDatabricksRunId) && (
-            <a
-              href={buildJobRunUrl(asyncDatabricksRunId)}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                marginLeft: '0.5rem',
-                color: 'var(--accent-blue)',
-                textDecoration: 'underline',
-                fontSize: '0.8rem',
-              }}
-            >
-              View in Databricks Jobs ↗
-            </a>
-          )}
-        </div>
-      )}
-
-      {/* Embedding generation */}
-      {stats && (
-        <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <button
-            className="btn btn-secondary"
-            onClick={handleGenerateEmbeddings}
-            disabled={embeddingGenerating || !stats.total}
-            style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
-          >
-            {embeddingGenerating ? 'Generating Embeddings…' : 'Generate Embeddings'}
-          </button>
-          {stats.embedded > 0 && (
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              {stats.embedded} / {stats.total} samples embedded
-            </span>
-          )}
-        </div>
-      )}
-      {embeddingGenerating && embeddingProgress && embeddingProgress.total > 0 && (
-        <div className="card" style={{ marginBottom: '1rem', padding: '0.75rem 1rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Generating embeddings…</span>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              {embeddingProgress.current} / {embeddingProgress.total}
-              {' '}({Math.round((embeddingProgress.current / embeddingProgress.total) * 100)}%)
-            </span>
-          </div>
-          <div className="progress-bar" style={{ height: 8 }}>
-            <div className="progress-fill" style={{
-              width: `${(embeddingProgress.current / embeddingProgress.total) * 100}%`,
-              transition: 'width 0.2s ease',
-            }} />
-          </div>
-          <div style={{ display: 'flex', gap: '1rem', marginTop: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            <span style={{ color: 'var(--status-success)' }}>{embeddingProgress.completed} embedded</span>
-            <span>{embeddingProgress.skipped} skipped</span>
-            {embeddingProgress.failed > 0 && <span style={{ color: '#ef4444' }}>{embeddingProgress.failed} failed</span>}
-          </div>
-        </div>
-      )}
-      {embeddingError && (
-        <div style={{
-          padding: '0.5rem 0.75rem', borderRadius: 4,
-          background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)',
-          color: '#ef4444', fontSize: '0.8rem', marginBottom: '1rem',
-        }}>
-          {embeddingError}
-        </div>
-      )}
-      {embeddingResult && (
-        <div style={{
-          padding: '0.5rem 0.75rem', borderRadius: 4,
-          background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)',
-          fontSize: '0.8rem', marginBottom: '1rem',
-        }}>
-          <span style={{ color: 'var(--status-success)', fontWeight: 600 }}>Embeddings generated: </span>
-          <span style={{ color: 'var(--text-secondary)' }}>
-            {embeddingResult.completed} new, {embeddingResult.skipped} already embedded, {embeddingResult.failed} failed
-          </span>
         </div>
       )}
 
