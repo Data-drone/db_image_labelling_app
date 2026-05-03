@@ -113,7 +113,7 @@ export default function Layout({ children }) {
           }}
         >
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-            CV Explorer v1.0
+            CV Explorer v{__APP_VERSION__}
             <br />
             Built on Databricks
           </div>
