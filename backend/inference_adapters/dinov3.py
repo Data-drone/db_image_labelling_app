@@ -50,9 +50,25 @@ class DinOv3Adapter(InferenceAdapter):
             log.warning("DINOv3 endpoint returned no predictions")
             return None
 
-        embedding = predictions[0] if isinstance(predictions[0], list) else predictions[0].get("embedding")
-        if not embedding or not isinstance(embedding, list):
+        pred = predictions[0]
+        if isinstance(pred, list):
+            return pred
+
+        embedding = pred.get("embedding") if isinstance(pred, dict) else None
+        if embedding is None:
             log.warning("DINOv3 prediction missing embedding field")
+            return None
+
+        if isinstance(embedding, str):
+            import json as _json
+            try:
+                embedding = _json.loads(embedding)
+            except (ValueError, TypeError):
+                log.warning("DINOv3 embedding field is not valid JSON: %s", embedding[:100])
+                return None
+
+        if not isinstance(embedding, list):
+            log.warning("DINOv3 embedding field is not a list: %s", type(embedding).__name__)
             return None
 
         return embedding
