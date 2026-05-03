@@ -338,7 +338,8 @@ def generate_embeddings(
 
     def _sse_generator():
         from ..deps import is_lakebase, get_session_factory
-        from ..embeddings import set_sample_embedding
+        from ..embeddings import set_sample_embedding, _prefetch_images
+        from ..inference_adapters.dinov3 import BATCH_SIZE
 
         if is_lakebase():
             from ..lakebase import get_session
@@ -357,43 +358,58 @@ def generate_embeddings(
             total = len(samples)
             completed = failed = skipped = 0
 
+            eligible = []
+            for sample in samples:
+                if not force and sample.embedding is not None:
+                    skipped += 1
+                else:
+                    eligible.append(sample)
+
+            processed = skipped
+
             def _emit(event: str, data: dict) -> str:
                 return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-            yield _emit("progress", {"completed": 0, "failed": 0, "skipped": 0, "total": total, "current": 0})
+            yield _emit("progress", {"completed": 0, "failed": 0, "skipped": skipped, "total": total, "current": processed})
 
-            for idx, sample in enumerate(samples, 1):
-                if not force and sample.embedding is not None:
-                    skipped += 1
-                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                    continue
+            for batch_start in range(0, len(eligible), BATCH_SIZE):
+                batch = eligible[batch_start:batch_start + BATCH_SIZE]
 
-                img = read_image_bytes(sample.filepath)
-                if not img:
-                    failed += 1
-                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                    continue
+                images = _prefetch_images(batch)
 
-                try:
-                    embedding = adapter.query_embedding(endpoint_name, img, ep_config)
-                except Exception as exc:
-                    log.warning("Embedding failed for sample %d: %s", sample.id, exc)
-                    failed += 1
-                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                    continue
+                ready_samples = []
+                ready_bytes = []
+                for s in batch:
+                    img = images.get(s.id)
+                    if not img:
+                        failed += 1
+                        processed += 1
+                    else:
+                        ready_samples.append(s)
+                        ready_bytes.append(img)
 
-                if embedding is None:
-                    failed += 1
-                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                    continue
+                if ready_bytes:
+                    try:
+                        embeddings = adapter.batch_query_embedding(
+                            endpoint_name, ready_bytes, ep_config,
+                        )
+                    except Exception as exc:
+                        log.warning("Batch embedding failed: %s", exc)
+                        failed += len(ready_samples)
+                        processed += len(ready_samples)
+                        embeddings = []
 
-                set_sample_embedding(sample, embedding, gen_db)
-                completed += 1
+                    for s, emb in zip(ready_samples, embeddings):
+                        if emb is None:
+                            failed += 1
+                        else:
+                            set_sample_embedding(s, emb, gen_db)
+                            completed += 1
+                        processed += 1
 
-                if completed % 25 == 0:
                     gen_db.flush()
 
-                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": processed})
 
             gen_db.commit()
             yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
