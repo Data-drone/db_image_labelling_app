@@ -109,6 +109,14 @@ def run_preannotate_for_samples(
     if text_prompt:
         endpoint_config["sam_text_prompt"] = text_prompt
 
+    adapter_name = endpoint_config.get("adapter", "generic")
+    log.info(
+        "Pre-annotate batch: project=%s samples=%d endpoint=%s adapter=%s "
+        "embedding_endpoint=%s min_confidence=%s",
+        project.name, len(samples), endpoint_name, adapter_name,
+        embedding_endpoint or "none", endpoint_config.get("min_confidence", "default"),
+    )
+
     created_by = f"model:{endpoint_name}"
     completed = failed = skipped = 0
 
@@ -167,6 +175,14 @@ def run_preannotate_for_samples(
         completed += 1
         if completed % 50 == 0:
             db.flush()
+
+    result = "SUCCESS" if failed == 0 else ("FAILED" if completed == 0 else "PARTIAL")
+    log.info(
+        "Pre-annotate batch done: result=%s completed=%d failed=%d skipped=%d total=%d "
+        "endpoint=%s embedding_endpoint=%s",
+        result, completed, failed, skipped, len(samples),
+        endpoint_name, embedding_endpoint or "none",
+    )
 
     return {
         "completed": completed,
