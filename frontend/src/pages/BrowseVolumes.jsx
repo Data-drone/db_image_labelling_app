@@ -386,7 +386,9 @@ export default function BrowseVolumes() {
             <div style={{ marginBottom: '2rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
                 <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
-                  Files ({totalFiles})
+                  Files {totalFiles > filePageSize
+                    ? `${filePage * filePageSize + 1}–${Math.min((filePage + 1) * filePageSize, totalFiles)} of ${totalFiles}`
+                    : `(${totalFiles})`}
                 </h3>
                 {totalFiles > 0 && (
                   <button
