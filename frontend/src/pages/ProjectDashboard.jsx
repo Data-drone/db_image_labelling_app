@@ -1476,6 +1476,7 @@ export default function ProjectDashboard() {
                     onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
                   >
                     <div
+                      className="sample-thumb-wrap"
                       onClick={() => navigate(`/projects/${projectId}/label?sample=${s.id}`)}
                       style={{ cursor: 'pointer', position: 'relative', paddingTop: '100%' }}
                     >
@@ -1505,6 +1506,32 @@ export default function ProjectDashboard() {
                       }}>
                         {s.status}
                       </span>
+                      {stats?.embedded > 0 && (
+                        <button
+                          className="find-similar-overlay"
+                          onClick={(e) => { e.stopPropagation(); handleFindSimilar(s.id, s.filename); }}
+                          style={{
+                            position: 'absolute', bottom: 4, left: 4,
+                            display: 'flex', alignItems: 'center', gap: '0.25rem',
+                            padding: '0.2rem 0.5rem',
+                            borderRadius: 4,
+                            border: 'none',
+                            background: 'rgba(0,0,0,0.7)',
+                            color: '#fff',
+                            fontSize: '0.65rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            opacity: 0,
+                            transition: 'opacity 0.15s',
+                          }}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="M21 21l-4.35-4.35" />
+                          </svg>
+                          Find Similar
+                        </button>
+                      )}
                     </div>
                     <div style={{ padding: '0.3rem 0.4rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{

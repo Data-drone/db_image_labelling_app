@@ -332,3 +332,8 @@ a:hover {
   border-radius: 8px;
   animation: pulse 1.5s ease-in-out infinite;
 }
+
+/* Show "Find Similar" overlay on thumbnail hover */
+.sample-thumb-wrap:hover .find-similar-overlay {
+  opacity: 1 !important;
+}
