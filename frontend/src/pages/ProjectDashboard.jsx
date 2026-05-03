@@ -12,6 +12,7 @@ import {
   fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun, fetchLatestPreannotateRun,
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
   startEmbeddingRun, fetchEmbeddingRun, fetchLatestEmbeddingRun, fetchSimilarSamples,
+  propagateLabels, detectNearDuplicates,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
@@ -86,6 +87,20 @@ export default function ProjectDashboard() {
   const [similarMode, setSimilarMode] = useState(null);
   const [similarSamples, setSimilarSamples] = useState([]);
   const embeddingPollRef = useRef(null);
+
+  // Label propagation state
+  const [propagating, setPropagating] = useState(false);
+  const [propagateThreshold, setPropagateThreshold] = useState(0.85);
+  const [propagateResult, setPropagateResult] = useState(null);
+  const [propagateError, setPropagateError] = useState('');
+
+  // Near-duplicate detection state
+  const [dupMode, setDupMode] = useState(false);
+  const [dupLoading, setDupLoading] = useState(false);
+  const [dupGroups, setDupGroups] = useState([]);
+  const [dupTotalDuplicates, setDupTotalDuplicates] = useState(0);
+  const [dupThreshold, setDupThreshold] = useState(0.95);
+  const [dupError, setDupError] = useState('');
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -488,6 +503,55 @@ export default function ProjectDashboard() {
     setSimilarSamples([]);
   };
 
+  const handlePropagateLabels = async () => {
+    if (propagating) return;
+    const msg = `Propagate labels from labeled samples to similar unlabeled ones (threshold: ${(propagateThreshold * 100).toFixed(0)}%)?\n\nThis creates draft annotations that you can review before accepting.`;
+    if (!confirm(msg)) return;
+    setPropagating(true);
+    setPropagateError('');
+    setPropagateResult(null);
+    try {
+      const result = await propagateLabels(projectId, {
+        similarity_threshold: propagateThreshold,
+      });
+      setPropagateResult(result);
+      const [st, detailed] = await Promise.all([
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setStats(st);
+      setDetailedStats(detailed);
+      setGalleryPage(0);
+    } catch (e) {
+      setPropagateError(humanizeApiError(e) || e?.response?.data?.detail || 'Label propagation failed');
+    } finally {
+      setPropagating(false);
+    }
+  };
+
+  const handleDetectDuplicates = async () => {
+    setDupLoading(true);
+    setDupError('');
+    setDupGroups([]);
+    setDupTotalDuplicates(0);
+    try {
+      const result = await detectNearDuplicates(projectId, { threshold: dupThreshold });
+      setDupGroups(result.groups);
+      setDupTotalDuplicates(result.total_duplicates);
+      setDupMode(true);
+    } catch (e) {
+      setDupError(humanizeApiError(e) || e?.response?.data?.detail || 'Duplicate detection failed');
+    } finally {
+      setDupLoading(false);
+    }
+  };
+
+  const clearDupMode = () => {
+    setDupMode(false);
+    setDupGroups([]);
+    setDupTotalDuplicates(0);
+  };
+
   // Load gallery
   useEffect(() => {
     if (!project) return;
@@ -715,7 +779,7 @@ export default function ProjectDashboard() {
             )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: project.task_type === 'classification' ? '1fr 1fr 1fr' : '1fr 1fr', minHeight: 0 }}>
             {/* Pre-label section */}
             <div style={{ padding: '0.75rem 1rem', borderRight: '1px solid var(--border-color)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
@@ -821,7 +885,7 @@ export default function ProjectDashboard() {
             </div>
 
             {/* Embeddings section */}
-            <div style={{ padding: '0.75rem 1rem' }}>
+            <div style={{ padding: '0.75rem 1rem', ...(project.task_type === 'classification' ? { borderRight: '1px solid var(--border-color)' } : {}) }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
                 <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Embeddings</span>
                 {stats.embedded > 0 && (
@@ -899,6 +963,75 @@ export default function ProjectDashboard() {
                 </div>
               )}
             </div>
+
+            {/* Label Propagation section — classification only */}
+            {project.task_type === 'classification' && <div style={{ padding: '0.75rem 1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>Propagate Labels</span>
+                {stats.embedded > 0 && stats.labeled > 0 && stats.unlabeled > 0 && (
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    {stats.labeled} → {stats.unlabeled}
+                  </span>
+                )}
+              </div>
+
+              {stats.embedded > 0 && stats.labeled > 0 && stats.unlabeled > 0 ? (
+                <>
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.2rem' }}>
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Threshold</span>
+                      <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                        {(propagateThreshold * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.50"
+                      max="0.99"
+                      step="0.01"
+                      value={propagateThreshold}
+                      onChange={(e) => setPropagateThreshold(parseFloat(e.target.value))}
+                      style={{ width: '100%', accentColor: '#a78bfa' }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: 'var(--text-muted)' }}>
+                      <span>More matches</span>
+                      <span>Higher accuracy</span>
+                    </div>
+                  </div>
+                  <button
+                    className="btn-primary"
+                    onClick={handlePropagateLabels}
+                    disabled={propagating}
+                    style={{ padding: '0.35rem 0.85rem', fontSize: '0.8rem', background: '#7c3aed' }}
+                  >
+                    {propagating ? 'Propagating…' : 'Propagate'}
+                  </button>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                    Copy labels from labeled samples to visually similar unlabeled ones as drafts.
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0.5rem 0' }}>
+                  {stats.embedded === 0
+                    ? 'Generate embeddings first to enable label propagation.'
+                    : stats.labeled === 0
+                      ? 'Label some samples first — propagation copies existing labels.'
+                      : 'All samples are already labeled.'}
+                </div>
+              )}
+
+              {propagateResult && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(124,58,237,0.08)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                  <span style={{ color: '#a78bfa', fontWeight: 600 }}>Done: </span>
+                  {propagateResult.propagated} samples pre-labeled, {propagateResult.skipped} below threshold
+                </div>
+              )}
+              {propagateError && (
+                <div style={{ marginTop: '0.5rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                  {propagateError}
+                </div>
+              )}
+            </div>}
           </div>
 
           {/* Draft actions row */}
@@ -1267,7 +1400,9 @@ export default function ProjectDashboard() {
               <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
                 {similarMode
                   ? <>Similar to <span style={{ color: 'var(--accent-blue)' }}>{similarMode.filename}</span></>
-                  : 'Samples'}
+                  : dupMode
+                    ? <>Near Duplicates <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({dupGroups.length} groups, {dupTotalDuplicates} duplicates)</span></>
+                    : 'Samples'}
               </h3>
               {similarMode ? (
                 <button
@@ -1277,8 +1412,41 @@ export default function ProjectDashboard() {
                 >
                   Back to gallery
                 </button>
+              ) : dupMode ? (
+                <button
+                  className="btn-secondary"
+                  onClick={clearDupMode}
+                  style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                >
+                  Back to gallery
+                </button>
               ) : (
-              <div style={{ display: 'flex', gap: '0.3rem' }}>
+              <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                {stats?.embedded > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginRight: '0.5rem' }}>
+                    <button
+                      className="btn-secondary"
+                      onClick={handleDetectDuplicates}
+                      disabled={dupLoading}
+                      style={{
+                        padding: '0.25rem 0.6rem',
+                        fontSize: '0.75rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        border: '1px solid rgba(249,115,22,0.3)',
+                        color: '#f97316',
+                      }}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="2" y="2" width="8" height="8" rx="1" />
+                        <rect x="14" y="2" width="8" height="8" rx="1" />
+                        <rect x="8" y="14" width="8" height="8" rx="1" />
+                      </svg>
+                      {dupLoading ? 'Scanning…' : 'Find Duplicates'}
+                    </button>
+                  </div>
+                )}
                 {['', 'unlabeled', 'pre_labeled', 'labeled', 'skipped'].map((f) => (
                   <button
                     key={f}
@@ -1299,8 +1467,48 @@ export default function ProjectDashboard() {
               )}
             </div>
 
+            {/* Duplicate threshold control */}
+            {dupMode && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '0.75rem',
+                marginBottom: '0.75rem', padding: '0.5rem 0.75rem',
+                background: 'rgba(249,115,22,0.04)', borderRadius: 6,
+                border: '1px solid rgba(249,115,22,0.15)',
+              }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  Similarity threshold:
+                </span>
+                <input
+                  type="range"
+                  min="0.80"
+                  max="0.99"
+                  step="0.01"
+                  value={dupThreshold}
+                  onChange={(e) => setDupThreshold(parseFloat(e.target.value))}
+                  style={{ flex: 1, maxWidth: 200, accentColor: '#f97316' }}
+                />
+                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#f97316', minWidth: 36 }}>
+                  {(dupThreshold * 100).toFixed(0)}%
+                </span>
+                <button
+                  className="btn-secondary"
+                  onClick={handleDetectDuplicates}
+                  disabled={dupLoading}
+                  style={{ padding: '0.2rem 0.6rem', fontSize: '0.7rem' }}
+                >
+                  {dupLoading ? 'Scanning…' : 'Refresh'}
+                </button>
+              </div>
+            )}
+
+            {dupError && (
+              <div style={{ marginBottom: '0.75rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                {dupError}
+              </div>
+            )}
+
             {/* Search & filter bar */}
-            {!similarMode && <div style={{
+            {!similarMode && !dupMode && <div style={{
               display: 'flex', flexWrap: 'wrap', gap: '0.5rem',
               alignItems: 'center', marginBottom: '0.75rem',
             }}>
@@ -1452,6 +1660,141 @@ export default function ProjectDashboard() {
                   ))}
                 </div>
               )
+            ) : dupMode ? (
+              dupGroups.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
+                  No near-duplicates found at {(dupThreshold * 100).toFixed(0)}% threshold. Try lowering it.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  {dupGroups.map((group) => (
+                    <div
+                      key={group.representative_id}
+                      style={{
+                        padding: '0.75rem',
+                        borderRadius: 8,
+                        border: '1px solid rgba(249,115,22,0.2)',
+                        background: 'rgba(249,115,22,0.02)',
+                      }}
+                    >
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          width: 20, height: 20, borderRadius: '50%',
+                          background: 'rgba(249,115,22,0.15)', color: '#f97316',
+                          fontSize: '0.65rem', fontWeight: 700,
+                        }}>
+                          {group.members.length + 1}
+                        </span>
+                        <span style={{ fontWeight: 600 }}>Group</span>
+                        <span style={{ color: 'var(--text-muted)' }}>— {group.members.length} duplicate{group.members.length !== 1 ? 's' : ''}</span>
+                      </div>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))',
+                        gap: '0.4rem',
+                      }}>
+                        {/* Representative */}
+                        <div
+                          onClick={() => navigate(`/projects/${projectId}/label?sample=${group.representative_id}`)}
+                          style={{
+                            cursor: 'pointer',
+                            borderRadius: 6,
+                            border: '2px solid #f97316',
+                            overflow: 'hidden',
+                            background: 'var(--bg-secondary)',
+                          }}
+                        >
+                          <div style={{ position: 'relative', paddingTop: '100%' }}>
+                            <img
+                              src={sampleThumbnailUrl(projectId, group.representative_id, 200)}
+                              alt={group.representative_filename}
+                              loading="lazy"
+                              style={{
+                                position: 'absolute', top: 0, left: 0,
+                                width: '100%', height: '100%', objectFit: 'cover',
+                              }}
+                            />
+                            <span style={{
+                              position: 'absolute', top: 4, left: 4,
+                              padding: '0.1rem 0.35rem', borderRadius: 3,
+                              fontSize: '0.55rem', fontWeight: 700,
+                              background: '#f97316', color: '#fff',
+                            }}>
+                              ORIGINAL
+                            </span>
+                          </div>
+                          <div style={{ padding: '0.25rem 0.35rem' }}>
+                            <div style={{
+                              fontSize: '0.6rem', color: 'var(--text-secondary)',
+                              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                            }}>
+                              {group.representative_filename}
+                            </div>
+                          </div>
+                        </div>
+                        {/* Duplicate members */}
+                        {group.members.map((m) => (
+                          <div
+                            key={m.sample_id}
+                            onClick={() => navigate(`/projects/${projectId}/label?sample=${m.sample_id}`)}
+                            style={{
+                              cursor: 'pointer',
+                              borderRadius: 6,
+                              border: '1px solid var(--border-color)',
+                              overflow: 'hidden',
+                              background: 'var(--bg-secondary)',
+                              transition: 'border-color 0.15s',
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.borderColor = '#f97316'}
+                            onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                          >
+                            <div style={{ position: 'relative', paddingTop: '100%' }}>
+                              <img
+                                src={sampleThumbnailUrl(projectId, m.sample_id, 200)}
+                                alt={m.filename}
+                                loading="lazy"
+                                style={{
+                                  position: 'absolute', top: 0, left: 0,
+                                  width: '100%', height: '100%', objectFit: 'cover',
+                                }}
+                              />
+                              <span style={{
+                                position: 'absolute', top: 4, left: 4,
+                                padding: '0.1rem 0.35rem', borderRadius: 3,
+                                fontSize: '0.6rem', fontWeight: 600,
+                                background: 'rgba(249,115,22,0.85)', color: '#fff',
+                              }}>
+                                {(m.similarity * 100).toFixed(1)}%
+                              </span>
+                              <span style={{
+                                position: 'absolute', top: 4, right: 4,
+                                padding: '0.1rem 0.35rem', borderRadius: 3,
+                                fontSize: '0.6rem', fontWeight: 600,
+                                background: m.status === 'labeled' ? 'var(--status-success)'
+                                  : m.status === 'pre_labeled' ? '#a78bfa'
+                                  : m.status === 'skipped' ? 'var(--status-warning)'
+                                  : 'rgba(255,255,255,0.15)',
+                                color: m.status === 'unlabeled' ? 'var(--text-muted)' : '#fff',
+                              }}>
+                                {m.status}
+                              </span>
+                            </div>
+                            <div style={{ padding: '0.25rem 0.35rem' }}>
+                              <div style={{
+                                fontSize: '0.6rem', color: 'var(--text-secondary)',
+                                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                              }}>
+                                {m.filename}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
             ) : gallerySamples.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
                 No samples found
@@ -1586,7 +1929,7 @@ export default function ProjectDashboard() {
             )}
 
             {/* Pagination */}
-            {!similarMode && galleryTotalPages > 1 && (
+            {!similarMode && !dupMode && galleryTotalPages > 1 && (
               <div style={{
                 display: 'flex',
                 justifyContent: 'center',

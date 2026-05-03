@@ -230,6 +230,12 @@ export const fetchEmbeddingRun = (projectId, runId) =>
 export const fetchSimilarSamples = (projectId, sampleId, limit = 24) =>
   api.get(`/projects/${projectId}/samples/${sampleId}/similar`, { params: { limit } }).then(r => r.data);
 
+export const propagateLabels = (projectId, params = {}) =>
+  api.post(`/projects/${projectId}/propagate-labels`, params, { timeout: 120000 }).then(r => r.data);
+
+export const detectNearDuplicates = (projectId, params = {}) =>
+  api.get(`/projects/${projectId}/near-duplicates`, { params, timeout: 120000 }).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
