@@ -28,7 +28,6 @@ from ..schemas import (
     PreAnnotateRequest,
     PreAnnotateProgress,
     EmbeddingGenerateRequest,
-    EmbeddingGenerateProgress,
     EndpointStatus,
     InferenceDefaultsOut,
 )
@@ -297,9 +296,12 @@ def generate_embeddings(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Generate embeddings for project samples with SSE progress streaming."""
-    from ..embeddings import resolve_embedding_endpoint, run_embedding_generation
-    from ..inference_adapters import get_embedding_adapter
+    """Start embedding generation. Creates a persistent EmbeddingRun row and
+    runs the work in a background thread so progress survives page reloads."""
+    import threading
+    from ..embeddings import resolve_embedding_endpoint
+    from ..models import EmbeddingRun
+    from ..schemas import EmbeddingRunOut
 
     project = _get_project(project_id, db)
     endpoint_name = resolve_embedding_endpoint(project)
@@ -313,6 +315,10 @@ def generate_embeddings(
             detail=f"Embedding endpoint '{endpoint_name}' is not ready: {health.get('error') or health.get('state', 'unknown')}",
         )
 
+    active = db.query(EmbeddingRun).filter_by(project_id=project_id, status="running").first()
+    if active:
+        return EmbeddingRunOut.model_validate(active)
+
     query = (
         db.query(ProjectSample)
         .filter_by(project_id=project_id)
@@ -325,39 +331,52 @@ def generate_embeddings(
 
     sample_ids = [s.id for s in query.all()]
 
-    wants_sse = "text/event-stream" in (request.headers.get("accept") or "")
+    user_email = ""
+    try:
+        from ..deps import get_user_email
+        user_email = get_user_email(request)
+    except Exception:
+        pass
 
-    if not wants_sse:
-        samples = db.query(ProjectSample).filter(ProjectSample.id.in_(sample_ids)).all()
-        result = run_embedding_generation(db, project, samples, force=payload.force)
-        db.commit()
-        return EmbeddingGenerateProgress(**result)
+    run_row = EmbeddingRun(
+        project_id=project_id,
+        status="running",
+        total_planned=len(sample_ids),
+        force=payload.force,
+        created_by=user_email,
+    )
+    db.add(run_row)
+    db.commit()
+    db.refresh(run_row)
 
+    run_id = run_row.id
     force = payload.force
     ep_config = dict(project.endpoint_config or {})
 
-    def _sse_generator():
+    def _background_worker():
+        from datetime import datetime, timezone
         from ..deps import is_lakebase, get_session_factory
         from ..embeddings import set_sample_embedding, _prefetch_images
+        from ..inference_adapters import get_embedding_adapter as _get_embedding_adapter
         from ..inference_adapters.dinov3 import BATCH_SIZE
+        from ..models import EmbeddingRun as ER
 
         if is_lakebase():
             from ..lakebase import get_session
             gen_db = get_session()
         else:
             gen_db = get_session_factory()()
-        try:
-            adapter = get_embedding_adapter()
 
+        try:
+            adapter = _get_embedding_adapter()
             samples = (
                 gen_db.query(ProjectSample)
                 .filter(ProjectSample.id.in_(sample_ids))
                 .order_by(ProjectSample.id)
                 .all()
             )
-            total = len(samples)
-            completed = failed = skipped = 0
 
+            completed = failed = skipped = 0
             eligible = []
             for sample in samples:
                 if not force and sample.embedding is not None:
@@ -365,16 +384,12 @@ def generate_embeddings(
                 else:
                     eligible.append(sample)
 
-            processed = skipped
-
-            def _emit(event: str, data: dict) -> str:
-                return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-            yield _emit("progress", {"completed": 0, "failed": 0, "skipped": skipped, "total": total, "current": processed})
+            run = gen_db.get(ER, run_id)
+            run.skipped = skipped
+            gen_db.commit()
 
             for batch_start in range(0, len(eligible), BATCH_SIZE):
                 batch = eligible[batch_start:batch_start + BATCH_SIZE]
-
                 images = _prefetch_images(batch)
 
                 ready_samples = []
@@ -383,7 +398,6 @@ def generate_embeddings(
                     img = images.get(s.id)
                     if not img:
                         failed += 1
-                        processed += 1
                     else:
                         ready_samples.append(s)
                         ready_bytes.append(img)
@@ -396,7 +410,6 @@ def generate_embeddings(
                     except Exception as exc:
                         log.warning("Batch embedding failed: %s", exc)
                         failed += len(ready_samples)
-                        processed += len(ready_samples)
                         embeddings = []
 
                     for s, emb in zip(ready_samples, embeddings):
@@ -405,25 +418,55 @@ def generate_embeddings(
                         else:
                             set_sample_embedding(s, emb, gen_db)
                             completed += 1
-                        processed += 1
 
-                    gen_db.flush()
+                run = gen_db.get(ER, run_id)
+                run.completed = completed
+                run.failed = failed
+                gen_db.commit()
 
-                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": processed})
-
+            run = gen_db.get(ER, run_id)
+            run.status = "succeeded"
+            run.finished_at = datetime.now(timezone.utc)
             gen_db.commit()
-            yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
-        except Exception:
-            gen_db.rollback()
-            raise
+
+        except Exception as exc:
+            log.exception("Embedding generation failed for run %d", run_id)
+            try:
+                run = gen_db.get(ER, run_id)
+                if run:
+                    run.status = "failed"
+                    run.error_message = str(exc)[:4000]
+                    run.finished_at = datetime.now(timezone.utc)
+                    gen_db.commit()
+            except Exception:
+                gen_db.rollback()
         finally:
             gen_db.close()
 
-    return StreamingResponse(
-        _sse_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    threading.Thread(target=_background_worker, daemon=True).start()
+    return EmbeddingRunOut.model_validate(run_row)
+
+
+@router.get("/embedding-runs/latest")
+def get_latest_embedding_run(project_id: int, db: Session = Depends(get_db)):
+    from ..models import EmbeddingRun
+    from ..schemas import EmbeddingRunOut
+    _get_project(project_id, db)
+    row = db.query(EmbeddingRun).filter_by(project_id=project_id).order_by(EmbeddingRun.id.desc()).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No embedding runs for this project.")
+    return EmbeddingRunOut.model_validate(row)
+
+
+@router.get("/embedding-runs/{run_id}")
+def get_embedding_run(project_id: int, run_id: int, db: Session = Depends(get_db)):
+    from ..models import EmbeddingRun
+    from ..schemas import EmbeddingRunOut
+    _get_project(project_id, db)
+    row = db.query(EmbeddingRun).filter_by(id=run_id, project_id=project_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Embedding run not found.")
+    return EmbeddingRunOut.model_validate(row)
 
 
 @router.get("/settings")

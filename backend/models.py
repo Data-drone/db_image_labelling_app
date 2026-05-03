@@ -135,6 +135,29 @@ class PreannotateRun(Base):
     )
 
 
+class EmbeddingRun(Base):
+    """Tracks in-app embedding generation runs so progress survives page reloads."""
+
+    __tablename__ = "embedding_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
+    status = Column(String(32), nullable=False, default="running")
+    completed = Column(Integer, default=0, nullable=False)
+    failed = Column(Integer, default=0, nullable=False)
+    skipped = Column(Integer, default=0, nullable=False)
+    total_planned = Column(Integer, default=0, nullable=False)
+    force = Column(Boolean, default=False, nullable=False)
+    error_message = Column(Text, nullable=True)
+    created_by = Column(String(255), default="")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_embedding_runs_project", "project_id"),
+    )
+
+
 class FinetuneRun(Base):
     """Tracks async (Databricks Job) finetuning runs triggered after dataset export."""
 
@@ -188,6 +211,7 @@ TABLE_NAMES = [
     "annotations",
     "annotation_history",
     "preannotate_runs",
+    "embedding_runs",
     "finetune_runs",
 ]
 
