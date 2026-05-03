@@ -323,64 +323,85 @@ def generate_embeddings(
     if payload.max_samples and payload.max_samples > 0:
         query = query.limit(payload.max_samples)
 
-    samples = query.all()
+    sample_ids = [s.id for s in query.all()]
 
     wants_sse = "text/event-stream" in (request.headers.get("accept") or "")
 
     if not wants_sse:
+        samples = db.query(ProjectSample).filter(ProjectSample.id.in_(sample_ids)).all()
         result = run_embedding_generation(db, project, samples, force=payload.force)
         db.commit()
         return EmbeddingGenerateProgress(**result)
 
+    force = payload.force
+    ep_config = dict(project.endpoint_config or {})
+
     def _sse_generator():
+        from ..deps import is_lakebase, get_session_factory
         from ..embeddings import set_sample_embedding
 
-        adapter = get_embedding_adapter()
-        endpoint_config = dict(project.endpoint_config or {})
+        if is_lakebase():
+            from ..lakebase import get_session
+            gen_db = get_session()
+        else:
+            gen_db = get_session_factory()()
+        try:
+            adapter = get_embedding_adapter()
 
-        total = len(samples)
-        completed = failed = skipped = 0
+            samples = (
+                gen_db.query(ProjectSample)
+                .filter(ProjectSample.id.in_(sample_ids))
+                .order_by(ProjectSample.id)
+                .all()
+            )
+            total = len(samples)
+            completed = failed = skipped = 0
 
-        def _emit(event: str, data: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+            def _emit(event: str, data: dict) -> str:
+                return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-        yield _emit("progress", {"completed": 0, "failed": 0, "skipped": 0, "total": total, "current": 0})
+            yield _emit("progress", {"completed": 0, "failed": 0, "skipped": 0, "total": total, "current": 0})
 
-        for idx, sample in enumerate(samples, 1):
-            if not payload.force and sample.embedding is not None:
-                skipped += 1
+            for idx, sample in enumerate(samples, 1):
+                if not force and sample.embedding is not None:
+                    skipped += 1
+                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                    continue
+
+                img = read_image_bytes(sample.filepath)
+                if not img:
+                    failed += 1
+                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                    continue
+
+                try:
+                    embedding = adapter.query_embedding(endpoint_name, img, ep_config)
+                except Exception as exc:
+                    log.warning("Embedding failed for sample %d: %s", sample.id, exc)
+                    failed += 1
+                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                    continue
+
+                if embedding is None:
+                    failed += 1
+                    yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
+                    continue
+
+                set_sample_embedding(sample, embedding, gen_db)
+                completed += 1
+
+                if completed % 25 == 0:
+                    gen_db.flush()
+
                 yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                continue
 
-            img = read_image_bytes(sample.filepath)
-            if not img:
-                failed += 1
-                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                continue
-
-            try:
-                embedding = adapter.query_embedding(endpoint_name, img, endpoint_config)
-            except Exception as exc:
-                log.warning("Embedding failed for sample %d: %s", sample.id, exc)
-                failed += 1
-                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                continue
-
-            if embedding is None:
-                failed += 1
-                yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-                continue
-
-            set_sample_embedding(sample, embedding, db)
-            completed += 1
-
-            if completed % 25 == 0:
-                db.flush()
-
-            yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
-
-        db.commit()
-        yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
+            gen_db.commit()
+            yield _emit("done", {"completed": completed, "failed": failed, "skipped": skipped, "total": total})
+        except Exception:
+            gen_db.rollback()
+            raise
+        finally:
+            gen_db.close()
 
     return StreamingResponse(
         _sse_generator(),
