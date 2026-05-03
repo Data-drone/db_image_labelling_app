@@ -212,6 +212,9 @@ export const fetchVolumes = (catalog, schema) =>
 export const browseDirectory = (path, { page, page_size } = {}) =>
   api.get('/browse', { params: { path, page, page_size } }).then(r => r.data);
 
+export const browseThumbnailUrl = (filePath, size = 120) =>
+  `/api/browse/thumbnail?path=${encodeURIComponent(filePath)}&size=${size}`;
+
 // ---------------------------------------------------------------------------
 // Embeddings / Similarity
 // ---------------------------------------------------------------------------

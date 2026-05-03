@@ -14,6 +14,7 @@ import {
   fetchSchemas,
   fetchVolumes,
   browseDirectory,
+  browseThumbnailUrl,
 } from '../api/client';
 
 export default function BrowseVolumes() {
@@ -49,6 +50,7 @@ export default function BrowseVolumes() {
   const [filePage, setFilePage] = useState(0);
   const filePageSize = 50;
   const [loading, setLoading] = useState(false);
+  const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
 
   // Load catalogs when picker mode is activated
@@ -113,9 +115,13 @@ export default function BrowseVolumes() {
     : '';
 
   // Browse directory
-  const loadDirectory = useCallback(async (pageOverride) => {
+  const loadDirectory = useCallback(async (pageOverride, { isPageChange = false } = {}) => {
     if (!currentPath) return;
-    setLoading(true);
+    if (isPageChange) {
+      setPaging(true);
+    } else {
+      setLoading(true);
+    }
     setError('');
     const page = pageOverride ?? filePage;
     try {
@@ -130,15 +136,16 @@ export default function BrowseVolumes() {
       setTotalFiles(0);
     } finally {
       setLoading(false);
+      setPaging(false);
     }
-  }, [currentPath, filePage]);
+  }, [currentPath]);
 
   const [hasBrowsed, setHasBrowsed] = useState(false);
 
   useEffect(() => {
     if (mode === 'direct' && !hasBrowsed) return;
-    loadDirectory();
-  }, [loadDirectory, mode, hasBrowsed]);
+    loadDirectory(0);
+  }, [currentPath, mode, hasBrowsed]);
 
   // Breadcrumb navigation
   const breadcrumbs = ['Root', ...(subpath ? subpath.split('/') : [])];
@@ -293,7 +300,7 @@ export default function BrowseVolumes() {
         </div>
       )}
 
-      {loading && <Spinner label="Browsing volume..." />}
+      {loading && !paging && <Spinner label="Browsing volume..." />}
 
       {/* Browsing results */}
       {currentPath && (folders.length > 0 || files.length > 0) && (
@@ -395,6 +402,8 @@ export default function BrowseVolumes() {
                 display: 'grid',
                 gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))',
                 gap: '0.75rem',
+                opacity: paging ? 0.5 : 1,
+                transition: 'opacity 0.15s',
               }}>
                 {files.map((file) => {
                   const ext = file.name.split('.').pop()?.toLowerCase();
@@ -407,34 +416,52 @@ export default function BrowseVolumes() {
                         background: 'var(--bg-card)',
                         border: '1px solid var(--border-color)',
                         borderRadius: 8,
-                        padding: '0.6rem 0.4rem',
+                        padding: '0.4rem',
                         textAlign: 'center',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
                       }}
                     >
-                      <svg
-                        width="32"
-                        height="32"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke={isImage ? 'var(--accent-blue)' : isJson ? 'var(--status-warning)' : 'var(--text-muted)'}
-                        strokeWidth="1.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        style={{ marginBottom: '0.3rem' }}
-                      >
-                        {isImage
-                          ? <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          : isJson
+                      {isImage ? (
+                        <img
+                          src={browseThumbnailUrl(file.path, 120)}
+                          alt={file.name}
+                          loading="lazy"
+                          style={{
+                            width: '100%',
+                            height: 80,
+                            objectFit: 'cover',
+                            borderRadius: 4,
+                            marginBottom: '0.3rem',
+                            background: 'var(--bg-hover)',
+                          }}
+                        />
+                      ) : (
+                        <svg
+                          width="32"
+                          height="32"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke={isJson ? 'var(--status-warning)' : 'var(--text-muted)'}
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          style={{ marginBottom: '0.3rem', marginTop: '1rem' }}
+                        >
+                          {isJson
                             ? <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                             : <path d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                        }
-                      </svg>
+                          }
+                        </svg>
+                      )}
                       <div style={{
                         fontSize: '0.65rem',
                         color: 'var(--text-secondary)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
+                        width: '100%',
                       }}>
                         {file.name}
                       </div>
@@ -457,19 +484,27 @@ export default function BrowseVolumes() {
                   }}>
                     <button
                       className="btn-secondary"
-                      onClick={() => setFilePage(p => Math.max(0, p - 1))}
-                      disabled={filePage === 0 || loading}
+                      onClick={() => {
+                        const next = Math.max(0, filePage - 1);
+                        setFilePage(next);
+                        loadDirectory(next, { isPageChange: true });
+                      }}
+                      disabled={filePage === 0 || paging}
                       style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
                     >
                       Prev
                     </button>
                     <span style={{ color: 'var(--text-secondary)' }}>
-                      Page {filePage + 1} / {totalPages}
+                      {paging ? '...' : `Page ${filePage + 1} / ${totalPages}`}
                     </span>
                     <button
                       className="btn-secondary"
-                      onClick={() => setFilePage(p => Math.min(totalPages - 1, p + 1))}
-                      disabled={filePage >= totalPages - 1 || loading}
+                      onClick={() => {
+                        const next = Math.min(totalPages - 1, filePage + 1);
+                        setFilePage(next);
+                        loadDirectory(next, { isPageChange: true });
+                      }}
+                      disabled={filePage >= totalPages - 1 || paging}
                       style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
                     >
                       Next

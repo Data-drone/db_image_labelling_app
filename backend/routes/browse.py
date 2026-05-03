@@ -2,11 +2,13 @@
 Volume and catalog browsing routes — used by the Create Project form.
 """
 
+import io
 import os
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
-from ..volumes import IMAGE_EXTENSIONS, is_volume_path, _get_workspace_client
+from ..volumes import IMAGE_EXTENSIONS, is_volume_path, read_image_bytes, _get_workspace_client
 
 router = APIRouter(prefix="/api", tags=["browse"])
 
@@ -104,3 +106,37 @@ def browse_directory(
             "page": page,
             "page_size": page_size,
         }
+
+
+@router.get("/browse/thumbnail")
+def browse_thumbnail(
+    path: str = Query(...),
+    size: int = Query(120, ge=32, le=400),
+):
+    """Serve a resized thumbnail for a file by its volume/local path.
+
+    Same path-safety rules as browse_directory apply for local files.
+    """
+    ALLOWED_LOCAL_PREFIXES = ("/Volumes/", "/tmp/")
+
+    if not is_volume_path(path):
+        resolved = os.path.realpath(path)
+        if not any(resolved.startswith(prefix) for prefix in ALLOWED_LOCAL_PREFIXES):
+            raise HTTPException(status_code=403, detail="Access denied.")
+
+    data = read_image_bytes(path)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((size, size), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
