@@ -372,3 +372,21 @@ class OutlierDetectionResult(BaseModel):
     total: int
     threshold: float
     outlier_count: int
+
+
+# ---------------------------------------------------------------------------
+# Cluster Map (2D Embedding Projection)
+# ---------------------------------------------------------------------------
+class ClusterMapPoint(BaseModel):
+    sample_id: int
+    filename: str
+    x: float
+    y: float
+    status: str
+    labels: list[str] = []
+
+
+class ClusterMapResult(BaseModel):
+    points: list[ClusterMapPoint]
+    total: int
+    cached: bool = False

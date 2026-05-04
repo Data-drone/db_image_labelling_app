@@ -1,6 +1,6 @@
 """
-Label Propagation, Near-Duplicate Detection, Diversity Sampling, and Outlier Detection
-— powered by DINO embeddings + pgvector.
+Label Propagation, Near-Duplicate Detection, Diversity Sampling, Outlier Detection,
+and Cluster Map (2D Embedding Projection) — powered by DINO embeddings + pgvector.
 """
 
 import logging
@@ -14,6 +14,8 @@ from ..deps import get_db, get_user_email
 from ..models import Annotation, LabelingProject, ProjectSample
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
+    ClusterMapPoint,
+    ClusterMapResult,
     DiversitySampleOut,
     DiversitySamplingResult,
     LabelPropagateRequest,
@@ -835,3 +837,161 @@ def detect_outliers(
             log.warning("pgvector outlier detection failed, falling back to Python: %s", exc)
 
     return _outlier_python(db, project_id, k, percentile)
+
+
+# ---------------------------------------------------------------------------
+# Cluster Map — 2D UMAP projection of embeddings
+# ---------------------------------------------------------------------------
+
+def _compute_umap_projection(embeddings: list[list[float]]) -> list[tuple[float, float]]:
+    """Reduce high-dimensional embeddings to 2D using UMAP (preferred) or t-SNE fallback."""
+    import numpy as np
+
+    matrix = np.array(embeddings, dtype=np.float32)
+    n = len(matrix)
+
+    try:
+        from umap import UMAP
+        n_neighbors = min(15, max(2, n - 1))
+        reducer = UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=0.1, metric="cosine", random_state=42)
+        coords = reducer.fit_transform(matrix)
+    except ImportError:
+        from sklearn.manifold import TSNE
+        perplexity = min(30.0, max(1.0, (n - 1) / 3.0))
+        reducer = TSNE(n_components=2, perplexity=perplexity, metric="cosine", random_state=42, init="pca")
+        coords = reducer.fit_transform(matrix)
+
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+    x_range = x_max - x_min if x_max != x_min else 1.0
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    coords[:, 0] = (coords[:, 0] - x_min) / x_range
+    coords[:, 1] = (coords[:, 1] - y_min) / y_range
+
+    return [(float(coords[i, 0]), float(coords[i, 1])) for i in range(n)]
+
+
+@router.get("/cluster-map", response_model=ClusterMapResult)
+def cluster_map(
+    project_id: int,
+    force: bool = Query(False, description="Recompute projection even if cached"),
+    db: Session = Depends(get_db),
+):
+    """Return 2D coordinates for all embedded samples in a project.
+
+    Uses UMAP (or t-SNE fallback) to project high-dimensional DINO embeddings
+    to 2D. Results are cached on the sample rows (umap_x, umap_y) so subsequent
+    requests return instantly.
+    """
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    samples = (
+        db.query(
+            ProjectSample.id,
+            ProjectSample.filename,
+            ProjectSample.status,
+            ProjectSample.umap_x,
+            ProjectSample.umap_y,
+        )
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .order_by(ProjectSample.id)
+        .all()
+    )
+
+    if not samples:
+        raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+    all_cached = all(s.umap_x is not None and s.umap_y is not None for s in samples)
+
+    if all_cached and not force:
+        sample_ids = [s.id for s in samples]
+        label_rows = (
+            db.query(Annotation.sample_id, Annotation.label)
+            .filter(
+                Annotation.project_id == project_id,
+                Annotation.sample_id.in_(sample_ids),
+                Annotation.is_draft.is_(False),
+            )
+            .all()
+        )
+        labels_map: dict[int, list[str]] = {}
+        for row in label_rows:
+            labels_map.setdefault(row.sample_id, []).append(row.label)
+
+        points = [
+            ClusterMapPoint(
+                sample_id=s.id,
+                filename=s.filename,
+                x=s.umap_x,
+                y=s.umap_y,
+                status=s.status,
+                labels=labels_map.get(s.id, []),
+            )
+            for s in samples
+        ]
+        return ClusterMapResult(points=points, total=len(points), cached=True)
+
+    # Need to load full embeddings for projection
+    full_samples = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .order_by(ProjectSample.id)
+        .all()
+    )
+
+    embeddings = []
+    valid_samples = []
+    for s in full_samples:
+        emb = s.embedding
+        if emb and isinstance(emb, list) and len(emb) > 0:
+            embeddings.append(emb)
+            valid_samples.append(s)
+
+    if len(valid_samples) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 3 embedded samples for projection, found {len(valid_samples)}.",
+        )
+
+    coords = _compute_umap_projection(embeddings)
+
+    for s, (x, y) in zip(valid_samples, coords):
+        s.umap_x = x
+        s.umap_y = y
+
+    db.commit()
+
+    sample_ids = [s.id for s in valid_samples]
+    label_rows = (
+        db.query(Annotation.sample_id, Annotation.label)
+        .filter(
+            Annotation.project_id == project_id,
+            Annotation.sample_id.in_(sample_ids),
+            Annotation.is_draft.is_(False),
+        )
+        .all()
+    )
+    labels_map: dict[int, list[str]] = {}
+    for row in label_rows:
+        labels_map.setdefault(row.sample_id, []).append(row.label)
+
+    points = [
+        ClusterMapPoint(
+            sample_id=s.id,
+            filename=s.filename,
+            x=s.umap_x,
+            y=s.umap_y,
+            status=s.status,
+            labels=labels_map.get(s.id, []),
+        )
+        for s in valid_samples
+    ]
+    return ClusterMapResult(points=points, total=len(points), cached=False)

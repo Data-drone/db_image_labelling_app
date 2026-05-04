@@ -242,6 +242,9 @@ export const fetchDiversityQueue = (projectId, limit = 50) =>
 export const fetchOutliers = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/outliers`, { params, timeout: 120000 }).then(r => r.data);
 
+export const fetchClusterMap = (projectId, { force = false } = {}) =>
+  api.get(`/projects/${projectId}/cluster-map`, { params: { force }, timeout: 300000 }).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
