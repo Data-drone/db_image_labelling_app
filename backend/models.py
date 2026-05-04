@@ -73,6 +73,10 @@ class ProjectSample(Base):
     # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
     embedding_vec = deferred(Column(JSON, nullable=True))  # placeholder type; overridden at runtime for Postgres
 
+    # Cached 2D UMAP projection coordinates (computed from embedding_vec)
+    umap_x = Column(Float, nullable=True)
+    umap_y = Column(Float, nullable=True)
+
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
         "Annotation", back_populates="sample", cascade="all, delete-orphan",
