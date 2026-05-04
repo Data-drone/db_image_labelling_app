@@ -46,6 +46,8 @@ export default function LabelingView() {
   // Sample navigation
   const [sampleList, setSampleList] = useState([]); // [{id, status}, ...]
   const [currentIndex, setCurrentIndex] = useState(-1);
+  const currentIndexRef = useRef(-1);
+  currentIndexRef.current = currentIndex;
 
   // Detection mode state
   const [boxes, setBoxes] = useState([]);
@@ -259,27 +261,33 @@ export default function LabelingView() {
     }
   };
 
-  // After annotating, update local sample list status and advance
+  // After annotating, update local sample list status and advance.
+  // Uses functional updaters so rapid clicks always see latest state.
   const needsWork = (s) => s.status === 'unlabeled' || s.status === 'pre_labeled';
 
   const markCurrentAndAdvance = useCallback(() => {
-    setSampleList(prev => prev.map((s, i) =>
-      i === currentIndex ? { ...s, status: 'labeled' } : s
-    ));
     loadStats();
     if (historyOpen) loadHistory();
-    const nextIdx = sampleList.findIndex((s, i) => i > currentIndex && needsWork(s));
-    if (nextIdx >= 0) {
-      goTo(nextIdx);
-    } else {
-      const wrapped = sampleList.findIndex(s => needsWork(s));
-      if (wrapped >= 0 && wrapped !== currentIndex) {
-        goTo(wrapped);
-      } else if (currentIndex < sampleList.length - 1) {
-        goTo(currentIndex + 1);
+
+    setSampleList(prevList => {
+      const curIdx = currentIndexRef.current;
+      const updated = prevList.map((s, i) =>
+        i === curIdx ? { ...s, status: 'labeled' } : s
+      );
+
+      let nextIdx = updated.findIndex((s, i) => i > curIdx && needsWork(s));
+      if (nextIdx < 0) {
+        nextIdx = updated.findIndex(s => needsWork(s));
       }
-    }
-  }, [currentIndex, sampleList, loadStats, historyOpen, loadHistory]);
+      if (nextIdx < 0 || nextIdx === curIdx) {
+        nextIdx = curIdx < updated.length - 1 ? curIdx + 1 : -1;
+      }
+      if (nextIdx >= 0 && nextIdx !== curIdx) {
+        setCurrentIndex(nextIdx);
+      }
+      return updated;
+    });
+  }, [loadStats, historyOpen, loadHistory]);
 
   // Multi-label classification: toggle a label on/off
   const toggleLabel = useCallback((label) => {
@@ -318,11 +326,12 @@ export default function LabelingView() {
     setActionError('');
     try {
       await skipSample(projectId, sample.id);
+      const curIdx = currentIndexRef.current;
       setSampleList(prev => prev.map((s, i) =>
-        i === currentIndex ? { ...s, status: 'skipped' } : s
+        i === curIdx ? { ...s, status: 'skipped' } : s
       ));
       loadStats();
-      goNext();
+      setCurrentIndex(prev => prev < sampleList.length - 1 ? prev + 1 : prev);
     } catch (err) {
       console.error('Skip failed:', err);
       setActionError(humanizeApiError(err));
