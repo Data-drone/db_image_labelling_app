@@ -853,7 +853,10 @@ def _compute_umap_projection(embeddings: list[list[float]]) -> list[tuple[float,
     try:
         from umap import UMAP
         n_neighbors = min(15, max(2, n - 1))
-        reducer = UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=0.1, metric="cosine", random_state=42)
+        reducer = UMAP(
+            n_components=2, n_neighbors=n_neighbors, min_dist=0.1,
+            metric="cosine", random_state=42, n_jobs=1, low_memory=True,
+        )
         coords = reducer.fit_transform(matrix)
     except ImportError:
         from sklearn.manifold import TSNE
@@ -949,55 +952,79 @@ def cluster_map(
         except Exception:
             db.rollback()
 
-    # Load full embeddings for projection
-    full_samples = (
-        db.query(
-            ProjectSample.id,
-            ProjectSample.filename,
-            ProjectSample.status,
-            ProjectSample.embedding,
-        )
-        .filter(
-            ProjectSample.project_id == project_id,
-            ProjectSample.embedding.isnot(None),
-        )
-        .order_by(ProjectSample.id)
-        .all()
-    )
+    # Load embeddings via raw SQL for speed (avoids ORM overhead on large JSON blobs).
+    # Prefer embedding_vec (pgvector native) if available, fall back to JSON embedding.
+    use_pgvec = _is_pgvector(db)
+    if use_pgvec:
+        try:
+            emb_rows = db.execute(text(
+                "SELECT id, filename, status, embedding_vec::text AS emb_text "
+                "FROM project_samples "
+                "WHERE project_id = :pid AND embedding_vec IS NOT NULL "
+                "ORDER BY id"
+            ), {"pid": project_id}).fetchall()
+        except Exception:
+            db.rollback()
+            use_pgvec = False
 
-    if not full_samples:
+    if not use_pgvec:
+        emb_rows = db.execute(text(
+            "SELECT id, filename, status, embedding::text AS emb_text "
+            "FROM project_samples "
+            "WHERE project_id = :pid AND embedding IS NOT NULL "
+            "ORDER BY id"
+        ), {"pid": project_id}).fetchall()
+
+    if not emb_rows:
         raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
 
-    embeddings = []
-    valid_samples = []
-    for s in full_samples:
-        emb = s.embedding
-        if emb and isinstance(emb, list) and len(emb) > 0:
-            embeddings.append(emb)
-            valid_samples.append(s)
+    import json as _json
 
-    if len(valid_samples) < 3:
+    sample_meta = []
+    embeddings = []
+    for r in emb_rows:
+        try:
+            raw = r.emb_text
+            if raw.startswith("["):
+                emb = _json.loads(raw)
+            else:
+                emb = [float(x) for x in raw.strip("[]").split(",")]
+            if len(emb) > 0:
+                embeddings.append(emb)
+                sample_meta.append({"id": r.id, "filename": r.filename, "status": r.status})
+        except Exception:
+            continue
+
+    if len(sample_meta) < 3:
         raise HTTPException(
             status_code=400,
-            detail=f"Need at least 3 embedded samples for projection, found {len(valid_samples)}.",
+            detail=f"Need at least 3 embedded samples for projection, found {len(sample_meta)}.",
         )
 
     coords = _compute_umap_projection(embeddings)
 
-    # Try to cache results if columns exist
+    # Cache results in batches for speed
     if can_cache:
         try:
-            for s, (x, y) in zip(valid_samples, coords):
-                db.execute(
-                    text("UPDATE project_samples SET umap_x = :x, umap_y = :y WHERE id = :id"),
-                    {"x": x, "y": y, "id": s.id},
+            batch_size = 500
+            for i in range(0, len(sample_meta), batch_size):
+                batch = sample_meta[i:i + batch_size]
+                batch_coords = coords[i:i + batch_size]
+                values = ", ".join(
+                    f"({s['id']}, {x}, {y})"
+                    for s, (x, y) in zip(batch, batch_coords)
                 )
+                db.execute(text(
+                    f"UPDATE project_samples AS ps SET umap_x = v.x, umap_y = v.y "
+                    f"FROM (VALUES {values}) AS v(id, x, y) "
+                    f"WHERE ps.id = v.id"
+                ))
             db.commit()
         except Exception:
             db.rollback()
-            log.warning("Could not cache UMAP coordinates (columns may not exist)")
+            log.warning("Could not cache UMAP coordinates")
 
-    sample_ids = [s.id for s in valid_samples]
+    sample_ids = [s["id"] for s in sample_meta]
     label_rows = (
         db.query(Annotation.sample_id, Annotation.label)
         .filter(
@@ -1013,13 +1040,13 @@ def cluster_map(
 
     points = [
         ClusterMapPoint(
-            sample_id=s.id,
-            filename=s.filename,
+            sample_id=s["id"],
+            filename=s["filename"],
             x=coords[i][0],
             y=coords[i][1],
-            status=s.status,
-            labels=labels_map.get(s.id, []),
+            status=s["status"],
+            labels=labels_map.get(s["id"], []),
         )
-        for i, s in enumerate(valid_samples)
+        for i, s in enumerate(sample_meta)
     ]
     return ClusterMapResult(points=points, total=len(points), cached=False)
