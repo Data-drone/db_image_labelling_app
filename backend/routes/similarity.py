@@ -871,6 +871,18 @@ def _compute_umap_projection(embeddings: list[list[float]]) -> list[tuple[float,
     return [(float(coords[i, 0]), float(coords[i, 1])) for i in range(n)]
 
 
+def _umap_columns_exist(db: Session) -> bool:
+    """Check if umap_x/umap_y columns exist in the database."""
+    try:
+        db.execute(text(
+            "SELECT umap_x FROM project_samples LIMIT 0"
+        ))
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
 @router.get("/cluster-map", response_model=ClusterMapResult)
 def cluster_map(
     project_id: int,
@@ -881,19 +893,69 @@ def cluster_map(
 
     Uses UMAP (or t-SNE fallback) to project high-dimensional DINO embeddings
     to 2D. Results are cached on the sample rows (umap_x, umap_y) so subsequent
-    requests return instantly.
+    requests return instantly. Falls back to computing without caching if
+    the cache columns don't exist in the database.
     """
     project = db.query(LabelingProject).filter_by(id=project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    samples = (
+    can_cache = _umap_columns_exist(db)
+
+    # Try to serve from cache if columns exist
+    if can_cache and not force:
+        try:
+            rows = db.execute(text(
+                "SELECT id, filename, status, umap_x, umap_y "
+                "FROM project_samples "
+                "WHERE project_id = :pid AND embedding IS NOT NULL "
+                "ORDER BY id"
+            ), {"pid": project_id}).fetchall()
+
+            if not rows:
+                raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+            all_cached = all(r.umap_x is not None and r.umap_y is not None for r in rows)
+
+            if all_cached:
+                sample_ids = [r.id for r in rows]
+                label_rows = (
+                    db.query(Annotation.sample_id, Annotation.label)
+                    .filter(
+                        Annotation.project_id == project_id,
+                        Annotation.sample_id.in_(sample_ids),
+                        Annotation.is_draft.is_(False),
+                    )
+                    .all()
+                )
+                labels_map: dict[int, list[str]] = {}
+                for row in label_rows:
+                    labels_map.setdefault(row.sample_id, []).append(row.label)
+
+                points = [
+                    ClusterMapPoint(
+                        sample_id=r.id,
+                        filename=r.filename,
+                        x=r.umap_x,
+                        y=r.umap_y,
+                        status=r.status,
+                        labels=labels_map.get(r.id, []),
+                    )
+                    for r in rows
+                ]
+                return ClusterMapResult(points=points, total=len(points), cached=True)
+        except HTTPException:
+            raise
+        except Exception:
+            db.rollback()
+
+    # Load full embeddings for projection
+    full_samples = (
         db.query(
             ProjectSample.id,
             ProjectSample.filename,
             ProjectSample.status,
-            ProjectSample.umap_x,
-            ProjectSample.umap_y,
+            ProjectSample.embedding,
         )
         .filter(
             ProjectSample.project_id == project_id,
@@ -903,49 +965,8 @@ def cluster_map(
         .all()
     )
 
-    if not samples:
+    if not full_samples:
         raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
-
-    all_cached = all(s.umap_x is not None and s.umap_y is not None for s in samples)
-
-    if all_cached and not force:
-        sample_ids = [s.id for s in samples]
-        label_rows = (
-            db.query(Annotation.sample_id, Annotation.label)
-            .filter(
-                Annotation.project_id == project_id,
-                Annotation.sample_id.in_(sample_ids),
-                Annotation.is_draft.is_(False),
-            )
-            .all()
-        )
-        labels_map: dict[int, list[str]] = {}
-        for row in label_rows:
-            labels_map.setdefault(row.sample_id, []).append(row.label)
-
-        points = [
-            ClusterMapPoint(
-                sample_id=s.id,
-                filename=s.filename,
-                x=s.umap_x,
-                y=s.umap_y,
-                status=s.status,
-                labels=labels_map.get(s.id, []),
-            )
-            for s in samples
-        ]
-        return ClusterMapResult(points=points, total=len(points), cached=True)
-
-    # Need to load full embeddings for projection
-    full_samples = (
-        db.query(ProjectSample)
-        .filter(
-            ProjectSample.project_id == project_id,
-            ProjectSample.embedding.isnot(None),
-        )
-        .order_by(ProjectSample.id)
-        .all()
-    )
 
     embeddings = []
     valid_samples = []
@@ -963,11 +984,18 @@ def cluster_map(
 
     coords = _compute_umap_projection(embeddings)
 
-    for s, (x, y) in zip(valid_samples, coords):
-        s.umap_x = x
-        s.umap_y = y
-
-    db.commit()
+    # Try to cache results if columns exist
+    if can_cache:
+        try:
+            for s, (x, y) in zip(valid_samples, coords):
+                db.execute(
+                    text("UPDATE project_samples SET umap_x = :x, umap_y = :y WHERE id = :id"),
+                    {"x": x, "y": y, "id": s.id},
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.warning("Could not cache UMAP coordinates (columns may not exist)")
 
     sample_ids = [s.id for s in valid_samples]
     label_rows = (
@@ -987,11 +1015,11 @@ def cluster_map(
         ClusterMapPoint(
             sample_id=s.id,
             filename=s.filename,
-            x=s.umap_x,
-            y=s.umap_y,
+            x=coords[i][0],
+            y=coords[i][1],
             status=s.status,
             labels=labels_map.get(s.id, []),
         )
-        for s in valid_samples
+        for i, s in enumerate(valid_samples)
     ]
     return ClusterMapResult(points=points, total=len(points), cached=False)
