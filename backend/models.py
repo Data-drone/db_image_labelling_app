@@ -73,6 +73,11 @@ class ProjectSample(Base):
     # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
     embedding_vec = deferred(Column(JSON, nullable=True))  # placeholder type; overridden at runtime for Postgres
 
+    # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
+    # columns in the DB but NOT mapped here — they're managed via raw SQL in
+    # the cluster-map endpoint to avoid breaking queries when the columns
+    # can't be added (e.g. insufficient table ownership on Lakebase).
+
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
         "Annotation", back_populates="sample", cascade="all, delete-orphan",
@@ -488,6 +493,25 @@ def _ensure_embedding_hnsw_index(engine) -> None:
         log.warning("Could not create HNSW index: %s", e)
 
 
+def _ensure_umap_columns(engine) -> None:
+    """Add umap_x/umap_y cache columns to project_samples if possible.
+
+    These columns are not in the ORM model to avoid breaking queries when
+    they can't be created (e.g. insufficient table ownership on Lakebase).
+    """
+    from sqlalchemy import text
+
+    for col in ("umap_x", "umap_y"):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f'ALTER TABLE "project_samples" ADD COLUMN "{col}" FLOAT NULL'
+                ))
+            log.info("Added project_samples.%s column", col)
+        except Exception:
+            pass  # Column already exists or insufficient privileges
+
+
 def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
     _reassign_table_ownership(engine, TABLE_NAMES)
@@ -499,6 +523,7 @@ def init_db(engine):
     _ensure_missing_columns(engine)
     ensure_annotations_is_draft_column(engine)
     ensure_preannotate_runs_table(engine)
+    _ensure_umap_columns(engine)
 
     if pgvector_available:
         _ensure_pgvector(engine)

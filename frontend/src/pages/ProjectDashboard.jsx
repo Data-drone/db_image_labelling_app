@@ -14,9 +14,11 @@ import {
   startEmbeddingRun, fetchEmbeddingRun, fetchLatestEmbeddingRun, fetchSimilarSamples,
   propagateLabels, detectNearDuplicates,
   fetchDiversityQueue, fetchOutliers,
+  fetchClusterMap,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
+import ClusterMap from '../components/ClusterMap';
 
 export default function ProjectDashboard() {
   const { id: projectId } = useParams();
@@ -114,6 +116,12 @@ export default function ProjectDashboard() {
   const [outlierData, setOutlierData] = useState(null);
   const [outlierError, setOutlierError] = useState('');
   const [outlierIds, setOutlierIds] = useState(new Set());
+
+  // Cluster map state
+  const [viewMode, setViewMode] = useState('gallery'); // 'gallery' | 'cluster'
+  const [clusterPoints, setClusterPoints] = useState(null);
+  const [clusterLoading, setClusterLoading] = useState(false);
+  const [clusterError, setClusterError] = useState('');
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -624,6 +632,30 @@ export default function ProjectDashboard() {
   }, [project, projectId, galleryPage, galleryFilter, filterLabel, filterLabeler, filterFilename]);
 
   const galleryTotalPages = Math.ceil(galleryTotal / galleryPageSize);
+
+  // Load cluster map data when switching to cluster view
+  useEffect(() => {
+    if (viewMode !== 'cluster' || !project || clusterPoints) return;
+    setClusterLoading(true);
+    setClusterError('');
+    fetchClusterMap(projectId)
+      .then((data) => setClusterPoints(data.points))
+      .catch((err) => setClusterError(humanizeApiError(err) || 'Failed to load cluster map'))
+      .finally(() => setClusterLoading(false));
+  }, [viewMode, project, projectId, clusterPoints]);
+
+  const handleClusterRefresh = async () => {
+    setClusterLoading(true);
+    setClusterError('');
+    try {
+      const data = await fetchClusterMap(projectId, { force: true });
+      setClusterPoints(data.points);
+    } catch (err) {
+      setClusterError(humanizeApiError(err) || 'Failed to recompute cluster map');
+    } finally {
+      setClusterLoading(false);
+    }
+  };
 
   const startEditing = () => {
     setEditForm({
@@ -1478,18 +1510,62 @@ export default function ProjectDashboard() {
             </div>
           )}
 
-          {/* Sample Gallery */}
+          {/* Sample Gallery / Cluster Map */}
           <div className="card" style={{ marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-              <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
-                {similarMode
-                  ? <>Similar to <span style={{ color: 'var(--accent-blue)' }}>{similarMode.filename}</span></>
-                  : dupMode
-                    ? <>Near Duplicates <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({dupGroups.length} groups, {dupTotalDuplicates} duplicates)</span></>
-                  : outlierMode && outlierData
-                    ? <>Outliers <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({outlierData.outlier_count} flagged of {outlierData.total})</span></>
-                    : 'Samples'}
-              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
+                  {similarMode
+                    ? <>Similar to <span style={{ color: 'var(--accent-blue)' }}>{similarMode.filename}</span></>
+                    : dupMode
+                      ? <>Near Duplicates <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({dupGroups.length} groups, {dupTotalDuplicates} duplicates)</span></>
+                    : outlierMode && outlierData
+                      ? <>Outliers <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 400 }}>({outlierData.outlier_count} flagged of {outlierData.total})</span></>
+                      : 'Samples'}
+                </h3>
+                {!similarMode && !dupMode && !outlierMode && stats?.embedded > 0 && (
+                  <div style={{
+                    display: 'flex', borderRadius: 6, overflow: 'hidden',
+                    border: '1px solid var(--border-color)',
+                  }}>
+                    <button
+                      onClick={() => setViewMode('gallery')}
+                      style={{
+                        padding: '0.2rem 0.5rem', fontSize: '0.7rem', border: 'none', cursor: 'pointer',
+                        background: viewMode === 'gallery' ? 'var(--accent-blue)' : 'var(--bg-secondary)',
+                        color: viewMode === 'gallery' ? '#fff' : 'var(--text-secondary)',
+                        display: 'flex', alignItems: 'center', gap: '0.25rem',
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="3" width="7" height="7" />
+                        <rect x="14" y="3" width="7" height="7" />
+                        <rect x="3" y="14" width="7" height="7" />
+                        <rect x="14" y="14" width="7" height="7" />
+                      </svg>
+                      Gallery
+                    </button>
+                    <button
+                      onClick={() => setViewMode('cluster')}
+                      style={{
+                        padding: '0.2rem 0.5rem', fontSize: '0.7rem', border: 'none', cursor: 'pointer',
+                        background: viewMode === 'cluster' ? 'var(--accent-blue)' : 'var(--bg-secondary)',
+                        color: viewMode === 'cluster' ? '#fff' : 'var(--text-secondary)',
+                        display: 'flex', alignItems: 'center', gap: '0.25rem',
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="7.5" cy="7.5" r="2.5" />
+                        <circle cx="16.5" cy="7.5" r="2.5" />
+                        <circle cx="12" cy="16.5" r="2.5" />
+                        <circle cx="4" cy="14" r="1.5" />
+                        <circle cx="20" cy="14" r="1.5" />
+                      </svg>
+                      Cluster Map
+                    </button>
+                  </div>
+                )}
+              </div>
               {similarMode ? (
                 <button
                   className="btn-secondary"
@@ -1627,6 +1703,33 @@ export default function ProjectDashboard() {
                 {outlierError}
               </div>
             )}
+
+            {clusterError && viewMode === 'cluster' && (
+              <div style={{ marginBottom: '0.75rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
+                {clusterError}
+              </div>
+            )}
+
+            {/* Cluster Map view */}
+            {viewMode === 'cluster' && !similarMode && !dupMode && !outlierMode ? (
+              clusterLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: '3rem 0' }}>
+                  <Spinner /> <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Computing embedding projection...</span>
+                </div>
+              ) : clusterPoints && clusterPoints.length > 0 ? (
+                <ClusterMap
+                  projectId={projectId}
+                  points={clusterPoints}
+                  onForceRefresh={handleClusterRefresh}
+                  refreshing={clusterLoading}
+                />
+              ) : !clusterError ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem 0', textAlign: 'center' }}>
+                  No embedded samples available for cluster visualization.
+                </div>
+              ) : null
+            ) : (
+            <>
 
             {/* Search & filter bar */}
             {!similarMode && !dupMode && !outlierMode && <div style={{
@@ -2175,6 +2278,9 @@ export default function ProjectDashboard() {
                   Next
                 </button>
               </div>
+            )}
+
+            </>
             )}
           </div>
 

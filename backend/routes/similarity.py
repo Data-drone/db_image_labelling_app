@@ -1,6 +1,6 @@
 """
-Label Propagation, Near-Duplicate Detection, Diversity Sampling, and Outlier Detection
-— powered by DINO embeddings + pgvector.
+Label Propagation, Near-Duplicate Detection, Diversity Sampling, Outlier Detection,
+and Cluster Map (2D Embedding Projection) — powered by DINO embeddings + pgvector.
 """
 
 import logging
@@ -14,6 +14,8 @@ from ..deps import get_db, get_user_email
 from ..models import Annotation, LabelingProject, ProjectSample
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
+    ClusterMapPoint,
+    ClusterMapResult,
     DiversitySampleOut,
     DiversitySamplingResult,
     LabelPropagateRequest,
@@ -835,3 +837,216 @@ def detect_outliers(
             log.warning("pgvector outlier detection failed, falling back to Python: %s", exc)
 
     return _outlier_python(db, project_id, k, percentile)
+
+
+# ---------------------------------------------------------------------------
+# Cluster Map — 2D UMAP projection of embeddings
+# ---------------------------------------------------------------------------
+
+def _compute_umap_projection(embeddings: list[list[float]]) -> list[tuple[float, float]]:
+    """Reduce high-dimensional embeddings to 2D using UMAP (preferred) or t-SNE fallback."""
+    import numpy as np
+
+    matrix = np.array(embeddings, dtype=np.float32)
+    n = len(matrix)
+
+    try:
+        from umap import UMAP
+        n_neighbors = min(15, max(2, n - 1))
+        reducer = UMAP(
+            n_components=2, n_neighbors=n_neighbors, min_dist=0.1,
+            metric="cosine", random_state=42, n_jobs=1, low_memory=True,
+        )
+        coords = reducer.fit_transform(matrix)
+    except ImportError:
+        from sklearn.manifold import TSNE
+        perplexity = min(30.0, max(1.0, (n - 1) / 3.0))
+        reducer = TSNE(n_components=2, perplexity=perplexity, metric="cosine", random_state=42, init="pca")
+        coords = reducer.fit_transform(matrix)
+
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+    x_range = x_max - x_min if x_max != x_min else 1.0
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    coords[:, 0] = (coords[:, 0] - x_min) / x_range
+    coords[:, 1] = (coords[:, 1] - y_min) / y_range
+
+    return [(float(coords[i, 0]), float(coords[i, 1])) for i in range(n)]
+
+
+def _umap_columns_exist(db: Session) -> bool:
+    """Check if umap_x/umap_y columns exist in the database."""
+    try:
+        db.execute(text(
+            "SELECT umap_x FROM project_samples LIMIT 0"
+        ))
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
+@router.get("/cluster-map", response_model=ClusterMapResult)
+def cluster_map(
+    project_id: int,
+    force: bool = Query(False, description="Recompute projection even if cached"),
+    db: Session = Depends(get_db),
+):
+    """Return 2D coordinates for all embedded samples in a project.
+
+    Uses UMAP (or t-SNE fallback) to project high-dimensional DINO embeddings
+    to 2D. Results are cached on the sample rows (umap_x, umap_y) so subsequent
+    requests return instantly. Falls back to computing without caching if
+    the cache columns don't exist in the database.
+    """
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    can_cache = _umap_columns_exist(db)
+
+    # Try to serve from cache if columns exist
+    if can_cache and not force:
+        try:
+            rows = db.execute(text(
+                "SELECT id, filename, status, umap_x, umap_y "
+                "FROM project_samples "
+                "WHERE project_id = :pid AND embedding IS NOT NULL "
+                "ORDER BY id"
+            ), {"pid": project_id}).fetchall()
+
+            if not rows:
+                raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+            all_cached = all(r.umap_x is not None and r.umap_y is not None for r in rows)
+
+            if all_cached:
+                sample_ids = [r.id for r in rows]
+                label_rows = (
+                    db.query(Annotation.sample_id, Annotation.label)
+                    .filter(
+                        Annotation.project_id == project_id,
+                        Annotation.sample_id.in_(sample_ids),
+                        Annotation.is_draft.is_(False),
+                    )
+                    .all()
+                )
+                labels_map: dict[int, list[str]] = {}
+                for row in label_rows:
+                    labels_map.setdefault(row.sample_id, []).append(row.label)
+
+                points = [
+                    ClusterMapPoint(
+                        sample_id=r.id,
+                        filename=r.filename,
+                        x=r.umap_x,
+                        y=r.umap_y,
+                        status=r.status,
+                        labels=labels_map.get(r.id, []),
+                    )
+                    for r in rows
+                ]
+                return ClusterMapResult(points=points, total=len(points), cached=True)
+        except HTTPException:
+            raise
+        except Exception:
+            db.rollback()
+
+    # Load embeddings via raw SQL for speed (avoids ORM overhead on large JSON blobs).
+    # Prefer embedding_vec (pgvector native) if available, fall back to JSON embedding.
+    use_pgvec = _is_pgvector(db)
+    if use_pgvec:
+        try:
+            emb_rows = db.execute(text(
+                "SELECT id, filename, status, embedding_vec::text AS emb_text "
+                "FROM project_samples "
+                "WHERE project_id = :pid AND embedding_vec IS NOT NULL "
+                "ORDER BY id"
+            ), {"pid": project_id}).fetchall()
+        except Exception:
+            db.rollback()
+            use_pgvec = False
+
+    if not use_pgvec:
+        emb_rows = db.execute(text(
+            "SELECT id, filename, status, embedding::text AS emb_text "
+            "FROM project_samples "
+            "WHERE project_id = :pid AND embedding IS NOT NULL "
+            "ORDER BY id"
+        ), {"pid": project_id}).fetchall()
+
+    if not emb_rows:
+        raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+    import json as _json
+
+    sample_meta = []
+    embeddings = []
+    for r in emb_rows:
+        try:
+            raw = r.emb_text
+            if raw.startswith("["):
+                emb = _json.loads(raw)
+            else:
+                emb = [float(x) for x in raw.strip("[]").split(",")]
+            if len(emb) > 0:
+                embeddings.append(emb)
+                sample_meta.append({"id": r.id, "filename": r.filename, "status": r.status})
+        except Exception:
+            continue
+
+    if len(sample_meta) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 3 embedded samples for projection, found {len(sample_meta)}.",
+        )
+
+    coords = _compute_umap_projection(embeddings)
+
+    # Cache results in batches for speed
+    if can_cache:
+        try:
+            batch_size = 500
+            for i in range(0, len(sample_meta), batch_size):
+                batch = sample_meta[i:i + batch_size]
+                batch_coords = coords[i:i + batch_size]
+                values = ", ".join(
+                    f"({s['id']}, {x}, {y})"
+                    for s, (x, y) in zip(batch, batch_coords)
+                )
+                db.execute(text(
+                    f"UPDATE project_samples AS ps SET umap_x = v.x, umap_y = v.y "
+                    f"FROM (VALUES {values}) AS v(id, x, y) "
+                    f"WHERE ps.id = v.id"
+                ))
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.warning("Could not cache UMAP coordinates")
+
+    sample_ids = [s["id"] for s in sample_meta]
+    label_rows = (
+        db.query(Annotation.sample_id, Annotation.label)
+        .filter(
+            Annotation.project_id == project_id,
+            Annotation.sample_id.in_(sample_ids),
+            Annotation.is_draft.is_(False),
+        )
+        .all()
+    )
+    labels_map: dict[int, list[str]] = {}
+    for row in label_rows:
+        labels_map.setdefault(row.sample_id, []).append(row.label)
+
+    points = [
+        ClusterMapPoint(
+            sample_id=s["id"],
+            filename=s["filename"],
+            x=coords[i][0],
+            y=coords[i][1],
+            status=s["status"],
+            labels=labels_map.get(s["id"], []),
+        )
+        for i, s in enumerate(sample_meta)
+    ]
+    return ClusterMapResult(points=points, total=len(points), cached=False)
