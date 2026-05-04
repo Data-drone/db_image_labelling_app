@@ -72,6 +72,12 @@ class ProjectSample(Base):
     # Native pgvector column for indexed similarity search (Postgres only).
     # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
     embedding_vec = deferred(Column(JSON, nullable=True))  # placeholder type; overridden at runtime for Postgres
+    prediction_confidence = Column(Float, nullable=True)
+
+    # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
+    # columns in the DB but NOT mapped here — they're managed via raw SQL in
+    # the cluster-map endpoint to avoid breaking queries when the columns
+    # can't be added (e.g. insufficient table ownership on Lakebase).
 
     # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
     # columns in the DB but NOT mapped here — they're managed via raw SQL in

@@ -261,6 +261,7 @@ def pre_annotate_project(
                 yield _emit("progress", {"completed": completed, "failed": failed, "skipped": skipped, "total": total, "current": idx})
                 continue
 
+            max_conf = None
             for pred in preds:
                 db.add(Annotation(
                     sample_id=sample.id,
@@ -271,6 +272,12 @@ def pre_annotate_project(
                     is_draft=True,
                     created_by=created_by,
                 ))
+                c = pred.get("confidence")
+                if c is not None:
+                    c = float(c)
+                    if max_conf is None or c > max_conf:
+                        max_conf = c
+            sample.prediction_confidence = max_conf
             sample.status = "pre_labeled"
             completed += 1
 

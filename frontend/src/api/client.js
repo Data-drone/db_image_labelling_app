@@ -94,7 +94,7 @@ export const fetchEndpointStatus = (projectId) =>
   api.get(`/projects/${projectId}/endpoint-status`).then(r => r.data);
 
 export const predictSample = (projectId, sampleId) =>
-  api.get(`/projects/${projectId}/samples/${sampleId}/predict`).then(r => r.data);
+  api.get(`/projects/${projectId}/samples/${sampleId}/predict`, { timeout: 300000 }).then(r => r.data);
 
 export const preAnnotateProject = (projectId, params = {}) =>
   api.post(`/projects/${projectId}/pre-annotate`, params, { timeout: 300000 }).then(r => r.data);
@@ -238,6 +238,9 @@ export const detectNearDuplicates = (projectId, params = {}) =>
 
 export const fetchDiversityQueue = (projectId, limit = 50) =>
   api.get(`/projects/${projectId}/diversity-queue`, { params: { limit }, timeout: 120000 }).then(r => r.data);
+
+export const fetchActiveLearningQueue = (projectId, { limit = 50, alpha = 0.5, beta = 0.5 } = {}) =>
+  api.get(`/projects/${projectId}/active-learning-queue`, { params: { limit, alpha, beta }, timeout: 120000 }).then(r => r.data);
 
 export const fetchOutliers = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/outliers`, { params, timeout: 120000 }).then(r => r.data);

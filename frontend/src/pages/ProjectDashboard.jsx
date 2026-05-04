@@ -13,7 +13,7 @@ import {
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
   startEmbeddingRun, fetchEmbeddingRun, fetchLatestEmbeddingRun, fetchSimilarSamples,
   propagateLabels, detectNearDuplicates,
-  fetchDiversityQueue, fetchOutliers,
+  fetchDiversityQueue, fetchActiveLearningQueue, fetchOutliers,
   fetchClusterMap,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
@@ -105,10 +105,11 @@ export default function ProjectDashboard() {
   const [dupThreshold, setDupThreshold] = useState(0.95);
   const [dupError, setDupError] = useState('');
 
-  // Diversity queue (Smart Queue) state
+  // Smart Queue state
   const [diversityLoading, setDiversityLoading] = useState(false);
   const [diversityQueue, setDiversityQueue] = useState(null);
   const [diversityError, setDiversityError] = useState('');
+  const [smartQueueStrategy, setSmartQueueStrategy] = useState('active_learning'); // 'diversity' | 'active_learning'
 
   // Outlier detection state
   const [outlierMode, setOutlierMode] = useState(false);
@@ -577,16 +578,28 @@ export default function ProjectDashboard() {
     setDiversityLoading(true);
     setDiversityError('');
     try {
-      const result = await fetchDiversityQueue(projectId, 50);
-      setDiversityQueue(result);
-      if (result.items.length > 0) {
-        // Navigate to labeling with the first diverse sample
-        navigate(`/projects/${projectId}/label?sample=${result.items[0].sample_id}&mode=diversity`);
+      if (smartQueueStrategy === 'active_learning') {
+        const result = await fetchActiveLearningQueue(projectId, { limit: 50 });
+        setDiversityQueue(result);
+        if (!result.has_predictions) {
+          setDiversityError('No pre-annotations found — using diversity only. Run pre-labeling to enable uncertainty scoring.');
+        }
+        if (result.items.length > 0) {
+          navigate(`/projects/${projectId}/label?sample=${result.items[0].sample_id}&mode=active_learning`);
+        } else {
+          setDiversityError('No unlabeled samples with embeddings found.');
+        }
       } else {
-        setDiversityError('No unlabeled samples with embeddings found.');
+        const result = await fetchDiversityQueue(projectId, 50);
+        setDiversityQueue(result);
+        if (result.items.length > 0) {
+          navigate(`/projects/${projectId}/label?sample=${result.items[0].sample_id}&mode=diversity`);
+        } else {
+          setDiversityError('No unlabeled samples with embeddings found.');
+        }
       }
     } catch (e) {
-      setDiversityError(humanizeApiError(e) || 'Diversity sampling failed. Generate embeddings first.');
+      setDiversityError(humanizeApiError(e) || 'Smart queue failed. Generate embeddings first.');
     } finally {
       setDiversityLoading(false);
     }
@@ -830,25 +843,50 @@ export default function ProjectDashboard() {
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {stats?.embedded > 0 && (
-              <button
-                className="btn-secondary"
-                onClick={handleSmartQueue}
-                disabled={diversityLoading}
-                style={{
-                  padding: '0.6rem 1rem',
-                  display: 'flex', alignItems: 'center', gap: '0.4rem',
-                  border: '1px solid rgba(168,85,247,0.3)',
-                  color: '#a855f7',
-                }}
-                title="Label the most visually diverse samples first"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                  <path d="M2 17l10 5 10-5" />
-                  <path d="M2 12l10 5 10-5" />
-                </svg>
-                {diversityLoading ? 'Loading…' : 'Smart Queue'}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+                <button
+                  className="btn-secondary"
+                  onClick={handleSmartQueue}
+                  disabled={diversityLoading}
+                  style={{
+                    padding: '0.6rem 1rem',
+                    display: 'flex', alignItems: 'center', gap: '0.4rem',
+                    border: '1px solid rgba(168,85,247,0.3)',
+                    borderRadius: '6px 0 0 6px',
+                    color: '#a855f7',
+                  }}
+                  title={smartQueueStrategy === 'active_learning'
+                    ? 'Combine model uncertainty + visual diversity'
+                    : 'Label the most visually diverse samples first'}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                    <path d="M2 17l10 5 10-5" />
+                    <path d="M2 12l10 5 10-5" />
+                  </svg>
+                  {diversityLoading ? 'Loading…' : 'Smart Queue'}
+                </button>
+                <select
+                  value={smartQueueStrategy}
+                  onChange={(e) => setSmartQueueStrategy(e.target.value)}
+                  title="Choose queue strategy"
+                  style={{
+                    padding: '0.6rem 0.5rem',
+                    fontSize: '0.75rem',
+                    border: '1px solid rgba(168,85,247,0.3)',
+                    borderLeft: 'none',
+                    borderRadius: '0 6px 6px 0',
+                    background: 'rgba(168,85,247,0.1)',
+                    color: '#a855f7',
+                    cursor: 'pointer',
+                    outline: 'none',
+                    fontWeight: 600,
+                  }}
+                >
+                  <option value="active_learning">Active Learning</option>
+                  <option value="diversity">Diversity Only</option>
+                </select>
+              </div>
             )}
             <button
               className="btn-primary"
