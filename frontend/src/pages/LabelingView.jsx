@@ -24,6 +24,7 @@ import {
   fetchEndpointStatus,
   acceptDraftsSample,
   clearDraftsSample,
+  fetchDiversityQueue,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 
@@ -102,15 +103,33 @@ export default function LabelingView() {
   useEffect(() => { loadStats(); }, [loadStats]);
 
   // Load full sample list (IDs + statuses) on mount
+  // In diversity mode, load samples ordered by diversity score
   useEffect(() => {
     if (!project) return;
-    fetchSamples(projectId, { page: 0, page_size: 10000 })
-      .then((page) => {
-        const list = page.items.map(s => ({ id: s.id, status: s.status }));
-        setSampleList(list);
-      })
-      .catch(console.error);
-  }, [project, projectId]);
+    const mode = searchParams.get('mode');
+    if (mode === 'diversity') {
+      fetchDiversityQueue(projectId, 500)
+        .then((result) => {
+          const list = result.items.map(s => ({ id: s.sample_id, status: s.status }));
+          setSampleList(list);
+        })
+        .catch(() => {
+          fetchSamples(projectId, { page: 0, page_size: 10000 })
+            .then((page) => {
+              const list = page.items.map(s => ({ id: s.id, status: s.status }));
+              setSampleList(list);
+            })
+            .catch(console.error);
+        });
+    } else {
+      fetchSamples(projectId, { page: 0, page_size: 10000 })
+        .then((page) => {
+          const list = page.items.map(s => ({ id: s.id, status: s.status }));
+          setSampleList(list);
+        })
+        .catch(console.error);
+    }
+  }, [project, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Once sample list is loaded, navigate to initial sample
   useEffect(() => {
@@ -667,6 +686,28 @@ export default function LabelingView() {
         <span className={`badge ${isDetection ? 'badge-yellow' : 'badge-blue'}`}>
           {project.task_type}
         </span>
+
+        {searchParams.get('mode') === 'diversity' && (
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.3rem',
+            fontSize: '0.7rem',
+            fontWeight: 600,
+            color: '#a855f7',
+            padding: '0.2rem 0.5rem',
+            borderRadius: 6,
+            background: 'rgba(168,85,247,0.1)',
+            border: '1px solid rgba(168,85,247,0.25)',
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
+            </svg>
+            Smart Queue
+          </span>
+        )}
 
         {isDetection && project.class_list[activeClassIndex] && (
           <span style={{

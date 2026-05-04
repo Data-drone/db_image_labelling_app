@@ -236,6 +236,12 @@ export const propagateLabels = (projectId, params = {}) =>
 export const detectNearDuplicates = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/near-duplicates`, { params, timeout: 120000 }).then(r => r.data);
 
+export const fetchDiversityQueue = (projectId, limit = 50) =>
+  api.get(`/projects/${projectId}/diversity-queue`, { params: { limit }, timeout: 120000 }).then(r => r.data);
+
+export const fetchOutliers = (projectId, params = {}) =>
+  api.get(`/projects/${projectId}/outliers`, { params, timeout: 120000 }).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
