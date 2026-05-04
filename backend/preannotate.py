@@ -154,6 +154,7 @@ def run_preannotate_for_samples(
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
 
+        max_conf = None
         for pred in predictions:
             db.add(
                 Annotation(
@@ -166,6 +167,12 @@ def run_preannotate_for_samples(
                     created_by=created_by,
                 )
             )
+            c = pred.get("confidence")
+            if c is not None:
+                c = float(c)
+                if max_conf is None or c > max_conf:
+                    max_conf = c
+        sample.prediction_confidence = max_conf
         sample.status = "pre_labeled"
 
         _generate_embedding(

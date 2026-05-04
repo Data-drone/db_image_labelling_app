@@ -357,6 +357,26 @@ class DiversitySamplingResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Active Learning Queue
+# ---------------------------------------------------------------------------
+class ActiveLearningSampleOut(BaseModel):
+    sample_id: int
+    filename: str
+    uncertainty_score: float
+    diversity_score: float
+    combined_score: float
+    status: str
+
+
+class ActiveLearningQueueResult(BaseModel):
+    items: list[ActiveLearningSampleOut]
+    total: int
+    alpha: float
+    beta: float
+    has_predictions: bool
+
+
+# ---------------------------------------------------------------------------
 # Outlier Detection
 # ---------------------------------------------------------------------------
 class OutlierSampleOut(BaseModel):

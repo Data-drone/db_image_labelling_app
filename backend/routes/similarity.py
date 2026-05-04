@@ -14,6 +14,8 @@ from ..deps import get_db, get_user_email
 from ..models import Annotation, LabelingProject, ProjectSample
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
+    ActiveLearningQueueResult,
+    ActiveLearningSampleOut,
     ClusterMapPoint,
     ClusterMapResult,
     DiversitySampleOut,
@@ -1050,3 +1052,236 @@ def cluster_map(
         for i, s in enumerate(sample_meta)
     ]
     return ClusterMapResult(points=points, total=len(points), cached=False)
+
+
+# ---------------------------------------------------------------------------
+# Active Learning Queue (uncertainty × diversity)
+# ---------------------------------------------------------------------------
+
+DEFAULT_UNCERTAINTY = 1.0  # treat samples with no prediction as maximally uncertain
+
+
+def _active_learning_pgvector(
+    db: Session,
+    project_id: int,
+    limit: int,
+    alpha: float,
+    beta: float,
+) -> tuple[list[dict], int, bool]:
+    """Compute combined active learning scores using pgvector for diversity."""
+    has_predictions = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.prediction_confidence.isnot(None),
+        )
+        .limit(1)
+        .count()
+    ) > 0
+
+    labeled_count = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.status == "labeled",
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+
+    if labeled_count == 0:
+        rows = db.execute(
+            text(
+                "SELECT id, filename, status, prediction_confidence "
+                "FROM project_samples "
+                "WHERE project_id = :pid AND status IN ('unlabeled', 'pre_labeled') "
+                "  AND embedding_vec IS NOT NULL "
+                "ORDER BY COALESCE(1.0 - prediction_confidence, 1.0) DESC "
+                "LIMIT :lim"
+            ),
+            {"pid": project_id, "lim": limit},
+        ).fetchall()
+        items = []
+        for r in rows:
+            unc = DEFAULT_UNCERTAINTY if r.prediction_confidence is None else round(1.0 - r.prediction_confidence, 4)
+            div = 1.0
+            combined = round(unc * alpha + div * beta, 4)
+            items.append({
+                "sample_id": r.id, "filename": r.filename,
+                "uncertainty_score": unc, "diversity_score": div,
+                "combined_score": combined, "status": r.status,
+            })
+    else:
+        rows = db.execute(
+            text(
+                "WITH labeled AS ( "
+                "  SELECT id, embedding_vec FROM project_samples "
+                "  WHERE project_id = :pid AND status = 'labeled' AND embedding_vec IS NOT NULL "
+                "), "
+                "unlabeled AS ( "
+                "  SELECT id, filename, status, embedding_vec, prediction_confidence "
+                "  FROM project_samples "
+                "  WHERE project_id = :pid AND status IN ('unlabeled', 'pre_labeled') "
+                "    AND embedding_vec IS NOT NULL "
+                ") "
+                "SELECT u.id, u.filename, u.status, u.prediction_confidence, "
+                "  (SELECT MIN(u.embedding_vec <=> l.embedding_vec) FROM labeled l) AS min_distance "
+                "FROM unlabeled u "
+                "ORDER BY ( "
+                "  COALESCE(1.0 - u.prediction_confidence, 1.0) * :alpha "
+                "  + (SELECT MIN(u.embedding_vec <=> l.embedding_vec) FROM labeled l) * :beta "
+                ") DESC "
+                "LIMIT :lim"
+            ),
+            {"pid": project_id, "alpha": alpha, "beta": beta, "lim": limit},
+        ).fetchall()
+        items = []
+        for r in rows:
+            unc = DEFAULT_UNCERTAINTY if r.prediction_confidence is None else round(1.0 - r.prediction_confidence, 4)
+            div = round(float(r.min_distance), 4)
+            combined = round(unc * alpha + div * beta, 4)
+            items.append({
+                "sample_id": r.id, "filename": r.filename,
+                "uncertainty_score": unc, "diversity_score": div,
+                "combined_score": combined, "status": r.status,
+            })
+
+    total = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.status.in_(["unlabeled", "pre_labeled"]),
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    return items, total, has_predictions
+
+
+def _active_learning_python(
+    db: Session,
+    project_id: int,
+    limit: int,
+    alpha: float,
+    beta: float,
+) -> tuple[list[dict], int, bool]:
+    """Fallback: compute combined scores in Python when pgvector is unavailable."""
+    has_predictions = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.prediction_confidence.isnot(None),
+        )
+        .limit(1)
+        .count()
+    ) > 0
+
+    all_samples = (
+        db.query(
+            ProjectSample.id, ProjectSample.filename, ProjectSample.status,
+            ProjectSample.embedding, ProjectSample.prediction_confidence,
+        )
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .all()
+    )
+
+    labeled = [(s.id, s.embedding) for s in all_samples if s.status == "labeled"]
+    unlabeled = [
+        (s.id, s.filename, s.status, s.embedding, s.prediction_confidence)
+        for s in all_samples if s.status in ("unlabeled", "pre_labeled")
+    ]
+
+    if not unlabeled:
+        return [], 0, has_predictions
+
+    labeled_data = []
+    for sid, emb in labeled:
+        norm = sum(x * x for x in emb) ** 0.5
+        labeled_data.append((emb, norm))
+
+    scored = []
+    for uid, fname, status, uemb, pred_conf in unlabeled:
+        unc = DEFAULT_UNCERTAINTY if pred_conf is None else 1.0 - float(pred_conf)
+
+        if not labeled_data:
+            div = 1.0
+        else:
+            unorm = sum(x * x for x in uemb) ** 0.5
+            if unorm == 0:
+                div = 0.0
+            else:
+                max_sim = -1.0
+                for lemb, lnorm in labeled_data:
+                    if lnorm == 0:
+                        continue
+                    dot = sum(a * b for a, b in zip(uemb, lemb))
+                    sim = dot / (unorm * lnorm)
+                    if sim > max_sim:
+                        max_sim = sim
+                div = 1.0 - max_sim if max_sim > -1.0 else 1.0
+
+        combined = unc * alpha + div * beta
+        scored.append((combined, uid, fname, status, unc, div))
+
+    scored.sort(reverse=True)
+    items = [
+        {
+            "sample_id": sid, "filename": fn,
+            "uncertainty_score": round(unc, 4),
+            "diversity_score": round(div, 4),
+            "combined_score": round(comb, 4),
+            "status": st,
+        }
+        for comb, sid, fn, st, unc, div in scored[:limit]
+    ]
+    return items, len(unlabeled), has_predictions
+
+
+@router.get("/active-learning-queue", response_model=ActiveLearningQueueResult)
+def active_learning_queue(
+    project_id: int,
+    limit: int = Query(50, ge=1, le=500),
+    alpha: float = Query(0.5, ge=0.0, le=1.0),
+    beta: float = Query(0.5, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+):
+    """Rank unlabeled samples by combined uncertainty + diversity score.
+
+    Uncertainty = 1 - prediction_confidence (no prediction = 1.0).
+    Diversity = embedding distance from nearest labeled sample.
+    Combined = uncertainty * alpha + diversity * beta.
+    """
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    embedded_count = (
+        db.query(ProjectSample)
+        .filter(
+            ProjectSample.project_id == project_id,
+            ProjectSample.embedding.isnot(None),
+        )
+        .count()
+    )
+    if embedded_count == 0:
+        raise HTTPException(status_code=400, detail="No embeddings found. Generate embeddings first.")
+
+    if _is_pgvector(db):
+        try:
+            items, total, has_preds = _active_learning_pgvector(db, project_id, limit, alpha, beta)
+            return ActiveLearningQueueResult(
+                items=[ActiveLearningSampleOut(**i) for i in items],
+                total=total, alpha=alpha, beta=beta, has_predictions=has_preds,
+            )
+        except Exception as exc:
+            db.rollback()
+            log.warning("pgvector active learning failed, falling back to Python: %s", exc)
+
+    items, total, has_preds = _active_learning_python(db, project_id, limit, alpha, beta)
+    return ActiveLearningQueueResult(
+        items=[ActiveLearningSampleOut(**i) for i in items],
+        total=total, alpha=alpha, beta=beta, has_predictions=has_preds,
+    )

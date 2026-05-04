@@ -239,6 +239,9 @@ export const detectNearDuplicates = (projectId, params = {}) =>
 export const fetchDiversityQueue = (projectId, limit = 50) =>
   api.get(`/projects/${projectId}/diversity-queue`, { params: { limit }, timeout: 120000 }).then(r => r.data);
 
+export const fetchActiveLearningQueue = (projectId, { limit = 50, alpha = 0.5, beta = 0.5 } = {}) =>
+  api.get(`/projects/${projectId}/active-learning-queue`, { params: { limit, alpha, beta }, timeout: 120000 }).then(r => r.data);
+
 export const fetchOutliers = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/outliers`, { params, timeout: 120000 }).then(r => r.data);
 
