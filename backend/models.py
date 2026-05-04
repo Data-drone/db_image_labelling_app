@@ -79,6 +79,11 @@ class ProjectSample(Base):
     # the cluster-map endpoint to avoid breaking queries when the columns
     # can't be added (e.g. insufficient table ownership on Lakebase).
 
+    # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
+    # columns in the DB but NOT mapped here — they're managed via raw SQL in
+    # the cluster-map endpoint to avoid breaking queries when the columns
+    # can't be added (e.g. insufficient table ownership on Lakebase).
+
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
         "Annotation", back_populates="sample", cascade="all, delete-orphan",
