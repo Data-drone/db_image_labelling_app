@@ -3,6 +3,7 @@
  *
  * Renders each sample as a colored dot. Supports coloring by status or label.
  * Shows thumbnail + filename on hover, navigates to labeling view on click.
+ * Supports zoom (scroll wheel) and pan (click + drag).
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
@@ -45,6 +46,14 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [dimensions, setDimensions] = useState({ width: 800, height: 500 });
 
+  // Zoom/pan state: view transform
+  const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const isPanning = useRef(false);
+  const panStart = useRef({ x: 0, y: 0 });
+  const panOffsetStart = useRef({ x: 0, y: 0 });
+  const didPan = useRef(false);
+
   const labelColorMap = useMemo(() => buildLabelColorMap(points), [points]);
   const allLabels = useMemo(() => Object.keys(labelColorMap).sort(), [labelColorMap]);
 
@@ -63,6 +72,12 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
     return () => obs.disconnect();
   }, []);
 
+  // Reset zoom/pan when points change
+  useEffect(() => {
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+  }, [points]);
+
   const getColor = useCallback((point) => {
     if (colorBy === 'label') {
       if (point.labels.length > 0) return labelColorMap[point.labels[0]] || '#94a3b8';
@@ -71,10 +86,19 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
     return STATUS_COLORS[point.status] || '#94a3b8';
   }, [colorBy, labelColorMap]);
 
-  const scaleX = useCallback((v) => PADDING + v * (dimensions.width - 2 * PADDING), [dimensions.width]);
-  const scaleY = useCallback((v) => PADDING + (1 - v) * (dimensions.height - 2 * PADDING), [dimensions.height]);
+  const scaleX = useCallback((v) => {
+    const base = PADDING + v * (dimensions.width - 2 * PADDING);
+    const cx = dimensions.width / 2;
+    return (base - cx) * zoom + cx + panOffset.x;
+  }, [dimensions.width, zoom, panOffset.x]);
 
-  // Canvas rendering for performance with large datasets
+  const scaleY = useCallback((v) => {
+    const base = PADDING + (1 - v) * (dimensions.height - 2 * PADDING);
+    const cy = dimensions.height / 2;
+    return (base - cy) * zoom + cy + panOffset.y;
+  }, [dimensions.height, zoom, panOffset.y]);
+
+  // Canvas rendering
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -89,11 +113,17 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
 
     ctx.clearRect(0, 0, dimensions.width, dimensions.height);
 
-    const radius = points.length > 2000 ? 2.5 : points.length > 500 ? 3.5 : 5;
+    const baseRadius = points.length > 2000 ? 2.5 : points.length > 500 ? 3.5 : 5;
+    const radius = baseRadius * Math.min(zoom, 3);
 
     for (const p of points) {
       const cx = scaleX(p.x);
       const cy = scaleY(p.y);
+
+      if (cx < -radius || cx > dimensions.width + radius || cy < -radius || cy > dimensions.height + radius) {
+        continue;
+      }
+
       const isHovered = hovered && hovered.sample_id === p.sample_id;
 
       ctx.beginPath();
@@ -109,19 +139,71 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
       }
     }
     ctx.globalAlpha = 1;
-  }, [points, dimensions, hovered, getColor, scaleX, scaleY]);
+  }, [points, dimensions, hovered, getColor, scaleX, scaleY, zoom]);
 
-  const handleMouseMove = useCallback((e) => {
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
-    const radius = points.length > 2000 ? 6 : points.length > 500 ? 8 : 10;
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newZoom = Math.max(0.5, Math.min(20, zoom * zoomFactor));
+
+    // Zoom towards cursor position
+    const scale = newZoom / zoom;
+    const cx = dimensions.width / 2;
+    const cy = dimensions.height / 2;
+    const newPanX = mx - scale * (mx - panOffset.x - cx) - cx;
+    const newPanY = my - scale * (my - panOffset.y - cy) - cy;
+
+    setZoom(newZoom);
+    setPanOffset({ x: newPanX, y: newPanY });
+  }, [zoom, panOffset, dimensions]);
+
+  // Attach wheel event with passive: false to allow preventDefault
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
+  const handleMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    isPanning.current = true;
+    didPan.current = false;
+    panStart.current = { x: e.clientX, y: e.clientY };
+    panOffsetStart.current = { ...panOffset };
+  }, [panOffset]);
+
+  const handleMouseMove = useCallback((e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    if (isPanning.current) {
+      const dx = e.clientX - panStart.current.x;
+      const dy = e.clientY - panStart.current.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        didPan.current = true;
+      }
+      setPanOffset({
+        x: panOffsetStart.current.x + dx,
+        y: panOffsetStart.current.y + dy,
+      });
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const hitRadius = (points.length > 2000 ? 6 : points.length > 500 ? 8 : 10) * Math.min(zoom, 3);
 
     let closest = null;
-    let closestDist = radius * radius;
+    let closestDist = hitRadius * hitRadius;
     for (const p of points) {
       const cx = scaleX(p.x);
       const cy = scaleY(p.y);
@@ -138,13 +220,25 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
     if (closest) {
       setTooltipPos({ x: e.clientX, y: e.clientY });
     }
-  }, [points, scaleX, scaleY]);
+  }, [points, scaleX, scaleY, zoom]);
+
+  const handleMouseUp = useCallback(() => {
+    isPanning.current = false;
+  }, []);
 
   const handleClick = useCallback(() => {
+    if (didPan.current) return;
     if (hovered) {
       navigate(`/projects/${projectId}/label?sample=${hovered.sample_id}`);
     }
   }, [hovered, projectId, navigate]);
+
+  const handleReset = useCallback(() => {
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+  }, []);
+
+  const isZoomed = zoom !== 1 || panOffset.x !== 0 || panOffset.y !== 0;
 
   return (
     <div ref={containerRef} style={{ width: '100%' }}>
@@ -181,6 +275,25 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
           </button>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {isZoomed && (
+            <button
+              className="btn-secondary"
+              onClick={handleReset}
+              style={{
+                padding: '0.2rem 0.5rem', fontSize: '0.7rem',
+                display: 'flex', alignItems: 'center', gap: '0.25rem',
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              Reset view
+            </button>
+          )}
+          <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+            {zoom > 1.05 ? `${zoom.toFixed(1)}x` : ''}
+          </span>
           <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
             {points.length.toLocaleString()} samples
           </span>
@@ -207,14 +320,31 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
       }}>
         <canvas
           ref={canvasRef}
+          onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHovered(null)}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={() => { setHovered(null); isPanning.current = false; }}
           onClick={handleClick}
-          style={{ cursor: hovered ? 'pointer' : 'default', display: 'block' }}
+          style={{
+            cursor: isPanning.current ? 'grabbing' : hovered ? 'pointer' : 'grab',
+            display: 'block',
+          }}
         />
 
+        {/* Zoom hint */}
+        {!isZoomed && (
+          <div style={{
+            position: 'absolute', bottom: 8, right: 8,
+            fontSize: '0.6rem', color: 'var(--text-muted)',
+            background: 'var(--bg-primary)', padding: '0.2rem 0.4rem',
+            borderRadius: 4, opacity: 0.7,
+          }}>
+            Scroll to zoom, drag to pan
+          </div>
+        )}
+
         {/* Tooltip */}
-        {hovered && (
+        {hovered && !isPanning.current && (
           <div style={{
             position: 'fixed',
             left: tooltipPos.x + 12,
