@@ -844,24 +844,6 @@ export default function ProjectDashboard() {
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {stats?.embedded > 0 && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-                <select
-                  value={smartQueueStrategy}
-                  onChange={(e) => setSmartQueueStrategy(e.target.value)}
-                  style={{
-                    padding: '0.6rem 0.5rem',
-                    fontSize: '0.75rem',
-                    border: '1px solid rgba(168,85,247,0.3)',
-                    borderRight: 'none',
-                    borderRadius: '6px 0 0 6px',
-                    background: 'var(--bg-secondary)',
-                    color: '#a855f7',
-                    cursor: 'pointer',
-                    outline: 'none',
-                  }}
-                >
-                  <option value="active_learning">Active Learning</option>
-                  <option value="diversity">Diversity Only</option>
-                </select>
                 <button
                   className="btn-secondary"
                   onClick={handleSmartQueue}
@@ -870,7 +852,7 @@ export default function ProjectDashboard() {
                     padding: '0.6rem 1rem',
                     display: 'flex', alignItems: 'center', gap: '0.4rem',
                     border: '1px solid rgba(168,85,247,0.3)',
-                    borderRadius: '0 6px 6px 0',
+                    borderRadius: '6px 0 0 6px',
                     color: '#a855f7',
                   }}
                   title={smartQueueStrategy === 'active_learning'
@@ -884,6 +866,26 @@ export default function ProjectDashboard() {
                   </svg>
                   {diversityLoading ? 'Loading…' : 'Smart Queue'}
                 </button>
+                <select
+                  value={smartQueueStrategy}
+                  onChange={(e) => setSmartQueueStrategy(e.target.value)}
+                  title="Choose queue strategy"
+                  style={{
+                    padding: '0.6rem 0.5rem',
+                    fontSize: '0.75rem',
+                    border: '1px solid rgba(168,85,247,0.3)',
+                    borderLeft: 'none',
+                    borderRadius: '0 6px 6px 0',
+                    background: 'rgba(168,85,247,0.1)',
+                    color: '#a855f7',
+                    cursor: 'pointer',
+                    outline: 'none',
+                    fontWeight: 600,
+                  }}
+                >
+                  <option value="active_learning">Active Learning</option>
+                  <option value="diversity">Diversity Only</option>
+                </select>
               </div>
             )}
             <button

@@ -94,7 +94,7 @@ export const fetchEndpointStatus = (projectId) =>
   api.get(`/projects/${projectId}/endpoint-status`).then(r => r.data);
 
 export const predictSample = (projectId, sampleId) =>
-  api.get(`/projects/${projectId}/samples/${sampleId}/predict`).then(r => r.data);
+  api.get(`/projects/${projectId}/samples/${sampleId}/predict`, { timeout: 300000 }).then(r => r.data);
 
 export const preAnnotateProject = (projectId, params = {}) =>
   api.post(`/projects/${projectId}/pre-annotate`, params, { timeout: 300000 }).then(r => r.data);

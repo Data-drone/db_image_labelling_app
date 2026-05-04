@@ -137,9 +137,11 @@ export default function LabelingView() {
     }
   }, [project, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Once sample list is loaded, navigate to initial sample
+  // Once sample list is loaded, navigate to initial sample (once only)
+  const initialNavDone = useRef(false);
   useEffect(() => {
-    if (sampleList.length === 0) return;
+    if (sampleList.length === 0 || initialNavDone.current) return;
+    initialNavDone.current = true;
 
     // Check for ?sample=ID in URL
     const sampleParam = searchParams.get('sample');
@@ -158,7 +160,7 @@ export default function LabelingView() {
     } else {
       setCurrentIndex(0);
     }
-  }, [sampleList]); // Only run when sampleList first loads
+  }, [sampleList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     setActionError('');
@@ -411,17 +413,22 @@ export default function LabelingView() {
     setActionError('');
     try {
       const preds = await predictSample(projectId, sample.id);
-      setPredictions(preds);
-      if (isDetection && preds.length > 0) {
-        const predBoxes = preds
-          .filter(p => p.ann_type === 'bbox' && p.bbox_json)
-          .map(p => ({
-            id: `pred-${nextBoxId.current++}`,
-            label: p.label,
-            classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
-            ...p.bbox_json,
-          }));
-        setBoxes(predBoxes);
+      if (!preds || preds.length === 0) {
+        setPredictions(null);
+        setActionError('Model returned no predictions for this image (all below confidence threshold).');
+      } else {
+        setPredictions(preds);
+        if (isDetection) {
+          const predBoxes = preds
+            .filter(p => p.ann_type === 'bbox' && p.bbox_json)
+            .map(p => ({
+              id: `pred-${nextBoxId.current++}`,
+              label: p.label,
+              classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
+              ...p.bbox_json,
+            }));
+          setBoxes(predBoxes);
+        }
       }
     } catch (err) {
       console.error('Prediction failed:', err);
