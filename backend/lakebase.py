@@ -305,8 +305,13 @@ def get_engine() -> Engine:
     return _engine
 
 
-def get_session():
-    """Return a new database session."""
+def get_session_factory():
+    """Return the current session factory (refreshed with the engine)."""
     if _session_factory is None:
         raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
-    return _session_factory()
+    return _session_factory
+
+
+def get_session():
+    """Return a new database session."""
+    return get_session_factory()()
