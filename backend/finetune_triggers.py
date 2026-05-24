@@ -29,6 +29,8 @@ def trigger_finetune_job(run_db_id: int, export_path: str) -> int:
         "run_id": str(run_db_id),
         "export_path": export_path,
     }
-    drid = trigger_databricks_job(job_id, job_params)
+    drid = trigger_databricks_job(
+        job_id, job_params, idempotency_token=f"finetune-{run_db_id}"
+    )
     log.info("Submitted finetune job_id=%s run_id=%s for db_run_id=%s", job_id, drid, run_db_id)
     return drid

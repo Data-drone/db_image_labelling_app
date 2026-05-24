@@ -179,6 +179,7 @@ class FinetuneRun(Base):
     status = Column(String(32), nullable=False, default="pending")
     export_path = Column(Text, nullable=False)
     databricks_run_id = Column(BigInteger, nullable=True)
+    databricks_run_url = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

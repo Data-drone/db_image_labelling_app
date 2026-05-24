@@ -267,12 +267,17 @@ class AnnotationHistoryOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Finetuning
 # ---------------------------------------------------------------------------
+class FinetuneTriggerRequest(BaseModel):
+    export_path: str
+
+
 class FinetuneRunOut(BaseModel):
     id: int
     project_id: int
     status: str
     export_path: str
     databricks_run_id: Optional[int] = None
+    databricks_run_url: Optional[str] = None
     error_message: Optional[str] = None
     created_by: str = ""
     created_at: datetime

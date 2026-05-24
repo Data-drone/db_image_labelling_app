@@ -26,15 +26,17 @@ def resolve_job_id(env_var_names: list[str]) -> Optional[int]:
     return None
 
 
-def trigger_databricks_job(job_id: int, job_params: dict) -> int:
+def trigger_databricks_job(
+    job_id: int, job_params: dict, idempotency_token: str | None = None
+) -> int:
     """Call jobs.run_now and return the Databricks run id."""
     from .volumes import _get_workspace_client
 
     w = _get_workspace_client()
-    resp = w.jobs.run_now(
-        job_id=job_id,
-        job_parameters=job_params,
-    )
+    kwargs: dict = {"job_id": job_id, "job_parameters": job_params}
+    if idempotency_token:
+        kwargs["idempotency_token"] = idempotency_token
+    resp = w.jobs.run_now(**kwargs)
     drid = getattr(resp, "run_id", None) or getattr(resp, "run_id_", None)
     if drid is None and isinstance(resp, dict):
         drid = resp.get("run_id")
@@ -63,23 +65,35 @@ def sync_run_status(row, db: Session) -> None:
             row.id, row.databricks_run_id, lcs, result, msg,
         )
 
-        if "RUNNING" in lcs and row.status != "running":
-            row.status = "running"
-            row.started_at = row.started_at or datetime.now(timezone.utc)
+        # Terminal states (check result_state first)
+        if "SUCCESS" in result:
+            row.status = "succeeded"
+            row.finished_at = row.finished_at or datetime.now(timezone.utc)
             db.commit()
-        elif "FAILED" in result or "INTERNAL_ERROR" in lcs or "SKIPPED" in lcs or "BLOCKED" in lcs:
+        elif "FAILED" in result or "TIMEDOUT" in result:
             row.status = "failed"
             row.error_message = (msg or f"Databricks run {lcs}/{result}")[:4000]
-            row.finished_at = datetime.now(timezone.utc)
+            row.finished_at = row.finished_at or datetime.now(timezone.utc)
             db.commit()
         elif "CANCEL" in result:
             row.status = "cancelled"
-            row.finished_at = datetime.now(timezone.utc)
+            row.finished_at = row.finished_at or datetime.now(timezone.utc)
             db.commit()
-        elif "SUCCESS" in result:
-            row.status = "succeeded"
-            row.finished_at = datetime.now(timezone.utc)
+        elif "INTERNAL_ERROR" in lcs or "SKIPPED" in lcs or "BLOCKED" in lcs:
+            row.status = "failed"
+            row.error_message = (msg or f"Databricks lifecycle: {lcs}")[:4000]
+            row.finished_at = row.finished_at or datetime.now(timezone.utc)
             db.commit()
+        # Non-terminal states
+        elif "RUNNING" in lcs or "TERMINATING" in lcs:
+            if row.status != "running":
+                row.status = "running"
+                row.started_at = row.started_at or datetime.now(timezone.utc)
+                db.commit()
+        elif "PENDING" in lcs or "QUEUED" in lcs or "WAITING_FOR_RETRY" in lcs:
+            if row.status not in ("queued", "running"):
+                row.status = "queued"
+                db.commit()
     except Exception:
         log.warning("Could not cross-check Databricks run %s", row.databricks_run_id, exc_info=True)
 
