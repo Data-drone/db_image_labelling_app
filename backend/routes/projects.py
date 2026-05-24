@@ -58,6 +58,15 @@ def create_project(
     if existing:
         raise HTTPException(status_code=409, detail=f"Project '{payload.name}' already exists.")
 
+    if payload.task_type not in ("classification", "detection", "segmentation"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "task_type must be 'classification', 'detection' or "
+                f"'segmentation', got '{payload.task_type}'."
+            ),
+        )
+
     user_email = get_user_email(request)
     serving_ep = payload.serving_endpoint or os.environ.get("SERVING_ENDPOINT") or None
     ep_config = dict(payload.endpoint_config or {})

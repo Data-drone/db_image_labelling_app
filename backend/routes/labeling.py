@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, subqueryload
 
+from .. import image_meta, masks
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
 from ..models import ProjectSample, Annotation, AnnotationHistory
 from ..preannotate import refresh_sample_status_after_annotation_change
@@ -24,6 +25,40 @@ from ..schemas import (
 from ..volumes import read_image_bytes
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["labeling"])
+
+
+def _prepare_mask(db, sample, payload):
+    """Validate an incoming mask and return ``(stored_mask, bbox_json)``.
+
+    The API accepts uncompressed RLE; the DB holds the compressed form. The
+    bounding box that comes back is derived from the mask itself rather than
+    taken from the client, so the box and the mask can never disagree.
+
+    Returns ``(None, payload.bbox_json)`` when the payload carries no mask.
+    """
+    raw = getattr(payload, "mask_json", None)
+    if raw is None:
+        return None, payload.bbox_json
+
+    dims = image_meta.resolve_dimensions(db, sample)
+    if not dims:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Cannot save a mask for this sample: its image dimensions "
+                "could not be read, so there is no grid to store the mask "
+                "against."
+            ),
+        )
+    img_w, img_h = dims
+    try:
+        height, width, counts = masks.validate_uncompressed(raw, img_h, img_w)
+    except masks.MaskValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid mask: {e}")
+
+    return masks.to_storage(counts, height, width), masks.normalized_bbox(
+        counts, height, width
+    )
 
 
 @router.get("/next", response_model=Optional[SampleOut])
@@ -83,6 +118,8 @@ def annotate_sample(
 
     user_email = get_user_email(request)
 
+    mask_json, bbox_json = _prepare_mask(db, sample, payload)
+
     existing = (
         db.query(Annotation)
         .filter_by(sample_id=sample_id, project_id=project_id, ann_type="classification")
@@ -100,7 +137,9 @@ def annotate_sample(
                 old_ann_type=old.ann_type,
                 new_ann_type=payload.ann_type,
                 old_bbox_json=old.bbox_json,
-                new_bbox_json=payload.bbox_json,
+                new_bbox_json=bbox_json,
+                old_mask_json=old.mask_json,
+                new_mask_json=mask_json,
                 changed_by=user_email,
             ))
         db.query(Annotation).filter_by(
@@ -116,7 +155,9 @@ def annotate_sample(
             old_ann_type=None,
             new_ann_type=payload.ann_type,
             old_bbox_json=None,
-            new_bbox_json=payload.bbox_json,
+            new_bbox_json=bbox_json,
+            old_mask_json=None,
+            new_mask_json=mask_json,
             changed_by=user_email,
         ))
 
@@ -125,7 +166,8 @@ def annotate_sample(
         project_id=project_id,
         label=payload.label,
         ann_type=payload.ann_type,
-        bbox_json=payload.bbox_json,
+        bbox_json=bbox_json,
+        mask_json=mask_json,
         is_draft=False,
         created_by=user_email,
     )
@@ -161,6 +203,10 @@ def annotate_sample_batch(
 
     user_email = get_user_email(request)
 
+    # Validate every mask before touching the DB, so a bad mask half way
+    # through a batch cannot leave the sample with its annotations deleted.
+    prepared = [_prepare_mask(db, sample, ann) for ann in payload.annotations]
+
     old_annotations = (
         db.query(Annotation)
         .filter_by(sample_id=sample_id, project_id=project_id)
@@ -178,12 +224,14 @@ def annotate_sample_batch(
                 new_ann_type=None,
                 old_bbox_json=old.bbox_json,
                 new_bbox_json=None,
+                old_mask_json=old.mask_json,
+                new_mask_json=None,
                 changed_by=user_email,
             ))
         db.query(Annotation).filter_by(sample_id=sample_id, project_id=project_id).delete()
 
     created = []
-    for ann in payload.annotations:
+    for ann, (mask_json, bbox_json) in zip(payload.annotations, prepared):
         db.add(AnnotationHistory(
             sample_id=sample_id,
             project_id=project_id,
@@ -193,7 +241,9 @@ def annotate_sample_batch(
             old_ann_type=None,
             new_ann_type=ann.ann_type,
             old_bbox_json=None,
-            new_bbox_json=ann.bbox_json,
+            new_bbox_json=bbox_json,
+            old_mask_json=None,
+            new_mask_json=mask_json,
             changed_by=user_email,
         ))
         a = Annotation(
@@ -201,7 +251,8 @@ def annotate_sample_batch(
             project_id=project_id,
             label=ann.label,
             ann_type=ann.ann_type,
-            bbox_json=ann.bbox_json,
+            bbox_json=bbox_json,
+            mask_json=mask_json,
             is_draft=False,
             created_by=user_email,
         )
@@ -469,6 +520,9 @@ def serve_sample_image(
     data = read_image_bytes(sample.filepath)
     if data is None:
         raise HTTPException(status_code=404, detail="Image not found.")
+    # The bytes are already in hand and the editor always loads the image
+    # before a user can draw, so this warms the mask grid for free.
+    image_meta.cache_dimensions(db, sample, data)
     return StreamingResponse(io.BytesIO(data), media_type="image/jpeg")
 
 
@@ -484,12 +538,17 @@ def serve_sample_thumbnail(
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
 
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     data = read_image_bytes(sample.filepath)
     if data is None:
         raise HTTPException(status_code=404, detail="Image not found.")
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    image_meta.cache_dimensions(db, sample, data)
+    # exif_transpose matches what the browser does with the full-size image.
+    # Without it an EXIF-rotated photo appears sideways in the grid but
+    # upright in the editor, and mask overlays drawn on thumbnails would be
+    # rotated relative to the mask they represent.
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
 
     img.thumbnail((size, size), Image.Resampling.LANCZOS)
     buf = io.BytesIO()

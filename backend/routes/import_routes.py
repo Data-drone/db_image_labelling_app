@@ -21,13 +21,14 @@ from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
 from ..import_adapters import get_adapter
+from .. import image_meta, masks
 from ..models import (
     LabelingProject, ProjectSample, Annotation, AnnotationHistory,
 )
 from ..schemas import (
     AnnotationCreate, ImportRequest, ImportResponse, ImportErrorItem,
 )
-from ..volumes import read_bytes, file_exists, is_volume_path
+from ..volumes import read_bytes, read_image_bytes, file_exists, is_volume_path
 
 log = logging.getLogger(__name__)
 
@@ -99,12 +100,26 @@ def _validate_annotation(
     """Return an error string or None if valid."""
     if ann.label not in project.class_list:
         return f"label '{ann.label}' not in project class_list"
-    if ann.ann_type not in ("classification", "bbox"):
-        return f"ann_type must be 'classification' or 'bbox', got '{ann.ann_type}'"
-    if project.task_type == "classification" and ann.ann_type == "bbox":
-        return "classification project cannot accept bbox annotations"
+    if ann.ann_type not in ("classification", "bbox", "mask"):
+        return (
+            "ann_type must be 'classification', 'bbox' or 'mask', "
+            f"got '{ann.ann_type}'"
+        )
+    if project.task_type == "classification" and ann.ann_type in ("bbox", "mask"):
+        return f"classification project cannot accept {ann.ann_type} annotations"
     if project.task_type == "detection" and ann.ann_type == "classification":
         return "detection project cannot accept classification-only annotations"
+    if project.task_type == "segmentation" and ann.ann_type == "classification":
+        return "segmentation project cannot accept classification-only annotations"
+    if ann.ann_type == "mask" and not ann.mask_json:
+        return "mask annotation missing mask_json"
+    if ann.mask_json is not None:
+        # Structure only: the size is checked against the actual image at
+        # commit time, when the sample (and so its dimensions) is in hand.
+        try:
+            masks.validate_uncompressed(ann.mask_json)
+        except masks.MaskValidationError as e:
+            return f"invalid mask_json: {e}"
     if ann.ann_type == "bbox":
         bb = ann.bbox_json
         if not isinstance(bb, dict):
@@ -242,6 +257,8 @@ def import_annotations(
 
         for ann in item.annotations:
             reason = _validate_annotation(ann, project)
+            if not reason and ann.mask_json is not None:
+                reason = _mask_size_error(db, project, item.filename, ann)
             if reason:
                 errors.append(ImportErrorItem(
                     row=idx + 1, filename=item.filename, reason=reason,
@@ -323,6 +340,8 @@ def import_annotations(
                         new_ann_type=None,
                         old_bbox_json=old.bbox_json,
                         new_bbox_json=None,
+                        old_mask_json=old.mask_json,
+                        new_mask_json=None,
                         changed_by=user_email,
                         changed_at=now,
                     ))
@@ -332,6 +351,10 @@ def import_annotations(
                 ).delete()
 
             for ann in item.annotations:
+                mask_json = None
+                bbox_json = ann.bbox_json
+                if ann.mask_json is not None:
+                    mask_json, bbox_json = _import_mask(db, sample, ann)
                 db.add(AnnotationHistory(
                     sample_id=sample_id,
                     project_id=project_id,
@@ -341,7 +364,9 @@ def import_annotations(
                     old_ann_type=None,
                     new_ann_type=ann.ann_type,
                     old_bbox_json=None,
-                    new_bbox_json=ann.bbox_json,
+                    new_bbox_json=bbox_json,
+                    old_mask_json=None,
+                    new_mask_json=mask_json,
                     changed_by=user_email,
                     changed_at=now,
                 ))
@@ -350,7 +375,8 @@ def import_annotations(
                     project_id=project_id,
                     label=ann.label,
                     ann_type=ann.ann_type,
-                    bbox_json=ann.bbox_json,
+                    bbox_json=bbox_json,
+                    mask_json=mask_json,
                     is_draft=False,
                     created_by=user_email,
                     created_at=now,
@@ -379,3 +405,58 @@ def import_annotations(
     log.info("import_completed project=%s counters=%s",
              project_id, resp.model_dump())
     return resp
+
+
+def _import_mask(db, sample, ann):
+    """Validate an imported mask against the real image and compress it.
+
+    Returns ``(stored_mask, bbox_json)``. The bbox is derived from the mask so
+    a re-imported export cannot drift from the geometry it describes.
+    """
+    dims = image_meta.resolve_dimensions(db, sample)
+    if not dims:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot import a mask for '{sample.filename}': its image "
+                "dimensions could not be read."
+            ),
+        )
+    img_w, img_h = dims
+    try:
+        height, width, counts = masks.validate_uncompressed(ann.mask_json, img_h, img_w)
+    except masks.MaskValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid mask for '{sample.filename}': {e}",
+        )
+    return masks.to_storage(counts, height, width), masks.normalized_bbox(
+        counts, height, width
+    )
+
+
+def _mask_size_error(db, project, filename: str, ann) -> Optional[str]:
+    """Check an imported mask against the real image, as a row-level reason.
+
+    Done in the validation pass so a mask drawn against the wrong image size
+    is reported alongside every other bad row, instead of aborting a partly
+    applied commit.
+    """
+    sample = db.query(ProjectSample).filter_by(
+        project_id=project.id, filename=filename,
+    ).first()
+    if sample is not None:
+        dims = image_meta.resolve_dimensions(db, sample)
+    else:
+        # on_missing_sample=create: the file was already confirmed to exist.
+        full_path = project.source_volume.rstrip("/") + "/" + filename
+        data = read_image_bytes(full_path)
+        dims = image_meta.dimensions_from_bytes(data) if data else None
+    if not dims:
+        return "image dimensions could not be read, so a mask cannot be imported"
+    img_w, img_h = dims
+    try:
+        masks.validate_uncompressed(ann.mask_json, img_h, img_w)
+    except masks.MaskValidationError as e:
+        return f"invalid mask_json: {e}"
+    return None

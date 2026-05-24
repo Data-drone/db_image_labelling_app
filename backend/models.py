@@ -40,7 +40,7 @@ class LabelingProject(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, default="")
-    task_type = Column(String(50), nullable=False)  # 'classification' or 'detection'
+    task_type = Column(String(50), nullable=False)  # 'classification', 'detection' or 'segmentation'
     class_list = Column(JSON, nullable=False)  # e.g. ["cat", "dog", "car"]
     source_volume = Column(Text, nullable=False)  # UC Volume path
     serving_endpoint = Column(String(255), nullable=True)  # Model Serving endpoint name
@@ -73,6 +73,13 @@ class ProjectSample(Base):
     # On SQLite this column is skipped; the JSON `embedding` column is used as fallback.
     embedding_vec = deferred(Column(JSON, nullable=True))  # placeholder type; overridden at runtime for Postgres
     prediction_confidence = Column(Float, nullable=True)
+    # Pixel dimensions in the orientation the browser renders, i.e. after
+    # PIL.ImageOps.exif_transpose. Masks are stored against these numbers, so
+    # storing the pre-rotation size here would misplace every mask on an
+    # EXIF-rotated photo. Nullable: samples imported before segmentation
+    # existed are backfilled lazily on first mask save.
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
 
     # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
     # columns in the DB but NOT mapped here — they're managed via raw SQL in
@@ -101,8 +108,12 @@ class Annotation(Base):
     sample_id = Column(Integer, ForeignKey("project_samples.id"), nullable=False)
     project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
     label = Column(String(255), nullable=False)
-    ann_type = Column(String(50), nullable=False)  # 'classification' or 'bbox'
+    ann_type = Column(String(50), nullable=False)  # 'classification', 'bbox' or 'mask'
     bbox_json = Column(JSON, nullable=True)  # {"x":..,"y":..,"w":..,"h":..}
+    # COCO *compressed* RLE: {"size": [h, w], "counts": "<ascii>"}. The API
+    # speaks the uncompressed counts-array form; see backend/masks.py for why
+    # the compression lives on this side of the wire.
+    mask_json = Column(JSON, nullable=True)
     is_draft = Column(Boolean, nullable=False, default=False)  # model suggestions vs human-confirmed
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -217,6 +228,8 @@ class AnnotationHistory(Base):
     new_ann_type = Column(String(50), nullable=True)
     old_bbox_json = Column(JSON, nullable=True)
     new_bbox_json = Column(JSON, nullable=True)
+    old_mask_json = Column(JSON, nullable=True)
+    new_mask_json = Column(JSON, nullable=True)
     changed_by = Column(String(255), default="")
     changed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
