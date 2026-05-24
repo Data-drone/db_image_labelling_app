@@ -1,10 +1,12 @@
 command: ["python", "start.py"]
 env:
-  # Lakebase: use App "postgres" resource (PG* env). Do not auto-create a project in SDK.
+  # Lakebase: connect via SDK to the dev project
   - name: LAKEBASE_AUTO_PROVISION
     value: 'false'
   - name: USE_LAKEBASE
     value: 'true'
+  - name: LAKEBASE_PROJECT_ID
+    value: 'cv-explorer-dev'
   # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
