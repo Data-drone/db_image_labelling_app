@@ -10,14 +10,6 @@ env:
     valueFrom: demo-volume
   - name: EXPORT_VOLUME_PATH
     valueFrom: export-volume
-  # Model Serving — default endpoint name from bundle var serving_endpoint_name
-  - name: SERVING_ENDPOINT
-    valueFrom: serving-endpoint
-  - name: SERVING_ENDPOINT_ADAPTER
-    value: 'sam31'
-  # Async pre-label job id from bundle-bound job resource
-  - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
-    valueFrom: app-preannotate-job
   # Finetuning job id
   - name: FINETUNE_DATABRICKS_JOB_ID
     valueFrom: app-finetune-job
