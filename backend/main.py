@@ -81,8 +81,14 @@ async def lifespan(app: FastAPI):
         init_db(engine)
         print("[STARTUP] Tables created OK", flush=True)
     except Exception as e:
-        print(f"[STARTUP] create_all failed: {e}", flush=True)
-        raise
+        print(f"[STARTUP] init_db failed: {e}", flush=True)
+        if lakebase_active:
+            # Lakebase connected but migrations failed (e.g. permission issues).
+            # Tables likely already exist from a prior deployment — proceed without
+            # running migrations. The app can still read/write existing tables.
+            log.warning("init_db failed on Lakebase, proceeding without migrations: %s", e)
+        else:
+            raise
     log.info("Database tables ready")
     print("[STARTUP] Startup complete!", flush=True)
 
