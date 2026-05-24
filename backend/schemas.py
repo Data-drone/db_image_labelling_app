@@ -269,6 +269,10 @@ class AnnotationHistoryOut(BaseModel):
 # ---------------------------------------------------------------------------
 class FinetuneTriggerRequest(BaseModel):
     export_path: str
+    base_model: Optional[str] = None
+    adapter_type: Optional[str] = None
+    epochs: Optional[int] = None
+    learning_rate: Optional[float] = None
 
 
 class FinetuneRunOut(BaseModel):
@@ -276,6 +280,13 @@ class FinetuneRunOut(BaseModel):
     project_id: int
     status: str
     export_path: str
+    base_model: Optional[str] = None
+    adapter_type: Optional[str] = None
+    epochs: Optional[int] = None
+    learning_rate: Optional[float] = None
+    mlflow_run_id: Optional[str] = None
+    mlflow_experiment_id: Optional[str] = None
+    metrics_json: Optional[dict] = None
     databricks_run_id: Optional[int] = None
     databricks_run_url: Optional[str] = None
     error_message: Optional[str] = None
@@ -285,6 +296,20 @@ class FinetuneRunOut(BaseModel):
     finished_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class ExportInfo(BaseModel):
+    """Metadata about an available export in the export volume."""
+    export_path: str
+    project_name: str
+    version: int
+    task_type: str
+    class_list: list[str]
+    image_count: int
+    annotation_count: int
+    exported_at: str
+    exported_by: str
+    format: str
 
 
 # ---------------------------------------------------------------------------

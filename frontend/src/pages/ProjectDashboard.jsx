@@ -19,6 +19,7 @@ import {
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
 import ClusterMap from '../components/ClusterMap';
+import FinetuneTab from '../components/FinetuneTab';
 
 export default function ProjectDashboard() {
   const { id: projectId } = useParams();
@@ -42,6 +43,10 @@ export default function ProjectDashboard() {
   const [exportError, setExportError] = useState('');
 
   const [configExportVolume, setConfigExportVolume] = useState('');
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState('overview');
+  const [appConfig, setAppConfig] = useState(null);
 
   // Finetuning state
   const [finetuneConfigured, setFinetuneConfigured] = useState(false);
@@ -178,6 +183,7 @@ export default function ProjectDashboard() {
         setStats(st);
         setDetailedStats(detailed);
         setInferenceSettings(inf);
+        setAppConfig(cfg);
         setFinetuneConfigured(!!cfg.finetune_job_configured);
         if (cfg.export_volume_path) setConfigExportVolume(cfg.export_volume_path);
       })
@@ -899,6 +905,41 @@ export default function ProjectDashboard() {
         </div>
       </div>
 
+      {/* Tab Navigation */}
+      {finetuneConfigured && (
+        <div style={{
+          display: 'flex',
+          gap: '0',
+          borderBottom: '2px solid var(--border-color)',
+          marginBottom: '1rem',
+        }}>
+          {['overview', 'finetuning'].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              style={{
+                padding: '0.6rem 1.25rem',
+                fontSize: '0.85rem',
+                fontWeight: 600,
+                border: 'none',
+                borderBottom: activeTab === tab ? '2px solid var(--accent-blue)' : '2px solid transparent',
+                marginBottom: '-2px',
+                background: 'transparent',
+                color: activeTab === tab ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                cursor: 'pointer',
+              }}
+            >
+              {tab === 'finetuning' ? 'Finetuning' : 'Overview'}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {activeTab === 'finetuning' && finetuneConfigured && (
+        <FinetuneTab projectId={projectId} appConfig={appConfig} />
+      )}
+
+      {activeTab === 'overview' && (<>
       {diversityError && (
         <div style={{ marginBottom: '1rem', padding: '0.5rem 0.75rem', borderRadius: 6, background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', fontSize: '0.8rem', color: '#a855f7' }}>
           {diversityError}
@@ -2531,6 +2572,7 @@ export default function ProjectDashboard() {
           </div>
         </>
       )}
+      </>)}
     </div>
   );
 }

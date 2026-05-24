@@ -178,6 +178,16 @@ class FinetuneRun(Base):
     project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
     status = Column(String(32), nullable=False, default="pending")
     export_path = Column(Text, nullable=False)
+    # Training config
+    base_model = Column(String(255), nullable=True)
+    adapter_type = Column(String(50), nullable=True)
+    epochs = Column(Integer, nullable=True)
+    learning_rate = Column(Float, nullable=True)
+    # Results / metrics
+    mlflow_run_id = Column(String(255), nullable=True)
+    mlflow_experiment_id = Column(String(255), nullable=True)
+    metrics_json = Column(JSON, nullable=True)
+    # Databricks job tracking
     databricks_run_id = Column(BigInteger, nullable=True)
     databricks_run_url = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)

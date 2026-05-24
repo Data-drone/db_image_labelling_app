@@ -193,6 +193,15 @@ export const fetchLatestFinetuneRun = (projectId) =>
 export const fetchFinetuneRun = (projectId, runId) =>
   api.get(`/projects/${projectId}/finetune-runs/${runId}`).then(r => r.data);
 
+export const listFinetuneRuns = (projectId) =>
+  api.get(`/projects/${projectId}/finetune-runs`).then(r => r.data);
+
+export const triggerFinetuneWithConfig = (projectId, payload) =>
+  api.post(`/projects/${projectId}/finetune`, payload, { timeout: 60000 }).then(r => r.data);
+
+export const listExports = (projectId) =>
+  api.get(`/projects/${projectId}/exports`).then(r => r.data);
+
 // ---------------------------------------------------------------------------
 // App config
 // ---------------------------------------------------------------------------

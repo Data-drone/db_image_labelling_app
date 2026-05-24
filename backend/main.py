@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .models import Base
-from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs, finetune_runs, similarity
+from .routes import projects, labeling, admin, export, browse, import_routes, inference, preannotate_runs, finetune_runs, similarity, exports_list
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ app.include_router(browse.router)
 app.include_router(finetune_runs.router)
 app.include_router(import_routes.router)
 app.include_router(similarity.router)
+app.include_router(exports_list.router)
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +150,18 @@ def app_config():
     export_vol = os.environ.get("EXPORT_VOLUME_PATH", "")
     if not export_vol:
         export_vol = os.environ.get("DEMO_VOLUME_PATH", "")
+    finetune_base_models = os.environ.get(
+        "FINETUNE_BASE_MODELS",
+        "facebook/sam-vit-large,facebook/sam-vit-base,facebook/sam-vit-huge"
+    ).split(",")
+
     return {
         "demo_volume_path": os.environ.get("DEMO_VOLUME_PATH", ""),
         "export_volume_path": export_vol,
         "finetune_job_configured": resolve_finetune_job_id() is not None,
+        "finetune_base_models": [m.strip() for m in finetune_base_models if m.strip()],
+        "finetune_default_epochs": int(os.environ.get("FINETUNE_DEFAULT_EPOCHS", "10")),
+        "finetune_default_lr": float(os.environ.get("FINETUNE_DEFAULT_LR", "0.0001")),
         "db_backend": "lakebase" if is_lakebase() else "sqlite",
     }
 

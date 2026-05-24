@@ -76,6 +76,10 @@ def trigger_finetune(
         project_id=project_id,
         status="submitting",
         export_path=export_path,
+        base_model=body.base_model,
+        adapter_type=body.adapter_type,
+        epochs=body.epochs,
+        learning_rate=body.learning_rate,
         created_by=user_email,
     )
     db.add(run_row)
@@ -84,7 +88,14 @@ def trigger_finetune(
 
     # Blocker #5: submit with idempotency token; crash-safe flow
     try:
-        drid = trigger_finetune_job(run_row.id, export_path)
+        drid = trigger_finetune_job(
+            run_row.id,
+            export_path,
+            base_model=body.base_model,
+            adapter_type=body.adapter_type,
+            epochs=body.epochs,
+            learning_rate=body.learning_rate,
+        )
     except Exception as e:
         log.exception("Failed to submit finetune job")
         run_row.status = "failed"
@@ -128,6 +139,22 @@ def get_latest_finetune_run(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No finetune runs for this project.")
     sync_run_status(row, db)
     return FinetuneRunOut.model_validate(row)
+
+
+@router.get("/finetune-runs", response_model=list[FinetuneRunOut])
+def list_finetune_runs(project_id: int, db: Session = Depends(get_db)):
+    """List all finetune runs for a project, newest first."""
+    get_project_or_404(project_id, db, LabelingProject)
+    rows = (
+        db.query(FinetuneRun)
+        .filter_by(project_id=project_id)
+        .order_by(FinetuneRun.id.desc())
+        .limit(50)
+        .all()
+    )
+    for row in rows:
+        sync_run_status(row, db)
+    return [FinetuneRunOut.model_validate(row) for row in rows]
 
 
 @router.get("/finetune-runs/{run_id}", response_model=FinetuneRunOut)
