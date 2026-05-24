@@ -5,13 +5,11 @@ env:
     value: 'false'
   - name: USE_LAKEBASE
     value: 'true'
-  # Unity Catalog volume — resource keys must match resources/cv_explorer_app.yml
+  # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
-    valueFrom: demo-volume
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
   - name: EXPORT_VOLUME_PATH
-    valueFrom: export-volume
+    value: '/Volumes/brian_gen_ai/cv_explorer/exports'
   # Finetuning job id
   - name: FINETUNE_DATABRICKS_JOB_ID
-    valueFrom: app-finetune-job
-  # Optional: PRE_ANNOTATE_ON_IMPORT=true, PRE_ANNOTATE_ON_IMPORT_MAX_SAMPLES=50
-  # Optional: USE_SERVING_DATA_PLANE=true for generic adapter on dataplane
+    value: '143235656478173'
