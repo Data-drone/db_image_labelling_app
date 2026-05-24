@@ -1,20 +1,12 @@
-command: ["python", "app.py"]
+command: ["python", "start.py"]
 env:
-  # Lakebase: use App "postgres" resource (PG* env). Do not auto-create a project in SDK.
   - name: LAKEBASE_AUTO_PROVISION
     value: 'false'
   - name: USE_LAKEBASE
-    value: 'true'
-  # Unity Catalog volume — resource keys must match resources/cv_explorer_app.yml
+    value: 'false'
   - name: DEMO_VOLUME_PATH
-    valueFrom: demo-volume
-  # Model Serving — default endpoint name from bundle var serving_endpoint_name
-  - name: SERVING_ENDPOINT
-    valueFrom: serving-endpoint
-  - name: SERVING_ENDPOINT_ADAPTER
-    value: 'sam31'
-  # Async pre-label job id from bundle-bound job resource
-  - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
-    valueFrom: app-preannotate-job
-  # Optional: PRE_ANNOTATE_ON_IMPORT=true, PRE_ANNOTATE_ON_IMPORT_MAX_SAMPLES=50
-  # Optional: USE_SERVING_DATA_PLANE=true for generic adapter on dataplane
+    value_from: demo-volume
+  - name: EXPORT_VOLUME_PATH
+    value_from: export-volume
+  - name: FINETUNE_DATABRICKS_JOB_ID
+    value: '318435402424260'
