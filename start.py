@@ -10,12 +10,6 @@ if _root not in sys.path:
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 
-# Debug: print PG-related env vars at startup
-print("[DEBUG] PG env vars:", flush=True)
-for k in sorted(os.environ):
-    if k.startswith("PG") or k in ("USE_LAKEBASE", "LAKEBASE_AUTO_PROVISION", "DATABRICKS_APP_PORT"):
-        print(f"  {k}={os.environ[k][:80]}", flush=True)
-
 import uvicorn
 
 port = int(os.environ.get("DATABRICKS_APP_PORT", "8000"))
