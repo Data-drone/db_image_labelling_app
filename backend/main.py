@@ -82,7 +82,21 @@ async def lifespan(app: FastAPI):
         print("[STARTUP] Tables created OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] create_all failed: {e}", flush=True)
-        raise
+        import traceback
+        traceback.print_exc()
+        # If lakebase init_db fails, fall back to SQLite
+        if lakebase_active:
+            print("[STARTUP] Lakebase init_db failed, falling back to SQLite...", flush=True)
+            from sqlalchemy import create_engine as _ce
+            from sqlalchemy.orm import sessionmaker as _sm
+            engine = _ce("sqlite:////tmp/cv_explorer.db", echo=False)
+            session_factory = _sm(bind=engine)
+            configure_db(engine, session_factory, False)
+            from .models import init_db as _init
+            _init(engine)
+            print("[STARTUP] SQLite fallback OK", flush=True)
+        else:
+            raise
     log.info("Database tables ready")
     print("[STARTUP] Startup complete!", flush=True)
 
