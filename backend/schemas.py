@@ -273,6 +273,7 @@ class FinetuneTriggerRequest(BaseModel):
     adapter_type: Optional[str] = None
     epochs: Optional[int] = None
     learning_rate: Optional[float] = None
+    uc_model_name: Optional[str] = None  # UC Model Registry: catalog.schema.model_name
 
 
 class FinetuneRunOut(BaseModel):
@@ -284,6 +285,7 @@ class FinetuneRunOut(BaseModel):
     adapter_type: Optional[str] = None
     epochs: Optional[int] = None
     learning_rate: Optional[float] = None
+    uc_model_name: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     mlflow_experiment_id: Optional[str] = None
     metrics_json: Optional[dict] = None

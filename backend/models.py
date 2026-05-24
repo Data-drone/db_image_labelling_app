@@ -183,6 +183,8 @@ class FinetuneRun(Base):
     adapter_type = Column(String(50), nullable=True)
     epochs = Column(Integer, nullable=True)
     learning_rate = Column(Float, nullable=True)
+    # UC lineage: where to register the output model
+    uc_model_name = Column(String(512), nullable=True)  # e.g. "brian_gen_ai.cv_explorer.my_sam_model"
     # Results / metrics
     mlflow_run_id = Column(String(255), nullable=True)
     mlflow_experiment_id = Column(String(255), nullable=True)

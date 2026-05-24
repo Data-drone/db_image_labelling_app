@@ -162,6 +162,7 @@ def app_config():
         "finetune_base_models": [m.strip() for m in finetune_base_models if m.strip()],
         "finetune_default_epochs": int(os.environ.get("FINETUNE_DEFAULT_EPOCHS", "10")),
         "finetune_default_lr": float(os.environ.get("FINETUNE_DEFAULT_LR", "0.0001")),
+        "finetune_default_uc_model": os.environ.get("FINETUNE_UC_MODEL_NAME", ""),
         "db_backend": "lakebase" if is_lakebase() else "sqlite",
     }
 

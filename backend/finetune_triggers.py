@@ -23,6 +23,7 @@ def trigger_finetune_job(
     adapter_type: str | None = None,
     epochs: int | None = None,
     learning_rate: float | None = None,
+    uc_model_name: str | None = None,
 ) -> int:
     """Kick off the configured finetuning job. Returns the Databricks run id."""
     job_id = resolve_finetune_job_id()
@@ -44,6 +45,8 @@ def trigger_finetune_job(
         job_params["epochs"] = str(epochs)
     if learning_rate is not None:
         job_params["learning_rate"] = str(learning_rate)
+    if uc_model_name:
+        job_params["uc_model_name"] = uc_model_name
 
     drid = trigger_databricks_job(
         job_id, job_params, idempotency_token=f"finetune-{run_db_id}"

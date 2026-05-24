@@ -80,6 +80,7 @@ def trigger_finetune(
         adapter_type=body.adapter_type,
         epochs=body.epochs,
         learning_rate=body.learning_rate,
+        uc_model_name=body.uc_model_name,
         created_by=user_email,
     )
     db.add(run_row)
@@ -95,6 +96,7 @@ def trigger_finetune(
             adapter_type=body.adapter_type,
             epochs=body.epochs,
             learning_rate=body.learning_rate,
+            uc_model_name=body.uc_model_name,
         )
     except Exception as e:
         log.exception("Failed to submit finetune job")

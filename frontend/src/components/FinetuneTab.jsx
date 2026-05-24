@@ -19,6 +19,7 @@ export default function FinetuneTab({ projectId, appConfig }) {
   const [adapterType, setAdapterType] = useState('lora');
   const [epochs, setEpochs] = useState(appConfig?.finetune_default_epochs || 10);
   const [learningRate, setLearningRate] = useState(appConfig?.finetune_default_lr || 0.0001);
+  const [ucModelName, setUcModelName] = useState(appConfig?.finetune_default_uc_model || '');
 
   // Run state
   const [runs, setRuns] = useState([]);
@@ -87,6 +88,7 @@ export default function FinetuneTab({ projectId, appConfig }) {
         adapter_type: adapterType,
         epochs: epochs || null,
         learning_rate: learningRate || null,
+        uc_model_name: ucModelName || null,
       };
       await triggerFinetuneWithConfig(projectId, payload);
       await loadRuns();
@@ -236,6 +238,23 @@ export default function FinetuneTab({ projectId, appConfig }) {
               onChange={(e) => setLearningRate(parseFloat(e.target.value) || 0.0001)}
               style={{ width: '100%', padding: '0.5rem', borderRadius: 6, border: '1px solid var(--border-color)', fontSize: '0.85rem' }}
             />
+          </div>
+        </div>
+
+        {/* UC Model Registry */}
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+            UC Model Name <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>(optional)</span>
+          </label>
+          <input
+            type="text"
+            placeholder="catalog.schema.model_name"
+            value={ucModelName}
+            onChange={(e) => setUcModelName(e.target.value)}
+            style={{ width: '100%', padding: '0.5rem', borderRadius: 6, border: '1px solid var(--border-color)', fontSize: '0.85rem' }}
+          />
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+            Unity Catalog model path for lineage tracking. The trained model will be registered here.
           </div>
         </div>
 

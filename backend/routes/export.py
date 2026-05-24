@@ -181,6 +181,17 @@ def export_project(
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "exported_by": get_user_email(request),
         "format": "coco" if is_detection else "csv",
+        # UC Lineage: track which samples/annotations produced this export
+        "lineage": {
+            "source_volume_uc": p.source_volume,
+            "export_volume_uc": export_path,
+            "sample_ids": [s.id for s in samples],
+            "sample_count": len(samples),
+            "annotation_ids": [
+                a.id for s in samples
+                for a in ann_by_sample.get(s.id, []) if not a.is_draft
+            ],
+        },
     }
     w.files.upload(
         f"{export_dir}/metadata.json",
