@@ -1,7 +1,8 @@
 /**
  * Labeling View — project-centric annotation interface.
  * 3-zone layout: top bar, center image (75%), right panel (25%).
- * Supports classification (numbered buttons) and detection (bbox canvas).
+ * Supports classification (numbered buttons), detection (bbox canvas) and
+ * segmentation (mask brush canvas).
  * Sample scrubber: navigate back/forth through all samples.
  */
 
@@ -9,6 +10,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import Spinner from '../components/Spinner';
 import BBoxCanvas, { getClassColor } from '../components/BBoxCanvas';
+import MaskCanvas from '../components/MaskCanvas';
+import MaskToolPanel from '../components/MaskToolPanel';
+import ImageAdjust from '../components/ImageAdjust';
+import { countsOf } from '../utils/rle';
 import {
   fetchProject,
   fetchProjectStats,
@@ -59,6 +64,23 @@ export default function LabelingView() {
   const undoStack = useRef([]);
   const MAX_UNDO = 20;
 
+  // Segmentation mode state. A "layer" is one mask annotation: label + a
+  // COCO-RLE mask over the whole image. Only the active layer is editable.
+  const [maskLayers, setMaskLayers] = useState([]);
+  const [activeMaskId, setActiveMaskId] = useState(null);
+  const [maskTool, setMaskTool] = useState('brush');
+  const [brushSize, setBrushSize] = useState(24);
+  const [maskHistory, setMaskHistory] = useState({ canUndo: false, canRedo: false });
+  const maskCanvasRef = useRef(null);
+  const nextMaskId = useRef(1);
+  // annotate-batch replaces every annotation on the sample, so anything that
+  // isn't a mask has to be handed back verbatim or saving a mask silently
+  // deletes it.
+  const preservedAnnotations = useRef([]);
+
+  // Display-only image adjustment, shared by the bbox and mask canvases.
+  const [adjust, setAdjust] = useState({ brightness: 1, contrast: 1 });
+
   // Multi-label classification state
   const [selectedLabels, setSelectedLabels] = useState(new Set());
 
@@ -80,6 +102,7 @@ export default function LabelingView() {
   const [actionError, setActionError] = useState('');
 
   const isDetection = project?.task_type === 'detection';
+  const isSegmentation = project?.task_type === 'segmentation';
   const total = sampleList.length;
   const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
@@ -189,6 +212,25 @@ export default function LabelingView() {
           }));
         setBoxes(existingBoxes);
 
+        const existingMasks = s.annotations
+          .filter(a => a.ann_type === 'mask' && a.mask_json)
+          .map(a => ({
+            id: `existing-${nextMaskId.current++}`,
+            label: a.label,
+            classIndex: Math.max(0, (project?.class_list || []).indexOf(a.label)),
+            isDraft: Boolean(a.is_draft),
+            mask_json: a.mask_json,
+          }));
+        setMaskLayers(existingMasks);
+        setActiveMaskId(existingMasks.length > 0 ? existingMasks[0].id : null);
+        preservedAnnotations.current = s.annotations
+          .filter(a => a.ann_type !== 'mask')
+          .map(a => ({
+            label: a.label,
+            ann_type: a.ann_type,
+            bbox_json: a.bbox_json ?? null,
+          }));
+
         const existingLabels = new Set(
           s.annotations
             .filter(a => a.ann_type === 'classification')
@@ -198,6 +240,9 @@ export default function LabelingView() {
       } else {
         setBoxes([]);
         setSelectedLabels(new Set());
+        setMaskLayers([]);
+        setActiveMaskId(null);
+        preservedAnnotations.current = [];
       }
       setSelectedBoxId(null);
       undoStack.current = [];
@@ -429,6 +474,22 @@ export default function LabelingView() {
             }));
           setBoxes(predBoxes);
         }
+        if (isSegmentation) {
+          const predLayers = preds
+            .filter(p => p.ann_type === 'mask' && countsOf(p.mask_json))
+            .map(p => ({
+              id: `pred-${nextMaskId.current++}`,
+              label: p.label,
+              classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
+              isDraft: true,
+              mask_json: p.mask_json,
+            }));
+          setMaskLayers(predLayers);
+          setActiveMaskId(predLayers.length > 0 ? predLayers[0].id : null);
+          if (predLayers.length === 0) {
+            setActionError('Model returned predictions but no usable masks for this image.');
+          }
+        }
       }
     } catch (err) {
       console.error('Prediction failed:', err);
@@ -442,6 +503,10 @@ export default function LabelingView() {
     if (!sample || !predictions || predictions.length === 0 || saving) return;
     if (isDetection) {
       handleSaveBoxes();
+      return;
+    }
+    if (isSegmentation) {
+      handleSaveMasks();
       return;
     }
     setSaving(true);
@@ -465,6 +530,8 @@ export default function LabelingView() {
   const handleRejectPrediction = () => {
     setPredictions(null);
     setBoxes([]);
+    setMaskLayers([]);
+    setActiveMaskId(null);
   };
 
   // Detection: box CRUD
@@ -546,6 +613,73 @@ export default function LabelingView() {
     }
   };
 
+  // ---------- Segmentation: mask layer CRUD ----------
+  const handleAddMaskLayer = useCallback(() => {
+    const label = project?.class_list?.[activeClassIndex];
+    if (!label) return;
+    const layer = {
+      id: `new-${nextMaskId.current++}`,
+      label,
+      classIndex: activeClassIndex,
+      isDraft: false,
+      mask_json: null,
+    };
+    setMaskLayers(prev => [...prev, layer]);
+    setActiveMaskId(layer.id);
+  }, [project, activeClassIndex]);
+
+  // Called once per brush stroke. `mask` is null when the layer was erased
+  // empty; the layer stays so the user can keep painting, it just won't save.
+  const handleMaskUpdated = useCallback((id, mask) => {
+    setMaskLayers(prev => prev.map(l => (
+      String(l.id) === String(id) ? { ...l, mask_json: mask, isDraft: false } : l
+    )));
+  }, []);
+
+  const handleDeleteMaskLayer = useCallback((id) => {
+    setMaskLayers(prev => {
+      const next = prev.filter(l => String(l.id) !== String(id));
+      setActiveMaskId(cur => (
+        String(cur) === String(id) ? (next.length > 0 ? next[next.length - 1].id : null) : cur
+      ));
+      return next;
+    });
+  }, []);
+
+  const handleRelabelMaskLayer = useCallback((id, classIndex) => {
+    const label = project?.class_list?.[classIndex];
+    if (!label) return;
+    setMaskLayers(prev => prev.map(l => (
+      String(l.id) === String(id) ? { ...l, classIndex, label } : l
+    )));
+  }, [project]);
+
+  // Segmentation: Save & Next
+  const handleSaveMasks = useCallback(async () => {
+    if (!sample || saving) return;
+    const painted = maskLayers.filter(l => countsOf(l.mask_json));
+    if (painted.length === 0) return;
+    setSaving(true);
+    setActionError('');
+    try {
+      const annotations = [
+        ...preservedAnnotations.current,
+        ...painted.map(l => ({
+          label: l.label,
+          ann_type: 'mask',
+          mask_json: l.mask_json,
+        })),
+      ];
+      await annotateSampleBatch(projectId, sample.id, annotations);
+      markCurrentAndAdvance();
+    } catch (err) {
+      console.error('Save failed:', err);
+      setActionError(humanizeApiError(err));
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, maskLayers, projectId, markCurrentAndAdvance]);
+
   // Keyboard shortcuts
   useEffect(() => {
     if (!project || !sample) return;
@@ -562,10 +696,51 @@ export default function LabelingView() {
         return;
       }
 
+      // Segmentation undo/redo is per brush stroke and lives in MaskCanvas,
+      // which owns the pixel diffs.
+      if (isMod && (e.key === 'z' || e.key === 'Z') && isSegmentation) {
+        e.preventDefault();
+        if (e.shiftKey) maskCanvasRef.current?.redo();
+        else maskCanvasRef.current?.undo();
+        return;
+      }
+      if (isMod && e.key === 'y' && isSegmentation) {
+        e.preventDefault();
+        maskCanvasRef.current?.redo();
+        return;
+      }
+
       // [ / ]: cycle box selection (detection only)
       if ((e.key === '[' || e.key === ']') && isDetection) {
         e.preventDefault();
         cycleSelectedBox(e.key === '[');
+        return;
+      }
+
+      // [ / ]: brush size (segmentation)
+      if ((e.key === '[' || e.key === ']') && isSegmentation) {
+        e.preventDefault();
+        setBrushSize(prev => {
+          const step = Math.max(1, Math.round(prev * 0.25));
+          return Math.min(200, Math.max(2, e.key === '[' ? prev - step : prev + step));
+        });
+        return;
+      }
+
+      // B / E: brush or eraser
+      if ((e.key === 'b' || e.key === 'B') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('brush');
+        return;
+      }
+      if ((e.key === 'e' || e.key === 'E') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('eraser');
+        return;
+      }
+      if ((e.key === 'p' || e.key === 'P') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('polygon');
         return;
       }
 
@@ -589,7 +764,7 @@ export default function LabelingView() {
           setFlashIndex(idx);
           flashTimeout.current = setTimeout(() => setFlashIndex(null), 250);
 
-          if (isDetection) {
+          if (isDetection || isSegmentation) {
             setActiveClassIndex(idx);
           } else {
             toggleLabel(project.class_list[idx]);
@@ -612,10 +787,17 @@ export default function LabelingView() {
         e.preventDefault();
         if (isDetection) {
           handleSaveBoxes();
+        } else if (isSegmentation) {
+          handleSaveMasks();
         } else {
           handleSaveClassification();
         }
       } else if (e.key === 'Escape') {
+        // Escape is overloaded: abandon the in-progress polygon first, and only
+        // leave the page once there is nothing local left to cancel.
+        if (isSegmentation && maskCanvasRef.current?.cancelPolygon()) {
+          return;
+        }
         if (isDetection && selectedBoxId) {
           setSelectedBoxId(null);
         } else {
@@ -625,7 +807,9 @@ export default function LabelingView() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels, handleSaveClassification, toggleLabel]);
+  }, [project, sample, saving, projectId, navigate, isDetection, isSegmentation, selectedBoxId,
+      boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
+      handleSaveClassification, handleSaveMasks, toggleLabel]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -703,7 +887,7 @@ export default function LabelingView() {
         <h2 style={{ fontWeight: 600, fontSize: '1.1rem', margin: 0 }}>
           {project.name}
         </h2>
-        <span className={`badge ${isDetection ? 'badge-yellow' : 'badge-blue'}`}>
+        <span className={`badge ${isDetection || isSegmentation ? 'badge-yellow' : 'badge-blue'}`}>
           {project.task_type}
         </span>
 
@@ -729,7 +913,7 @@ export default function LabelingView() {
           </span>
         )}
 
-        {isDetection && project.class_list[activeClassIndex] && (
+        {(isDetection || isSegmentation) && project.class_list[activeClassIndex] && (
           <span style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -877,6 +1061,26 @@ export default function LabelingView() {
                 onBoxUpdated={handleBoxUpdated}
                 onBoxSelected={setSelectedBoxId}
                 onBoxDeleted={handleBoxDeleted}
+                brightness={adjust.brightness}
+                contrast={adjust.contrast}
+              />
+            ) : isSegmentation ? (
+              <MaskCanvas
+                ref={maskCanvasRef}
+                imageSrc={sampleImageUrl(projectId, sample.id)}
+                imageWidth={sample.width}
+                imageHeight={sample.height}
+                masks={maskLayers}
+                activeMaskId={activeMaskId}
+                activeClassIndex={activeClassIndex}
+                classList={project.class_list}
+                tool={maskTool}
+                brushSize={brushSize}
+                brightness={adjust.brightness}
+                contrast={adjust.contrast}
+                onMaskUpdated={handleMaskUpdated}
+                onMaskSelected={setActiveMaskId}
+                onHistoryChange={setMaskHistory}
               />
             ) : (
               <>
@@ -1016,6 +1220,14 @@ export default function LabelingView() {
                     </button>
                   </div>
 
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <ImageAdjust
+                      brightness={adjust.brightness}
+                      contrast={adjust.contrast}
+                      onChange={setAdjust}
+                    />
+                  </div>
+
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0 0 0.75rem' }} />
 
                   {/* Annotation list */}
@@ -1146,6 +1358,52 @@ export default function LabelingView() {
 
                   <KeyboardShortcutLegend maxClassKey={Math.min(9, project.class_list.length)} />
                 </>
+              ) : isSegmentation ? (
+                /* ===== SEGMENTATION MODE ===== */
+                <MaskToolPanel
+                  classList={project.class_list}
+                  activeClassIndex={activeClassIndex}
+                  onActiveClassChange={setActiveClassIndex}
+                  flashIndex={flashIndex}
+                  layers={maskLayers}
+                  activeMaskId={activeMaskId}
+                  onSelectLayer={setActiveMaskId}
+                  onAddLayer={handleAddMaskLayer}
+                  onDeleteLayer={handleDeleteMaskLayer}
+                  onRelabelLayer={handleRelabelMaskLayer}
+                  imageWidth={sample.width}
+                  imageHeight={sample.height}
+                  tool={maskTool}
+                  onToolChange={setMaskTool}
+                  brushSize={brushSize}
+                  onBrushSizeChange={setBrushSize}
+                  adjust={adjust}
+                  onAdjustChange={setAdjust}
+                  canUndo={maskHistory.canUndo}
+                  canRedo={maskHistory.canRedo}
+                  onUndo={() => maskCanvasRef.current?.undo()}
+                  onRedo={() => maskCanvasRef.current?.redo()}
+                  onClearMask={() => maskCanvasRef.current?.clear()}
+                  newClassName={newClassName}
+                  onNewClassNameChange={setNewClassName}
+                  onAddClass={handleAddClass}
+                  addingClass={addingClass}
+                  saving={saving}
+                  onSave={handleSaveMasks}
+                  onSkip={handleSkip}
+                  predictions={predictions}
+                  endpointReady={endpointReady}
+                  predicting={predicting}
+                  onPredict={handlePredict}
+                  hasDraftAnnotations={hasDraftAnnotations}
+                  onAcceptDrafts={handleAcceptDraftsOnly}
+                  onClearDrafts={handleClearDraftsOnly}
+                >
+                  <KeyboardShortcutLegend
+                    maxClassKey={Math.min(9, project.class_list.length)}
+                    mode="segmentation"
+                  />
+                </MaskToolPanel>
               ) : (
                 /* ===== CLASSIFICATION MODE (multi-label) ===== */
                 <>
@@ -1456,18 +1714,34 @@ const kbdStyle = {
   textAlign: 'center',
 };
 
-function KeyboardShortcutLegend({ maxClassKey }) {
-  const shortcuts = [
+function KeyboardShortcutLegend({ maxClassKey, mode = 'detection' }) {
+  const common = [
     { keys: [`1-${maxClassKey}`], desc: 'Select class' },
     { keys: ['Enter'], desc: 'Save & next' },
-    { keys: ['Del'], desc: 'Delete box' },
-    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
-    { keys: [']'], desc: 'Next box' },
-    { keys: ['['], desc: 'Prev box' },
     { keys: ['N'], desc: 'Next unlabeled' },
     { keys: ['S'], desc: 'Skip' },
     { keys: ['\u2190 \u2192'], desc: 'Navigate' },
     { keys: ['Esc'], desc: 'Deselect / Back' },
+  ];
+  const shortcuts = mode === 'segmentation' ? [
+    ...common.slice(0, 2),
+    { keys: ['B'], desc: 'Brush' },
+    { keys: ['E'], desc: 'Eraser' },
+    { keys: ['P'], desc: 'Polygon' },
+    { keys: [']'], desc: 'Bigger brush' },
+    { keys: ['['], desc: 'Smaller brush' },
+    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo stroke' },
+    { keys: ['\u21e7\u2318/Ctrl', 'Z'], desc: 'Redo stroke' },
+    { keys: ['Shift', 'drag'], desc: 'Pan' },
+    { keys: ['Scroll'], desc: 'Zoom' },
+    ...common.slice(2),
+  ] : [
+    ...common.slice(0, 2),
+    { keys: ['Del'], desc: 'Delete box' },
+    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
+    { keys: [']'], desc: 'Next box' },
+    { keys: ['['], desc: 'Prev box' },
+    ...common.slice(2),
   ];
 
   return (

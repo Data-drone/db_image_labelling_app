@@ -303,7 +303,7 @@ export default function CreateProject() {
         <div style={{ marginBottom: '1.25rem' }}>
           <label style={labelStyle}>Task Type *</label>
           <div style={{ display: 'flex', gap: '0.75rem' }}>
-            {['classification', 'detection'].map((t) => (
+            {['classification', 'detection', 'segmentation'].map((t) => (
               <button
                 key={t}
                 type="button"

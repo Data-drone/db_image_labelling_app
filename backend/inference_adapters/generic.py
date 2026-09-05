@@ -31,5 +31,16 @@ class GenericAdapter(InferenceAdapter):
             return inf.parse_classification_response(raw, class_list, endpoint_config)
         if task_type == "detection":
             return inf.parse_detection_response(raw, class_list, endpoint_config)
+        if task_type == "segmentation":
+            # There is no generic wire format for masks -- a segmentation endpoint
+            # needs an adapter that knows its own response shape (see ``sam31``).
+            # Parse boxes so the run still yields locatable drafts rather than
+            # whole-image labels; the mask is simply absent.
+            log.warning(
+                "Segmentation project on the 'generic' adapter: masks cannot be parsed "
+                'generically. Set endpoint_config {"adapter": "sam31"} for mask drafts. '
+                "Falling back to the detection parser (boxes only)."
+            )
+            return inf.parse_detection_response(raw, class_list, endpoint_config)
         log.warning("Unknown task_type '%s', trying classification parser", task_type)
         return inf.parse_classification_response(raw, class_list, endpoint_config)

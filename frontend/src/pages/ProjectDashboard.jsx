@@ -794,7 +794,7 @@ export default function ProjectDashboard() {
             <h1 style={{ fontSize: '1.75rem', fontWeight: 700, margin: 0 }}>
               {project.name}
             </h1>
-            <span className={`badge ${project.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
+            <span className={`badge ${project.task_type === 'classification' ? 'badge-blue' : 'badge-yellow'}`}>
               {project.task_type}
             </span>
             {project.version > 1 && (
@@ -1276,6 +1276,7 @@ export default function ProjectDashboard() {
               <p>
                 Save a snapshot of your labels for training on Databricks. Images stay in their existing Volume.
                 {project.task_type === 'detection' && ' Image dimensions and pixel COCO boxes are materialized when training loads the snapshot.'}
+                {project.task_type === 'segmentation' && ' Masks are stored as COCO RLE in the snapshot.'}
               </p>
             )}
           </div>
