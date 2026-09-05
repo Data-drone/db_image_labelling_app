@@ -90,6 +90,13 @@ async def lifespan(app: FastAPI):
         else:
             raise
     log.info("Database tables ready")
+
+    try:
+        from .demo_seed import seed_demo_projects
+        seed_demo_projects(session_factory)
+    except Exception as e:  # belt and braces -- seeding is never load-bearing
+        log.warning("Demo seed skipped: %s", e)
+
     print("[STARTUP] Startup complete!", flush=True)
 
     yield
