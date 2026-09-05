@@ -39,24 +39,64 @@ export function encodeMask(buf, width, height) {
   return counts;
 }
 
-/** Uncompressed RLE counts -> row-major Uint8Array. */
+/**
+ * Uncompressed RLE counts -> row-major Uint8Array.
+ *
+ * Throws on anything `validateCounts` rejects. Clamping a bad mask into
+ * something renderable would be worse than failing: the repaired version gets
+ * re-encoded on the first stroke and saved over the original.
+ */
 export function decodeMask(counts, width, height) {
+  validateCounts(counts, height, width);
   const buf = new Uint8Array(width * height);
-  let pos = 0;
+  // Walk columns with running row/col counters rather than `%` and `/` per
+  // pixel; same order, no division in the inner loop.
+  let row = 0;
+  let col = 0;
   let val = 0;
   for (let i = 0; i < counts.length; i++) {
-    const c = counts[i];
+    let c = counts[i];
     if (val) {
-      const end = Math.min(pos + c, width * height);
-      for (let p = pos; p < end; p++) {
-        // p counts down columns: column = p / height, row = p % height
-        buf[(p % height) * width + ((p / height) | 0)] = 1;
+      while (c-- > 0) {
+        buf[row * width + col] = 1;
+        if (++row === height) { row = 0; col++; }
       }
+    } else {
+      // Skipping background: advance the counters without touching the buffer.
+      const total = row + c;
+      col += (total / height) | 0;
+      row = total % height;
     }
-    pos += c;
     val ^= 1;
   }
   return buf;
+}
+
+/**
+ * Throw unless `counts` is a well-formed uncompressed RLE for `height`x`width`.
+ *
+ * Fails closed on the cases a tolerant decoder quietly absorbs: fractional or
+ * negative runs, a total that is not exactly h*w (which clips or drops
+ * foreground), and dimensions that are not positive integers.
+ */
+export function validateCounts(counts, height, width) {
+  if (!Number.isSafeInteger(height) || !Number.isSafeInteger(width) || height <= 0 || width <= 0) {
+    throw new Error(`mask size must be positive integers, got ${height}x${width}`);
+  }
+  if (!Array.isArray(counts) || counts.length === 0) {
+    throw new Error('mask counts must be a non-empty array');
+  }
+  let total = 0;
+  for (let i = 0; i < counts.length; i++) {
+    const c = counts[i];
+    if (!Number.isSafeInteger(c) || c < 0) {
+      throw new Error(`mask counts[${i}] must be a non-negative integer, got ${c}`);
+    }
+    total += c;
+  }
+  if (total !== height * width) {
+    throw new Error(`mask counts sum to ${total}, expected ${height * width} for ${height}x${width}`);
+  }
 }
 
 /** Foreground pixel count. Odd-indexed runs are the foreground ones. */
@@ -74,8 +114,10 @@ export function maskIsEmpty(buf) {
 
 /**
  * Accepts either wire form and returns counts, or null if unusable.
- * Tolerates the compressed string form by refusing it rather than guessing —
- * the API is not supposed to hand us one.
+ *
+ * A compressed string is refused rather than guessed at — the API is not
+ * supposed to hand us one. Shape only: whether the counts are *valid* depends
+ * on the size they are paired with, which is `readMask`'s job.
  */
 export function countsOf(mask) {
   if (!mask) return null;
@@ -84,9 +126,42 @@ export function countsOf(mask) {
   return counts;
 }
 
-/** [height, width] from a wire mask, falling back to the given dimensions. */
-export function sizeOf(mask, fallbackHeight, fallbackWidth) {
+/** [height, width] from a wire mask, or null when it carries no usable size. */
+export function sizeOf(mask) {
   const size = mask && !Array.isArray(mask) ? mask.size : null;
-  if (Array.isArray(size) && size.length === 2) return [size[0], size[1]];
-  return [fallbackHeight, fallbackWidth];
+  if (!Array.isArray(size) || size.length !== 2) return null;
+  const [h, w] = size;
+  if (!Number.isSafeInteger(h) || !Number.isSafeInteger(w) || h <= 0 || w <= 0) return null;
+  return [h, w];
+}
+
+/**
+ * Validate a wire mask without decoding it.
+ *
+ * Returns `{size: [h, w], counts}` when the mask is well-formed and matches
+ * `expected` dimensions (when given), otherwise `{error}` naming the problem.
+ * Callers use this to tell three states apart that all look alike otherwise:
+ * a new empty layer, a layer the user erased on purpose, and an existing
+ * annotation this build cannot read. The third must be preserved untouched,
+ * never silently replaced by whatever a lenient decode produced.
+ */
+export function readMask(mask, expectedHeight, expectedWidth) {
+  const counts = countsOf(mask);
+  if (!counts) {
+    return { error: typeof mask?.counts === 'string' || typeof mask === 'string'
+      ? 'mask is in the compressed string form; the API should have decompressed it'
+      : 'mask has no usable counts array' };
+  }
+  const size = sizeOf(mask);
+  if (!size) return { error: 'mask is missing a valid [height, width] size' };
+  const [h, w] = size;
+  if (expectedHeight && expectedWidth && (h !== expectedHeight || w !== expectedWidth)) {
+    return { error: `mask is ${h}x${w} but the image is ${expectedHeight}x${expectedWidth}` };
+  }
+  try {
+    validateCounts(counts, h, w);
+  } catch (e) {
+    return { error: e.message };
+  }
+  return { size, counts };
 }

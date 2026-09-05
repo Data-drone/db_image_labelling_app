@@ -8,7 +8,9 @@
     "build": "vite build",
     "lint": "eslint .",
     "test:rle": "node test/rle.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:payload": "node test/annotationPayload.test.mjs",
+    "test": "npm run test:rle && npm run test:payload"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.0",

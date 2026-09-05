@@ -65,8 +65,14 @@ export const fetchNextSample = (projectId) =>
 export const annotateSample = (projectId, sampleId, data) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/annotate`, data).then(r => r.data);
 
-export const annotateSampleBatch = (projectId, sampleId, annotations) =>
-  api.post(`/projects/${projectId}/samples/${sampleId}/annotate-batch`, { annotations }).then(r => r.data);
+// Replaces every annotation on the sample. `allowEmpty` is required to submit
+// an empty list, because "the user erased everything" and "a bug built an empty
+// payload" look identical on the wire and this endpoint deletes what it replaces.
+export const annotateSampleBatch = (projectId, sampleId, annotations, allowEmpty = false) =>
+  api.post(`/projects/${projectId}/samples/${sampleId}/annotate-batch`, {
+    annotations,
+    allow_empty: allowEmpty,
+  }).then(r => r.data);
 
 export const skipSample = (projectId, sampleId) =>
   api.post(`/projects/${projectId}/samples/${sampleId}/skip`).then(r => r.data);

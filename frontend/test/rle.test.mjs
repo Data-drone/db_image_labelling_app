@@ -16,13 +16,26 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
-import { encodeMask, decodeMask, maskArea, maskIsEmpty, countsOf, sizeOf } from '../src/utils/rle.js';
+import {
+  encodeMask, decodeMask, maskArea, maskIsEmpty, countsOf, sizeOf, readMask, validateCounts,
+} from '../src/utils/rle.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = JSON.parse(
   readFileSync(join(here, '../../backend/tests/fixtures/coco_rle_golden.json'), 'utf8'),
 );
 const cases = fixture.cases || fixture;
+
+/** The fixture's independently-generated row-major bitmap (MSB-first bits). */
+function goldenBitmap(c) {
+  const [h, w] = c.size;
+  const bytes = Buffer.from(c.pixels_b64, 'base64');
+  const buf = new Uint8Array(h * w);
+  for (let i = 0; i < buf.length; i++) {
+    buf[i] = (bytes[i >> 3] >> (7 - (i & 7))) & 1;
+  }
+  return buf;
+}
 
 let passed = 0;
 const failures = [];
@@ -59,6 +72,17 @@ for (const c of cases) {
     let n = 0;
     for (let i = 0; i < buf.length; i++) if (buf[i]) n++;
     assert.equal(n, c.area);
+  });
+
+  // The two assertions that actually pin the pixels. Round-tripping,
+  // area and bbox are all satisfied by a consistently transposed or flipped
+  // codec; comparing against pycocotools' own decode is not.
+  check(`decode equals the pycocotools bitmap for ${c.name}`, () => {
+    assert.deepEqual(decodeMask(c.counts, w, h), goldenBitmap(c));
+  });
+
+  check(`encoding the pycocotools bitmap gives the golden counts for ${c.name}`, () => {
+    assert.deepEqual(encodeMask(goldenBitmap(c), w, h), c.counts);
   });
 
   check(`bbox matches pycocotools for ${c.name}`, () => {
@@ -109,6 +133,21 @@ check('runs are column-major, not row-major', () => {
   assert.deepEqual(encodeMask(buf, 2, 3), [0, 3, 3]);
 });
 
+check('the fixture set could catch a transposed codec', () => {
+  // Guard the guard: empty, full, centred-square and checkerboard fixtures are
+  // symmetric and prove nothing about orientation on their own.
+  const asymmetric = cases.filter((c) => {
+    const [h, w] = c.size;
+    if (h !== w) return true;
+    const b = goldenBitmap(c);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) if (b[y * w + x] !== b[x * w + y]) return true;
+    }
+    return false;
+  });
+  assert.ok(asymmetric.length >= 12, `only ${asymmetric.length} asymmetric fixtures`);
+});
+
 check('countsOf and sizeOf tolerate both wire shapes', () => {
   assert.deepEqual(countsOf({ size: [2, 2], counts: [1, 3] }), [1, 3]);
   assert.deepEqual(countsOf([1, 3]), [1, 3]);
@@ -116,8 +155,39 @@ check('countsOf and sizeOf tolerate both wire shapes', () => {
   assert.equal(countsOf({ size: [2, 2], counts: [] }), null);
   // A compressed string is refused rather than misread as counts.
   assert.equal(countsOf({ size: [2, 2], counts: 'PQR' }), null);
-  assert.deepEqual(sizeOf({ size: [7, 9], counts: [1] }, 1, 1), [7, 9]);
-  assert.deepEqual(sizeOf(null, 4, 5), [4, 5]);
+  assert.deepEqual(sizeOf({ size: [7, 9], counts: [1] }), [7, 9]);
+  assert.equal(sizeOf(null), null);
+  assert.equal(sizeOf({ size: [0, 5], counts: [1] }), null);
+  assert.equal(sizeOf({ size: [2.5, 5], counts: [1] }), null);
+});
+
+// Malformed masks must fail closed. A decoder that clamps or pads produces
+// something renderable, which is then re-encoded on the first stroke and saved
+// over the original -- silent corruption of the user's data.
+check('validateCounts rejects malformed runs and sizes', () => {
+  assert.throws(() => validateCounts([0, 100], 2, 2), /sum to 100/);
+  assert.throws(() => validateCounts([1], 2, 2), /sum to 1/);
+  assert.throws(() => validateCounts([2, -1, 3], 2, 2), /non-negative integer/);
+  assert.throws(() => validateCounts([1.5, 2.5], 2, 2), /non-negative integer/);
+  assert.throws(() => validateCounts(['2', 2], 2, 2), /non-negative integer/);
+  assert.throws(() => validateCounts([Infinity], 2, 2), /non-negative integer/);
+  assert.throws(() => validateCounts([], 2, 2), /non-empty array/);
+  assert.throws(() => validateCounts([4], 0, 4), /positive integers/);
+  validateCounts([4], 2, 2); // the valid case still passes
+});
+
+check('decodeMask refuses to repair a bad mask', () => {
+  assert.throws(() => decodeMask([0, 100], 2, 2), /sum to 100/);
+});
+
+check('readMask separates unreadable from empty', () => {
+  assert.deepEqual(readMask({ size: [2, 2], counts: [4] }, 2, 2), { size: [2, 2], counts: [4] });
+  // Wrong dimensions for the image: reported, not silently started blank.
+  assert.match(readMask({ size: [2, 2], counts: [4] }, 3, 3).error, /but the image is 3x3/);
+  assert.match(readMask({ size: [2, 2], counts: [9] }, 2, 2).error, /sum to 9/);
+  assert.match(readMask({ counts: [4] }, 2, 2).error, /missing a valid/);
+  assert.match(readMask({ size: [2, 2], counts: 'PQR' }, 2, 2).error, /compressed string form/);
+  assert.match(readMask(null, 2, 2).error, /no usable counts/);
 });
 
 console.log(`${passed} passed, ${failures.length} failed (${cases.length} golden vectors)`);

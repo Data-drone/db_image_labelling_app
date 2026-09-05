@@ -14,7 +14,18 @@ import json
 import unittest
 from pathlib import Path
 
+import base64
+
+import numpy as np
+
 from backend import masks
+
+
+def golden_bitmap(case):
+    """The fixture's independently-generated row-major bitmap."""
+    h, w = case["size"]
+    bits = np.unpackbits(np.frombuffer(base64.b64decode(case["pixels_b64"]), np.uint8))
+    return bits[: h * w].reshape(h, w)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "coco_rle_golden.json"
 CASES = json.loads(FIXTURE.read_text())["cases"]
@@ -48,6 +59,45 @@ class TestGoldenVectors(unittest.TestCase):
             with self.subTest(case["name"]):
                 got = [float(v) for v in masks.rle_to_bbox(case["counts"], *case["size"])]
                 self.assertEqual(got, case["bbox"])
+
+
+class TestGoldenBitmaps(unittest.TestCase):
+    """Pin the exact pixels, not just self-consistency.
+
+    ``counts_from_array(bitmap_from_counts(counts)) == counts`` holds for a
+    codec that is consistently transposed or flipped, and area is invariant to
+    both, so these assert against pycocotools' own decode instead.
+    """
+
+    def test_decoded_bitmap_matches_pycocotools(self):
+        for case in CASES:
+            with self.subTest(case["name"]):
+                h, w = case["size"]
+                got = masks.bitmap_from_counts(case["counts"], h, w)
+                self.assertTrue(np.array_equal(got, golden_bitmap(case)))
+
+    def test_encoding_pycocotools_bitmap_matches_golden_counts(self):
+        for case in CASES:
+            with self.subTest(case["name"]):
+                h, w = case["size"]
+                self.assertEqual(
+                    masks.counts_from_array(golden_bitmap(case)),
+                    (h, w, case["counts"]),
+                )
+
+    def test_fixture_set_would_catch_a_transposed_codec(self):
+        """Guard the guard.
+
+        A handful of fixtures are deliberately symmetric (empty, full, centred
+        square, checkerboard) and cannot detect a transpose on their own. Most
+        must be able to, or the assertions above prove less than they look.
+        """
+        catching = [
+            case["name"] for case in CASES
+            if case["size"][0] != case["size"][1]
+            or not np.array_equal(golden_bitmap(case), golden_bitmap(case).T)
+        ]
+        self.assertGreaterEqual(len(catching), 12, f"only {catching} are asymmetric")
 
 
 class TestBitmapRoundTrip(unittest.TestCase):

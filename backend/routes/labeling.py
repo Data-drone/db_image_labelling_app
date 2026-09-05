@@ -3,6 +3,7 @@ Labeling workflow routes — next sample, annotate, skip, image serving.
 """
 
 import io
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,6 +26,28 @@ from ..schemas import (
 from ..volumes import read_image_bytes
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["labeling"])
+
+
+_MODEL_PROVENANCE = re.compile(r"^model:[A-Za-z0-9][A-Za-z0-9._:/ -]{0,180}$")
+
+
+def _resolve_created_by(ann, user_email: str) -> str:
+    """Who a resubmitted annotation is attributed to.
+
+    annotate-batch replaces every annotation on a sample, so a client editing
+    one type hands the rest back -- drafts included. The draft endpoints match a
+    draft on ``is_draft`` *and* a ``model:`` provenance marker, so stamping the
+    acting human on every re-inserted row would leave those drafts visible,
+    counted, and impossible to clear or accept.
+
+    A ``model:`` marker on a draft is therefore carried across. Anything else,
+    in particular an attempt to attribute the row to some other person, is
+    ignored in favour of the user actually making the request.
+    """
+    claimed = (ann.created_by or "").strip()
+    if ann.is_draft and _MODEL_PROVENANCE.match(claimed):
+        return claimed
+    return user_email
 
 
 def _prepare_mask(db, sample, payload):
@@ -198,8 +221,12 @@ def annotate_sample_batch(
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
 
-    if not payload.annotations:
-        raise HTTPException(status_code=400, detail="At least one annotation is required.")
+    if not payload.annotations and not payload.allow_empty:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one annotation is required. Send allow_empty=true to "
+                   "record that this sample has no annotations.",
+        )
 
     user_email = get_user_email(request)
 
@@ -253,13 +280,26 @@ def annotate_sample_batch(
             ann_type=ann.ann_type,
             bbox_json=bbox_json,
             mask_json=mask_json,
-            is_draft=False,
-            created_by=user_email,
+            # Round-tripped, not forced: a client replacing the masks on a
+            # sample also resubmits the draft bboxes it did not touch, and
+            # those must come back as drafts.
+            is_draft=ann.is_draft,
+            created_by=_resolve_created_by(ann, user_email),
         )
         db.add(a)
         created.append(a)
 
-    sample.status = "labeled"
+    # This used to force "labeled" unconditionally, which was fine while every
+    # batch was a non-empty set of accepted annotations. Now that drafts round
+    # trip and an empty batch is legal, the status has to describe what is
+    # actually stored -- same rule as refresh_sample_status_after_annotation_change,
+    # except that batching over a skipped sample still un-skips it.
+    if not created:
+        sample.status = "unlabeled"
+    elif any(a.is_draft for a in created):
+        sample.status = "pre_labeled"
+    else:
+        sample.status = "labeled"
     sample.locked_by = None
     sample.locked_at = None
 

@@ -181,6 +181,220 @@ class TestMaskSave(unittest.TestCase):
             self.assertEqual(still["annotations"][0]["mask_json"], good)
 
 
+
+class TestBatchReplacementContract(unittest.TestCase):
+    """annotate-batch replaces every annotation on the sample.
+
+    That makes the endpoint the place where a client editing one annotation type
+    can silently destroy another. These tests pin the parts of the contract the
+    segmentation save path depends on.
+    """
+
+    def test_is_draft_survives_a_mask_save(self):
+        # The mask editor resubmits the sample's other annotations verbatim. A
+        # draft bbox handed back must come back a draft -- forcing is_draft=False
+        # here silently promoted every model suggestion to a human decision.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            url = f"/api/projects/{pid}/samples/{sid}/annotate-batch"
+
+            r = c.post(url, json={"annotations": [
+                {"label": "scratch", "ann_type": "bbox",
+                 "bbox_json": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+                 "is_draft": True},
+                {"label": "defect", "ann_type": "mask",
+                 "mask_json": _rect_mask(16, 12, 2, 2, 6, 6)},
+            ]})
+            self.assertEqual(r.status_code, 200, r.text)
+            by_type = {a["ann_type"]: a for a in r.json()}
+            self.assertTrue(by_type["bbox"]["is_draft"])
+            self.assertFalse(by_type["mask"]["is_draft"])
+
+            # And on the way back out of the DB, not just in the response.
+            after = c.get(f"/api/projects/{pid}/samples/{sid}").json()
+            self.assertTrue({a["ann_type"]: a for a in after["annotations"]}["bbox"]["is_draft"])
+
+    def test_annotation_without_is_draft_defaults_to_accepted(self):
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [{"label": "defect", "ann_type": "mask",
+                                 "mask_json": _rect_mask(16, 12, 0, 0, 4, 4)}]})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertFalse(r.json()[0]["is_draft"])
+
+    def test_server_owned_fields_in_the_payload_are_ignored_not_rejected(self):
+        # The client preserves annotations by handing the server's own record
+        # back. It strips id/timestamps, but the schema must tolerate anything
+        # else the record grows, or every added column breaks the save path.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [{
+                    "label": "defect", "ann_type": "mask",
+                    "mask_json": _rect_mask(16, 12, 0, 0, 4, 4),
+                    "id": 999, "created_at": "2020-01-01T00:00:00",
+                    "created_by": "someone.else@example.com",
+                    "some_future_field": {"nested": True},
+                }]})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertNotEqual(r.json()[0]["id"], 999)
+
+    def test_a_mask_annotation_without_a_mask_is_kept(self):
+        # These records fall between the mask editor's filter and the
+        # preservation filter. The client now preserves them, so the endpoint
+        # has to accept them rather than 422 the whole batch.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [{"label": "defect", "ann_type": "mask"}]})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertIsNone(r.json()[0]["mask_json"])
+
+    def test_empty_batch_is_refused_unless_declared(self):
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch",
+                       json={"annotations": []})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("allow_empty", r.json()["detail"])
+
+    def test_declared_empty_batch_deletes_and_reports_unlabeled(self):
+        # Erasing every mask has to be savable, or a deletion never reaches the
+        # server and reloading the sample resurrects it.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            url = f"/api/projects/{pid}/samples/{sid}/annotate-batch"
+            c.post(url, json={"annotations": [
+                {"label": "defect", "ann_type": "mask",
+                 "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)}]})
+            self.assertEqual(_samples(c, pid)["a.png"]["status"], "labeled")
+
+            r = c.post(url, json={"annotations": [], "allow_empty": True})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json(), [])
+            after = c.get(f"/api/projects/{pid}/samples/{sid}").json()
+            self.assertEqual(after["annotations"], [])
+            self.assertEqual(after["status"], "unlabeled")
+
+    def test_status_follows_what_was_actually_stored(self):
+        # The status used to be forced to "labeled". A batch of nothing but
+        # drafts is not a labelled sample.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            url = f"/api/projects/{pid}/samples/{sid}/annotate-batch"
+
+            c.post(url, json={"annotations": [
+                {"label": "defect", "ann_type": "mask", "is_draft": True,
+                 "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)}]})
+            self.assertEqual(_samples(c, pid)["a.png"]["status"], "pre_labeled")
+
+            c.post(url, json={"annotations": [
+                {"label": "defect", "ann_type": "mask",
+                 "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)}]})
+            self.assertEqual(_samples(c, pid)["a.png"]["status"], "labeled")
+
+    def test_batching_over_a_skipped_sample_un_skips_it(self):
+        # Why the status rule is inlined here instead of delegating to
+        # refresh_sample_status_after_annotation_change, which leaves a skipped
+        # sample skipped.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            c.post(f"/api/projects/{pid}/samples/{sid}/skip")
+            self.assertEqual(_samples(c, pid)["a.png"]["status"], "skipped")
+
+            c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [{"label": "defect", "ann_type": "mask",
+                                 "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)}]})
+            self.assertEqual(_samples(c, pid)["a.png"]["status"], "labeled")
+
+    def test_clearing_drafts_leaves_accepted_masks_alone(self):
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            kept = _rect_mask(16, 12, 1, 1, 5, 5)
+            c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [
+                    {"label": "defect", "ann_type": "mask", "mask_json": kept},
+                    {"label": "scratch", "ann_type": "bbox", "is_draft": True,
+                     "created_by": "model:sam-3-1",
+                     "bbox_json": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}},
+                ]})
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/clear-drafts")
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["annotations_affected"], 1)
+            after = c.get(f"/api/projects/{pid}/samples/{sid}").json()["annotations"]
+            self.assertEqual([a["ann_type"] for a in after], ["mask"])
+            self.assertEqual(after[0]["mask_json"], kept)
+
+    def test_a_preserved_draft_is_still_clearable(self):
+        # The whole point of carrying `model:` provenance across a replacement:
+        # clear-drafts and accept-drafts match on that marker, so a draft that
+        # was handed back by the mask editor has to keep it or the "Clear
+        # drafts" button silently does nothing.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            url = f"/api/projects/{pid}/samples/{sid}/annotate-batch"
+            first = c.post(url, json={"annotations": [
+                {"label": "scratch", "ann_type": "bbox", "is_draft": True,
+                 "created_by": "model:sam-3-1",
+                 "bbox_json": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}}]})
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(first.json()[0]["created_by"], "model:sam-3-1")
+
+            # What the frontend sends: the server's record minus the fields the
+            # server assigns, plus the mask the user just painted.
+            preserved = {k: v for k, v in first.json()[0].items()
+                         if k not in ("id", "sample_id", "project_id", "created_at")}
+            second = c.post(url, json={"annotations": [
+                preserved,
+                {"label": "defect", "ann_type": "mask",
+                 "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)},
+            ]})
+            self.assertEqual(second.status_code, 200, second.text)
+            self.assertEqual(
+                {a["ann_type"]: a["created_by"] for a in second.json()}["bbox"],
+                "model:sam-3-1",
+            )
+
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/clear-drafts")
+            self.assertEqual(r.json()["annotations_affected"], 1)
+            after = c.get(f"/api/projects/{pid}/samples/{sid}").json()["annotations"]
+            self.assertEqual([a["ann_type"] for a in after], ["mask"])
+
+    def test_a_claimed_human_author_is_ignored(self):
+        # Provenance carry-over is narrow on purpose: only a `model:` marker on a
+        # draft. Everything else is attributed to whoever made the request, so a
+        # client cannot sign an annotation as another person.
+        with _client() as (c, tmp):
+            pid = _create_project(c, make_image_volume(tmp))
+            sid = _samples(c, pid)["a.png"]["id"]
+            r = c.post(f"/api/projects/{pid}/samples/{sid}/annotate-batch", json={
+                "annotations": [
+                    {"label": "defect", "ann_type": "mask",
+                     "created_by": "someone.else@example.com",
+                     "mask_json": _rect_mask(16, 12, 1, 1, 5, 5)},
+                    # A model marker on a non-draft is not a preserved draft.
+                    {"label": "scratch", "ann_type": "bbox",
+                     "created_by": "model:sam-3-1",
+                     "bbox_json": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}},
+                ]})
+            self.assertEqual(r.status_code, 200, r.text)
+            authors = {a["ann_type"]: a["created_by"] for a in r.json()}
+            self.assertNotEqual(authors["mask"], "someone.else@example.com")
+            self.assertNotEqual(authors["bbox"], "model:sam-3-1")
+            self.assertEqual(authors["mask"], authors["bbox"])
+
+
 class TestSampleDimensions(unittest.TestCase):
     def test_dimensions_are_cached_by_serving_the_image(self):
         with _client() as (c, tmp):

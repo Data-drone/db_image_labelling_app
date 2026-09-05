@@ -9,17 +9,22 @@
 
 import { getClassColor } from './BBoxCanvas';
 import ImageAdjust from './ImageAdjust';
-import { maskArea, countsOf } from '../utils/rle';
+import { maskArea, readMask } from '../utils/rle';
 
 const MIN_BRUSH = 2;
 const MAX_BRUSH = 200;
 const TOOL_KEYS = { brush: 'B', eraser: 'E', polygon: 'P' };
 
-/** Painted share of the image, for a rough "did I actually cover it" check. */
+/**
+ * Painted share of the image, for a rough "did I actually cover it" check.
+ * null when there is no mask or the mask is not something this build can read --
+ * a percentage computed from malformed counts would be a fabrication.
+ */
 function coverage(layer, width, height) {
-  const counts = countsOf(layer.mask_json);
-  if (!counts || !width || !height) return null;
-  return (maskArea(counts) / (width * height)) * 100;
+  if (!layer.mask_json || !width || !height) return null;
+  const read = readMask(layer.mask_json);
+  if (read.error) return null;
+  return (maskArea(read.counts) / (width * height)) * 100;
 }
 
 export default function MaskToolPanel({
@@ -62,7 +67,9 @@ export default function MaskToolPanel({
   onClearDrafts,
   children,
 }) {
-  const painted = layers.filter((l) => countsOf(l.mask_json));
+  // Layers that will end up on the server: anything carrying a mask, readable
+  // by this build or not (unreadable ones are round-tripped, not dropped).
+  const storable = layers.filter((l) => l.mask_json);
   const sectionTitle = {
     fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--text-secondary)',
   };
@@ -340,13 +347,15 @@ export default function MaskToolPanel({
         </div>
       )}
 
+      {/* Save is not gated on having a mask: erasing or deleting every layer is
+          a legitimate save, and refusing it is why deletions never persisted. */}
       <button
         className="btn-primary"
         onClick={onSave}
-        disabled={saving || painted.length === 0}
+        disabled={saving}
         style={{ width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem' }}
       >
-        {saving ? 'Saving...' : `Save & Next (${painted.length})`}
+        {saving ? 'Saving...' : `Save & Next (${storable.length})`}
       </button>
 
       <button

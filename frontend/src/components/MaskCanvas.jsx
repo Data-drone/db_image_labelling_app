@@ -13,6 +13,17 @@
  *   - Brush size is in *image* pixels, so zooming in gives you finer strokes
  *     rather than the same coarse ones.
  *
+ * Two invariants worth stating, because both were violated by the first cut and
+ * both lose the user's data when they are:
+ *
+ *   1. A mask this build cannot read is never edited. `bufRef` stays null, the
+ *      paint paths become no-ops and the annotation reaches the server exactly
+ *      as it arrived. Decoding it leniently and re-encoding on the first stroke
+ *      overwrites the original with a guess.
+ *   2. A stroke belongs to the buffer and mask id it started on. Navigating or
+ *      saving mid-stroke commits it against that identity, never against
+ *      whatever happens to be active by the time the pointer comes up.
+ *
  * Props:
  *   imageSrc: string
  *   imageWidth, imageHeight: number|null — backend dimensions, in the
@@ -30,27 +41,45 @@
  *   onHistoryChange: ({canUndo, canRedo}) => void
  *
  * Imperative handle: undo(), redo(), clear(), resetView(), zoomBy(factor),
- * cancelPolygon()
+ * cancelPolygon(), flushStroke()
  */
 
 import {
   useRef, useState, useEffect, useCallback, useImperativeHandle, forwardRef,
 } from 'react';
 import { getClassColor } from './BBoxCanvas';
-import { encodeMask, decodeMask, maskIsEmpty, countsOf, sizeOf } from '../utils/rle';
+import { encodeMask, decodeMask, maskIsEmpty, readMask } from '../utils/rle';
 
 const UNDO_LIMIT = 20;
+/**
+ * Byte ceiling for the undo stack. A count limit is not a memory limit: one
+ * full-image fill is worth several hundred brush strokes, so both apply.
+ */
+const UNDO_BYTE_BUDGET = 96 * 1024 * 1024;
+/** Undo journal granularity, in mask pixels. 128x128 = 16 KB per tile. */
+const TILE = 128;
+/** Cap the backing-store multiplier so a 3x-DPR phone does not allocate 9x. */
+const MAX_DPR = 3;
 /** Click within this many *screen* px of the first vertex to close a polygon. */
 const CLOSE_SNAP_PX = 10;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 16;
 
-/** '#rrggbb' -> {r,g,b}. */
+/**
+ * '#rgb' or '#rrggbb' -> {r,g,b}.
+ *
+ * Falls back to magenta instead of returning NaN channels: NaN written into an
+ * ImageData paints as transparent black, so a palette that ever returns
+ * `hsl(...)` would make masks silently invisible rather than obviously wrong.
+ */
 function hexToRgb(hex) {
+  let h = typeof hex === 'string' ? hex.trim() : '';
+  if (/^#[0-9a-f]{3}$/i.test(h)) h = `#${h[1]}${h[1]}${h[2]}${h[2]}${h[3]}${h[3]}`;
+  if (!/^#[0-9a-f]{6}$/i.test(h)) return { r: 255, g: 0, b: 255 };
   return {
-    r: parseInt(hex.slice(1, 3), 16),
-    g: parseInt(hex.slice(3, 5), 16),
-    b: parseInt(hex.slice(5, 7), 16),
+    r: parseInt(h.slice(1, 3), 16),
+    g: parseInt(h.slice(3, 5), 16),
+    b: parseInt(h.slice(5, 7), 16),
   };
 }
 
@@ -59,7 +88,8 @@ function overlayCanvasFor(buf, width, height, hex, alpha) {
   const cv = document.createElement('canvas');
   cv.width = width;
   cv.height = height;
-  const data = cv.getContext('2d').createImageData(width, height);
+  const ctx = cv.getContext('2d');
+  const data = ctx.createImageData(width, height);
   const { r, g, b } = hexToRgb(hex);
   const px = data.data;
   for (let i = 0; i < buf.length; i++) {
@@ -67,8 +97,136 @@ function overlayCanvasFor(buf, width, height, hex, alpha) {
     const o = i * 4;
     px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = alpha;
   }
-  cv.getContext('2d').putImageData(data, 0, 0);
+  ctx.putImageData(data, 0, 0);
   return cv;
+}
+
+/**
+ * Size a canvas for the device pixel ratio and return a context whose units
+ * are CSS pixels. Without this the nearest-neighbour rationale in renderImage
+ * is undone on any HiDPI screen: the browser upscales a low-res backing store
+ * and smooths the mask edges we went to trouble to keep crisp.
+ */
+function prepare(canvas, w, h) {
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+  const pw = Math.max(1, Math.round(w * dpr));
+  const ph = Math.max(1, Math.round(h * dpr));
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+
+// ---------- Undo journal ----------
+//
+// The obvious undo record is a Map of changed pixel index -> previous value,
+// and it is the wrong shape at these sizes: a V8 Map entry costs tens of bytes,
+// so clearing a 3-megapixel foreground builds a ~150 MB Map and a polygon over
+// a 12 MP image takes the tab with it. Whole-buffer snapshots are the other
+// extreme -- 20 levels of a 12 MP mask is 240 MB whether you dabbed one pixel
+// or filled the frame.
+//
+// Copy-on-write tiles get both ends. A caller declares the rectangle it is
+// about to touch, the overlapping tiles are copied once *before* the paint
+// loop, and the inner loop then does no bookkeeping at all: no hash per pixel.
+// A brush stroke saves the two or three 16 KB tiles it crosses; a full-image
+// fill degrades to exactly one copy of the buffer, minus the tiles it left
+// unchanged.
+
+function tileBox(width, height, c, r) {
+  const x = c * TILE;
+  const y = r * TILE;
+  return { x, y, w: Math.min(TILE, width - x), h: Math.min(TILE, height - y) };
+}
+
+function readTile(buf, width, height, c, r) {
+  const { x, y, w, h } = tileBox(width, height, c, r);
+  const out = new Uint8Array(w * h);
+  for (let k = 0; k < h; k++) {
+    const from = (y + k) * width + x;
+    out.set(buf.subarray(from, from + w), k * w);
+  }
+  return out;
+}
+
+function writeTile(buf, width, height, c, r, data) {
+  const { x, y, w, h } = tileBox(width, height, c, r);
+  for (let k = 0; k < h; k++) {
+    buf.set(data.subarray(k * w, k * w + w), (y + k) * width + x);
+  }
+}
+
+function tilesEqual(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** Start journalling edits to `buf`. Holds the buffer, not a ref to it. */
+function makeJournal(buf, width, height) {
+  const cols = Math.ceil(width / TILE);
+  const rows = Math.ceil(height / TILE);
+  return {
+    buf, width, height, cols, rows,
+    saved: new Array(cols * rows).fill(null),
+    touched: [],
+    /** Snapshot every tile overlapping the inclusive pixel rect. */
+    touchRect(x0, y0, x1, y1) {
+      const c0 = Math.max(0, Math.floor(x0 / TILE));
+      const c1 = Math.min(cols - 1, Math.floor(x1 / TILE));
+      const r0 = Math.max(0, Math.floor(y0 / TILE));
+      const r1 = Math.min(rows - 1, Math.floor(y1 / TILE));
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          const t = r * cols + c;
+          if (this.saved[t]) continue;
+          this.saved[t] = readTile(buf, width, height, c, r);
+          this.touched.push(t);
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Turn a journal into an undo entry, dropping tiles the edit did not actually
+ * change (a disc's bounding box overlaps tiles its circle never reaches).
+ * Returns null when nothing changed. `rect` is the union of changed tiles.
+ */
+function sealJournal(journal) {
+  const { buf, width, height, cols } = journal;
+  const tiles = [];
+  let bytes = 0;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (const t of journal.touched) {
+    const c = t % cols;
+    const r = Math.floor(t / cols);
+    const before = journal.saved[t];
+    const after = readTile(buf, width, height, c, r);
+    if (tilesEqual(before, after)) continue;
+    tiles.push({ c, r, before, after });
+    bytes += before.length * 2;
+    const box = tileBox(width, height, c, r);
+    if (box.x < minX) minX = box.x;
+    if (box.y < minY) minY = box.y;
+    if (box.x + box.w - 1 > maxX) maxX = box.x + box.w - 1;
+    if (box.y + box.h - 1 > maxY) maxY = box.y + box.h - 1;
+  }
+  if (tiles.length === 0) return null;
+  return {
+    tiles, bytes,
+    rect: { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 },
+  };
+}
+
+/** setPointerCapture/release throw when the pointer is already gone. */
+function safeCapture(el, pointerId) {
+  try { el?.setPointerCapture?.(pointerId); } catch { /* pointer already up */ }
+}
+function safeRelease(el, pointerId) {
+  try { el?.releasePointerCapture?.(pointerId); } catch { /* never captured */ }
 }
 
 const MaskCanvas = forwardRef(function MaskCanvas({
@@ -97,22 +255,32 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
   const [dims, setDims] = useState({ w: 0, h: 0 }); // native image pixels
   const [view, setView] = useState({ zoom: 1, panX: 0, panY: 0 });
+  // Why the active layer is not editable, when it is not. Null = fine.
+  const [maskError, setMaskError] = useState(null);
+  const [unreadableOthers, setUnreadableOthers] = useState(0);
 
   // Active mask working state. Refs, not state: mutated on every mousemove.
-  const bufRef = useRef(null);           // Uint8Array(w*h), source of truth
+  const bufRef = useRef(null);           // Uint8Array(w*h), or null if unreadable
   const maskCanvasRef = useRef(null);    // full-res RGBA mirror of bufRef
   const maskDataRef = useRef(null);      // its ImageData, kept in sync
   const loadedKeyRef = useRef(null);     // which mask bufRef currently holds
-  const strokeRef = useRef(null);        // {dirty: Map<index, prevValue>, lastX, lastY}
+  const strokeRef = useRef(null);        // in-flight stroke, bound to one pointer
   const undoRef = useRef([]);
   const redoRef = useRef([]);
   const cursorRef = useRef(null);        // {cx, cy} in canvas px, or null
   const polyRef = useRef([]);            // in-progress polygon, image-space points
   const staticOverlayRef = useRef(null); // composited non-active masks, full-res
+  const overlayCacheRef = useRef(new Map()); // layer id -> rasterised overlay
+  const staticKeyRef = useRef(null);     // fingerprint of the current composite
   const panRef = useRef(null);
 
   const activeMask = masks.find((m) => String(m.id) === String(activeMaskId)) || null;
   const activeColor = getClassColor(activeMask ? activeMask.classIndex : activeClassIndex);
+
+  // Mirrored so the commit path can run from an effect without re-creating
+  // itself (and the stroke handlers) every time the parent re-renders.
+  const onMaskUpdatedRef = useRef(onMaskUpdated);
+  onMaskUpdatedRef.current = onMaskUpdated;
 
   const reportHistory = useCallback(() => {
     onHistoryChange?.({ canUndo: undoRef.current.length > 0, canRedo: redoRef.current.length > 0 });
@@ -121,6 +289,10 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   // ---------- Image loading ----------
   useEffect(() => {
     setImgLoaded(false);
+    // Clear the dimensions too, or every dims-keyed effect runs once against
+    // the *previous* image's size: a 12 MP buffer allocated for nothing and a
+    // spurious size-mismatch warning, immediately thrown away on load.
+    setDims({ w: 0, h: 0 });
     const img = imgRef.current;
     img.crossOrigin = 'anonymous';
     img.onload = () => {
@@ -136,7 +308,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   // or the file changed underneath; either way the save will 422 and the user
   // deserves a console breadcrumb rather than a silent coordinate shift.
   useEffect(() => {
-    if (!imgLoaded || !imageWidth || !imageHeight) return;
+    if (!imgLoaded || !imageWidth || !imageHeight || !dims.w) return;
     if (imageWidth !== dims.w || imageHeight !== dims.h) {
       console.warn(
         `MaskCanvas: backend reports ${imageWidth}x${imageHeight} but the image ` +
@@ -148,7 +320,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   // ---------- Resize ----------
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container) return undefined;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
@@ -180,81 +352,12 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     return { ix: ((cx - r.x) / r.w) * dims.w, iy: ((cy - r.y) / r.h) * dims.h };
   }, [dims]);
 
-  // ---------- Load the active mask into the working buffer ----------
-  // Keyed on mask identity, not contents: re-syncing on every `masks` change
-  // would fight the parent's state update after our own onMaskUpdated.
-  useEffect(() => {
-    if (!dims.w) return;
-    const key = `${imageSrc}|${activeMaskId}|${dims.w}x${dims.h}`;
-    if (loadedKeyRef.current === key) return;
-    loadedKeyRef.current = key;
-
-    const counts = countsOf(activeMask?.mask_json);
-    let buf;
-    if (counts) {
-      const [mh, mw] = sizeOf(activeMask.mask_json, dims.h, dims.w);
-      if (mh === dims.h && mw === dims.w) {
-        buf = decodeMask(counts, dims.w, dims.h);
-      } else {
-        console.warn(`MaskCanvas: stored mask is ${mw}x${mh}, image is ${dims.w}x${dims.h}; starting blank.`);
-        buf = new Uint8Array(dims.w * dims.h);
-      }
-    } else {
-      buf = new Uint8Array(dims.w * dims.h);
-    }
-    bufRef.current = buf;
-
-    const cv = document.createElement('canvas');
-    cv.width = dims.w;
-    cv.height = dims.h;
-    maskCanvasRef.current = cv;
-    maskDataRef.current = cv.getContext('2d').createImageData(dims.w, dims.h);
-    repaintMirror();
-
-    undoRef.current = [];
-    redoRef.current = [];
-    polyRef.current = [];
-    reportHistory();
-    renderActive();
-    // repaintMirror/renderActive are stable-by-construction closures over refs
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageSrc, activeMaskId, dims, activeMask]);
-
-  /** Rebuild the whole full-res RGBA mirror from bufRef. */
-  const repaintMirror = useCallback(() => {
-    const cv = maskCanvasRef.current;
-    const data = maskDataRef.current;
-    const buf = bufRef.current;
-    if (!cv || !data || !buf) return;
-    const { r, g, b } = hexToRgb(activeColor);
-    const px = data.data;
-    for (let i = 0; i < buf.length; i++) {
-      const o = i * 4;
-      if (buf[i]) {
-        px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 150;
-      } else {
-        px[o + 3] = 0;
-      }
-    }
-    cv.getContext('2d').putImageData(data, 0, 0);
-  }, [activeColor]);
-
-  // Recolour when the active mask's class changes.
-  useEffect(() => {
-    if (!bufRef.current) return;
-    repaintMirror();
-    renderActive();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeColor]);
-
   // ---------- Rendering ----------
   const renderImage = useCallback(() => {
     const canvas = imageCanvasRef.current;
     if (!canvas || !imgLoaded) return;
-    canvas.width = canvasSize.w;
-    canvas.height = canvasSize.h;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const ctx = prepare(canvas, canvasSize.w, canvasSize.h);
+    ctx.clearRect(0, 0, canvasSize.w, canvasSize.h);
     // Nearest-neighbour when magnified so mask edges line up with the pixels
     // they actually cover instead of a smoothed approximation of them.
     ctx.imageSmoothingEnabled = view.zoom < 2;
@@ -265,10 +368,8 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   const renderStatic = useCallback(() => {
     const canvas = staticCanvasRef.current;
     if (!canvas) return;
-    canvas.width = canvasSize.w;
-    canvas.height = canvasSize.h;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const ctx = prepare(canvas, canvasSize.w, canvasSize.h);
+    ctx.clearRect(0, 0, canvasSize.w, canvasSize.h);
     const src = staticOverlayRef.current;
     if (!src) return;
     ctx.imageSmoothingEnabled = view.zoom < 2;
@@ -279,12 +380,8 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   const renderActive = useCallback(() => {
     const canvas = activeCanvasRef.current;
     if (!canvas) return;
-    if (canvas.width !== canvasSize.w || canvas.height !== canvasSize.h) {
-      canvas.width = canvasSize.w;
-      canvas.height = canvasSize.h;
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const ctx = prepare(canvas, canvasSize.w, canvasSize.h);
+    ctx.clearRect(0, 0, canvasSize.w, canvasSize.h);
     const r = rectRef.current;
     if (maskCanvasRef.current && r.w) {
       ctx.imageSmoothingEnabled = view.zoom < 2;
@@ -340,39 +437,275 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   useEffect(renderStatic, [renderStatic, view]);
   useEffect(renderActive, [renderActive, view]);
 
-  // Composite the non-active masks once per mask-list change, not per frame.
+  /** Rebuild the whole full-res RGBA mirror from bufRef. */
+  const repaintMirror = useCallback(() => {
+    const cv = maskCanvasRef.current;
+    const data = maskDataRef.current;
+    const buf = bufRef.current;
+    if (!cv || !data || !buf) return;
+    const { r, g, b } = hexToRgb(activeColor);
+    const px = data.data;
+    for (let i = 0; i < buf.length; i++) {
+      const o = i * 4;
+      if (buf[i]) {
+        px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 150;
+      } else {
+        px[o + 3] = 0;
+      }
+    }
+    cv.getContext('2d').putImageData(data, 0, 0);
+  }, [activeColor]);
+
+  /** Re-derive the mirror from bufRef over one rect and upload just that box. */
+  const repaintRect = useCallback((rect) => {
+    const cv = maskCanvasRef.current;
+    const data = maskDataRef.current;
+    const buf = bufRef.current;
+    if (!cv || !data || !buf || !rect) return;
+    const w = dims.w;
+    const { r: cr, g: cg, b: cb } = hexToRgb(activeColor);
+    const px = data.data;
+    for (let y = rect.y; y < rect.y + rect.h; y++) {
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        const i = y * w + x;
+        const o = i * 4;
+        if (buf[i]) {
+          px[o] = cr; px[o + 1] = cg; px[o + 2] = cb; px[o + 3] = 150;
+        } else {
+          px[o + 3] = 0;
+        }
+      }
+    }
+    cv.getContext('2d').putImageData(data, 0, 0, rect.x, rect.y, rect.w, rect.h);
+  }, [dims, activeColor]);
+
+  /** Upload an already-written region of the mirror ImageData. */
+  const flushRect = useCallback((rect) => {
+    if (!rect || !maskCanvasRef.current || !maskDataRef.current) return;
+    maskCanvasRef.current
+      .getContext('2d')
+      .putImageData(maskDataRef.current, 0, 0, rect.x, rect.y, rect.w, rect.h);
+  }, []);
+
+  // ---------- Undo / redo ----------
+  const pushUndo = useCallback((entry) => {
+    if (!entry) return;
+    undoRef.current.push(entry);
+    let bytes = 0;
+    for (const e of undoRef.current) bytes += e.bytes;
+    while (undoRef.current.length > UNDO_LIMIT
+           || (undoRef.current.length > 1 && bytes > UNDO_BYTE_BUDGET)) {
+      bytes -= undoRef.current.shift().bytes;
+    }
+    redoRef.current = [];
+    reportHistory();
+  }, [reportHistory]);
+
+  const applyEntry = useCallback((entry, which) => {
+    const buf = bufRef.current;
+    if (!buf) return;
+    for (const t of entry.tiles) writeTile(buf, dims.w, dims.h, t.c, t.r, t[which]);
+    repaintRect(entry.rect);
+    renderActive();
+  }, [dims, repaintRect, renderActive]);
+
+  const emit = useCallback(() => {
+    const buf = bufRef.current;
+    if (!buf || !activeMaskId) return;
+    if (maskIsEmpty(buf)) {
+      onMaskUpdatedRef.current?.(activeMaskId, null);
+      return;
+    }
+    onMaskUpdatedRef.current?.(activeMaskId, {
+      size: [dims.h, dims.w],
+      counts: encodeMask(buf, dims.w, dims.h),
+    });
+  }, [activeMaskId, dims]);
+
+  /**
+   * Commit the in-flight stroke, if any, and return `{id, mask}` for it.
+   *
+   * Everything comes off the stroke itself -- its buffer, its dimensions, its
+   * mask id -- so this is safe to call after the active layer has already
+   * changed underneath. The return value exists for the save path: the parent's
+   * `onMaskUpdated` state change is not visible inside the handler that
+   * triggered the save, so it needs the finalized mask in hand.
+   */
+  const finishStroke = useCallback(() => {
+    const stroke = strokeRef.current;
+    strokeRef.current = null;
+    if (!stroke) return null;
+    const entry = sealJournal(stroke.journal);
+    // History belongs to the layer that was active when the stroke began; if
+    // that changed under us the entry goes away with the buffer it described.
+    if (entry && stroke.key === loadedKeyRef.current) pushUndo(entry);
+    if (!entry) return null;
+    const mask = maskIsEmpty(stroke.buf)
+      ? null
+      : { size: [stroke.h, stroke.w], counts: encodeMask(stroke.buf, stroke.w, stroke.h) };
+    onMaskUpdatedRef.current?.(stroke.maskId, mask);
+    return { id: stroke.maskId, mask };
+  }, [pushUndo]);
+
+  // ---------- Load the active mask into the working buffer ----------
+  // Keyed on mask identity, not contents: re-syncing on every `masks` change
+  // would fight the parent's state update after our own onMaskUpdated.
   useEffect(() => {
-    if (!dims.w) {
-      staticOverlayRef.current = null;
+    if (!dims.w) return;
+    const key = `${imageSrc}|${activeMaskId}|${dims.w}x${dims.h}`;
+    if (loadedKeyRef.current === key) return;
+    loadedKeyRef.current = key;
+    // A stroke still in flight belongs to the buffer we are about to drop.
+    // Commit it against its own identity before swapping; leaving it in place
+    // is how arrow-key navigation mid-stroke used to paint the old stroke's
+    // coordinates into the newly loaded mask.
+    finishStroke();
+
+    const stored = activeMask?.mask_json;
+    let buf = null;
+    let error = null;
+    if (stored) {
+      const read = readMask(stored, dims.h, dims.w);
+      if (read.error) error = read.error;
+      else buf = decodeMask(read.counts, dims.w, dims.h);
+    } else {
+      buf = new Uint8Array(dims.w * dims.h);
+    }
+    setMaskError(error);
+    bufRef.current = buf;
+    undoRef.current = [];
+    redoRef.current = [];
+    polyRef.current = [];
+
+    if (!buf) {
+      // No buffer means no edit path: stampDisc, fillPolygon and clear() all
+      // bail, emit() bails, and the annotation reaches the server byte for byte
+      // as it arrived. Decoding it anyway and re-encoding on the first stroke
+      // is how a mask this build cannot read gets overwritten with a guess.
+      maskCanvasRef.current = null;
+      maskDataRef.current = null;
+      console.warn(`MaskCanvas: active mask left untouched — ${error}`);
+      reportHistory();
+      renderActive();
       return;
     }
-    const others = masks.filter((m) => String(m.id) !== String(activeMaskId) && countsOf(m.mask_json));
-    if (others.length === 0) {
-      staticOverlayRef.current = null;
-      renderStatic();
-      return;
-    }
+
     const cv = document.createElement('canvas');
     cv.width = dims.w;
     cv.height = dims.h;
-    const ctx = cv.getContext('2d');
-    for (const m of others) {
-      const [mh, mw] = sizeOf(m.mask_json, dims.h, dims.w);
-      if (mh !== dims.h || mw !== dims.w) continue;
-      const buf = decodeMask(countsOf(m.mask_json), dims.w, dims.h);
-      // Drafts read as a fainter wash so a model suggestion is visibly
-      // provisional, matching the dashed borders BBoxCanvas uses.
-      const layer = overlayCanvasFor(buf, dims.w, dims.h, getClassColor(m.classIndex), m.isDraft ? 70 : 110);
-      ctx.drawImage(layer, 0, 0);
+    maskCanvasRef.current = cv;
+    maskDataRef.current = cv.getContext('2d').createImageData(dims.w, dims.h);
+    repaintMirror();
+    reportHistory();
+    renderActive();
+    // repaintMirror/renderActive are stable-by-construction closures over refs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageSrc, activeMaskId, dims, activeMask]);
+
+  // Recolour when the active mask's class changes. Gated on there being an
+  // active layer: otherwise every number-key press repaints a blank 12 MP
+  // mirror and uploads 48 MB for nothing.
+  useEffect(() => {
+    if (!bufRef.current || !activeMask) return;
+    repaintMirror();
+    renderActive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeColor]);
+
+  // ---------- Non-active mask compositing ----------
+  // mask_json objects are compared by identity to decide whether a cached
+  // overlay is still good; a WeakMap serial turns that identity into something
+  // that fits in a plain string fingerprint.
+  const serialRef = useRef({ map: new WeakMap(), next: 1 });
+  const serialOf = useCallback((obj) => {
+    if (!obj || typeof obj !== 'object') return 0;
+    const state = serialRef.current;
+    let s = state.map.get(obj);
+    if (!s) {
+      s = state.next++;
+      state.map.set(obj, s);
     }
-    staticOverlayRef.current = cv;
+    return s;
+  }, []);
+
+  useEffect(() => {
+    if (!dims.w) {
+      staticOverlayRef.current = null;
+      overlayCacheRef.current.clear();
+      staticKeyRef.current = null;
+      setUnreadableOthers(0);
+      return;
+    }
+    // Cache is keyed on layer id, not on "is it the active one", so selecting a
+    // different layer does not throw away a rasterisation we still need.
+    const live = new Set(masks.map((m) => String(m.id)));
+    for (const id of Array.from(overlayCacheRef.current.keys())) {
+      if (!live.has(id)) overlayCacheRef.current.delete(id);
+    }
+
+    const others = masks.filter((m) => String(m.id) !== String(activeMaskId));
+    const key = `${dims.w}x${dims.h}|${others
+      .map((m) => `${m.id}:${m.classIndex}:${m.isDraft ? 1 : 0}:${serialOf(m.mask_json)}`)
+      .join('|')}`;
+    // Every stroke produces a new `masks` array. Without this fingerprint the
+    // composite was rebuilt on every pointerup -- decode, createImageData,
+    // putImageData and a throwaway canvas per inactive layer, all at full
+    // resolution, which is ~250 MB of churn with five layers at 12 MP.
+    if (staticKeyRef.current === key) return;
+    staticKeyRef.current = key;
+
+    let unreadable = 0;
+    const layers = [];
+    for (const m of others) {
+      const id = String(m.id);
+      const cached = overlayCacheRef.current.get(id);
+      if (cached && cached.maskJson === m.mask_json && cached.classIndex === m.classIndex
+          && cached.isDraft === Boolean(m.isDraft) && cached.w === dims.w && cached.h === dims.h) {
+        if (cached.canvas) layers.push(cached.canvas);
+        if (cached.unreadable) unreadable++;
+        continue;
+      }
+      let canvas = null;
+      let bad = false;
+      if (m.mask_json) {
+        const read = readMask(m.mask_json, dims.h, dims.w);
+        if (read.error) {
+          bad = true;
+        } else {
+          // Drafts read as a fainter wash so a model suggestion is visibly
+          // provisional, matching the dashed borders BBoxCanvas uses.
+          canvas = overlayCanvasFor(
+            decodeMask(read.counts, dims.w, dims.h), dims.w, dims.h,
+            getClassColor(m.classIndex), m.isDraft ? 70 : 110,
+          );
+        }
+      }
+      overlayCacheRef.current.set(id, {
+        maskJson: m.mask_json, classIndex: m.classIndex, isDraft: Boolean(m.isDraft),
+        w: dims.w, h: dims.h, canvas, unreadable: bad,
+      });
+      if (canvas) layers.push(canvas);
+      if (bad) unreadable++;
+    }
+    setUnreadableOthers(unreadable);
+
+    if (layers.length === 0) {
+      staticOverlayRef.current = null;
+    } else {
+      const cv = document.createElement('canvas');
+      cv.width = dims.w;
+      cv.height = dims.h;
+      const ctx = cv.getContext('2d');
+      for (const layer of layers) ctx.drawImage(layer, 0, 0);
+      staticOverlayRef.current = cv;
+    }
     renderStatic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [masks, activeMaskId, dims]);
 
   // ---------- Painting ----------
   /** Stamp a filled disc into bufRef and its RGBA mirror. Returns a dirty rect. */
-  const stampDisc = useCallback((ix, iy, radius, erase, dirty) => {
+  const stampDisc = useCallback((ix, iy, radius, erase, journal) => {
     const w = dims.w, h = dims.h;
     const buf = bufRef.current;
     const data = maskDataRef.current;
@@ -383,6 +716,9 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     const y0 = Math.max(0, Math.floor(iy - r));
     const y1 = Math.min(h - 1, Math.ceil(iy + r));
     if (x1 < x0 || y1 < y0) return null;
+    // Journal the whole box up front: one snapshot per 16 KB tile, and then not
+    // a single bookkeeping operation inside the loop below.
+    if (journal) journal.touchRect(x0, y0, x1, y1);
     const rr = r * r;
     const val = erase ? 0 : 1;
     const { r: cr, g: cg, b: cb } = hexToRgb(activeColor);
@@ -396,7 +732,6 @@ const MaskCanvas = forwardRef(function MaskCanvas({
         if (dx * dx + dySq > rr) continue;
         const i = y * w + x;
         if (buf[i] === val) continue;
-        if (dirty && !dirty.has(i)) dirty.set(i, buf[i]);
         buf[i] = val;
         const o = i * 4;
         if (val) {
@@ -423,7 +758,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
    * vertices to normalized coords and then applied the display scale a second
    * time, so polygons landed offset whenever the viewport was not 1:1.
    */
-  const fillPolygon = useCallback((points, erase, dirty) => {
+  const fillPolygon = useCallback((points, erase, journal) => {
     const w = dims.w, h = dims.h;
     const buf = bufRef.current;
     const data = maskDataRef.current;
@@ -431,8 +766,11 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     const val = erase ? 0 : 1;
     const { r: cr, g: cg, b: cb } = hexToRgb(activeColor);
     const px = data.data;
-    const yMin = Math.max(0, Math.floor(Math.min(...points.map(pt => pt.iy))));
-    const yMax = Math.min(h - 1, Math.ceil(Math.max(...points.map(pt => pt.iy))));
+    const yMin = Math.max(0, Math.floor(Math.min(...points.map((pt) => pt.iy))));
+    const yMax = Math.min(h - 1, Math.ceil(Math.max(...points.map((pt) => pt.iy))));
+    const xMin = Math.max(0, Math.floor(Math.min(...points.map((pt) => pt.ix))));
+    const xMax = Math.min(w - 1, Math.ceil(Math.max(...points.map((pt) => pt.ix))));
+    if (journal && xMax >= xMin && yMax >= yMin) journal.touchRect(xMin, yMin, xMax, yMax);
     let minX = w, minY = h, maxX = -1, maxY = -1;
     const xs = [];
     for (let y = yMin; y <= yMax; y++) {
@@ -450,7 +788,6 @@ const MaskCanvas = forwardRef(function MaskCanvas({
         for (let x = x0; x <= x1; x++) {
           const i = y * w + x;
           if (buf[i] === val) continue;
-          if (dirty && !dirty.has(i)) dirty.set(i, buf[i]);
           buf[i] = val;
           const o = i * 4;
           if (val) {
@@ -469,13 +806,6 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
   }, [dims, activeColor]);
 
-  const flushRect = useCallback((rect) => {
-    if (!rect) return;
-    maskCanvasRef.current
-      .getContext('2d')
-      .putImageData(maskDataRef.current, 0, 0, rect.x, rect.y, rect.w, rect.h);
-  }, []);
-
   const union = (a, b) => {
     if (!a) return b;
     if (!b) return a;
@@ -484,115 +814,46 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   };
 
   /** Stamp along a segment so fast drags leave a line, not dots. */
-  const stampSegment = useCallback((x0, y0, x1, y1, radius, erase, dirty) => {
+  const stampSegment = useCallback((x0, y0, x1, y1, radius, erase, journal) => {
     const dist = Math.hypot(x1 - x0, y1 - y0);
     const step = Math.max(1, radius / 2);
     const n = Math.max(1, Math.ceil(dist / step));
     let rect = null;
     for (let k = 1; k <= n; k++) {
       const t = k / n;
-      rect = union(rect, stampDisc(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, radius, erase, dirty));
+      rect = union(rect, stampDisc(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, radius, erase, journal));
     }
     return rect;
   }, [stampDisc]);
 
-  // ---------- Undo / redo ----------
-  const pushUndo = useCallback((dirty) => {
-    if (!dirty || dirty.size === 0) return;
-    const indices = new Int32Array(dirty.size);
-    const prev = new Uint8Array(dirty.size);
-    const next = new Uint8Array(dirty.size);
-    const buf = bufRef.current;
-    let k = 0;
-    for (const [i, before] of dirty) {
-      indices[k] = i;
-      prev[k] = before;
-      next[k] = buf[i];
-      k++;
-    }
-    // Diffs, not snapshots: 20 full copies of a 12-megapixel mask is 240 MB,
-    // whereas a stroke's diff is bounded by the area it painted.
-    undoRef.current.push({ indices, prev, next });
-    if (undoRef.current.length > UNDO_LIMIT) undoRef.current.shift();
-    redoRef.current = [];
-    reportHistory();
-  }, [reportHistory]);
-
-  const applyDiff = useCallback((diff, values) => {
-    const buf = bufRef.current;
-    const w = dims.w;
-    let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1;
-    for (let k = 0; k < diff.indices.length; k++) {
-      const i = diff.indices[k];
-      buf[i] = values[k];
-      const x = i % w, y = (i / w) | 0;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-    if (maxX < 0) return;
-    // Repaint the mirror over the affected box only.
-    const data = maskDataRef.current;
-    const px = data.data;
-    const { r: cr, g: cg, b: cb } = hexToRgb(activeColor);
-    for (let y = minY; y <= maxY; y++) {
-      for (let x = minX; x <= maxX; x++) {
-        const i = y * w + x;
-        const o = i * 4;
-        if (buf[i]) {
-          px[o] = cr; px[o + 1] = cg; px[o + 2] = cb; px[o + 3] = 150;
-        } else {
-          px[o + 3] = 0;
-        }
-      }
-    }
-    flushRect({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 });
-    renderActive();
-  }, [dims, activeColor, flushRect, renderActive]);
-
-  const emit = useCallback(() => {
-    const buf = bufRef.current;
-    if (!buf || !activeMaskId) return;
-    if (maskIsEmpty(buf)) {
-      onMaskUpdated?.(activeMaskId, null);
-      return;
-    }
-    onMaskUpdated?.(activeMaskId, {
-      size: [dims.h, dims.w],
-      counts: encodeMask(buf, dims.w, dims.h),
-    });
-  }, [activeMaskId, dims, onMaskUpdated]);
-
   useImperativeHandle(ref, () => ({
     undo() {
-      const diff = undoRef.current.pop();
-      if (!diff) return;
-      applyDiff(diff, diff.prev);
-      redoRef.current.push(diff);
+      const entry = undoRef.current.pop();
+      if (!entry) return;
+      applyEntry(entry, 'before');
+      redoRef.current.push(entry);
       reportHistory();
       emit();
     },
     redo() {
-      const diff = redoRef.current.pop();
-      if (!diff) return;
-      applyDiff(diff, diff.next);
-      undoRef.current.push(diff);
+      const entry = redoRef.current.pop();
+      if (!entry) return;
+      applyEntry(entry, 'after');
+      undoRef.current.push(entry);
       reportHistory();
       emit();
     },
     clear() {
       const buf = bufRef.current;
       if (!buf) return;
-      const dirty = new Map();
-      for (let i = 0; i < buf.length; i++) {
-        if (buf[i]) {
-          dirty.set(i, 1);
-          buf[i] = 0;
-        }
-      }
-      if (dirty.size === 0) return;
-      pushUndo(dirty);
+      const journal = makeJournal(buf, dims.w, dims.h);
+      journal.touchRect(0, 0, dims.w - 1, dims.h - 1);
+      buf.fill(0);
+      // One pass over the buffer, and sealJournal then keeps only the tiles
+      // that held foreground -- so the cost tracks the mask, not the image.
+      const entry = sealJournal(journal);
+      if (!entry) return;
+      pushUndo(entry);
       repaintMirror();
       renderActive();
       emit();
@@ -603,28 +864,34 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       renderActive();
       return true;
     },
+    /** Finalize any in-flight stroke; returns `{id, mask}` or null. */
+    flushStroke() {
+      return finishStroke();
+    },
     resetView() {
       setView({ zoom: 1, panX: 0, panY: 0 });
     },
     zoomBy(factor) {
       setView((v) => ({ ...v, zoom: Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor)) }));
     },
-  }), [applyDiff, emit, pushUndo, repaintMirror, renderActive, reportHistory]);
+  }), [applyEntry, dims, emit, finishStroke, pushUndo, repaintMirror, renderActive, reportHistory]);
 
   const commitPolygon = useCallback((erase = false) => {
     const poly = polyRef.current;
     polyRef.current = [];
-    if (poly.length < 3) {
+    const buf = bufRef.current;
+    if (poly.length < 3 || !buf) {
       renderActive();
       return;
     }
-    const dirty = new Map();
-    flushRect(fillPolygon(poly, erase, dirty));
+    const journal = makeJournal(buf, dims.w, dims.h);
+    flushRect(fillPolygon(poly, erase, journal));
     renderActive();
-    if (dirty.size === 0) return;
-    pushUndo(dirty);
+    const entry = sealJournal(journal);
+    if (!entry) return;
+    pushUndo(entry);
     emit();
-  }, [fillPolygon, flushRect, pushUndo, emit, renderActive]);
+  }, [dims, fillPolygon, flushRect, pushUndo, emit, renderActive]);
 
   // ---------- Pointer handling ----------
   const posOf = (e) => {
@@ -633,10 +900,17 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   };
 
   const handlePointerDown = (e) => {
+    // One pointer drives the canvas at a time. `touchAction: 'none'` means we
+    // see every finger, and a second one used to overwrite strokeRef and end
+    // the first stroke early.
+    if (strokeRef.current || panRef.current) return;
     const { cx, cy } = posOf(e);
     // Middle button or space/shift-drag pans; everything else paints.
     if (e.button === 1 || e.shiftKey) {
-      panRef.current = { cx, cy, panX: view.panX, panY: view.panY };
+      panRef.current = { pointerId: e.pointerId, cx, cy, panX: view.panX, panY: view.panY };
+      // Capture, or a drag released outside the canvas never reaches endStroke
+      // and the pan stays glued to the pointer when it comes back.
+      safeCapture(activeCanvasRef.current, e.pointerId);
       e.preventDefault();
       return;
     }
@@ -665,13 +939,22 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       return;
     }
 
-    activeCanvasRef.current.setPointerCapture?.(e.pointerId);
-    const dirty = new Map();
+    safeCapture(activeCanvasRef.current, e.pointerId);
+    const buf = bufRef.current;
     // Right-drag is a common eraser gesture, but pointer events give us
     // e.buttons instead; alt is the modifier here and matches the tool toggle.
     const erase = tool === 'eraser' || e.altKey;
-    strokeRef.current = { dirty, lastIx: ix, lastIy: iy, erase };
-    flushRect(stampDisc(ix, iy, brushSize / 2, erase, dirty));
+    strokeRef.current = {
+      pointerId: e.pointerId,
+      journal: makeJournal(buf, dims.w, dims.h),
+      // The stroke carries its own buffer, size, target and identity so it can
+      // still be committed correctly if the active layer changes mid-drag.
+      buf, w: dims.w, h: dims.h,
+      maskId: activeMaskId,
+      key: loadedKeyRef.current,
+      lastIx: ix, lastIy: iy, erase,
+    };
+    flushRect(stampDisc(ix, iy, brushSize / 2, erase, strokeRef.current.journal));
     renderActive();
   };
 
@@ -679,9 +962,10 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     const { cx, cy } = posOf(e);
     cursorRef.current = { cx, cy };
 
-    if (panRef.current) {
-      const p = panRef.current;
-      setView((v) => ({ ...v, panX: p.panX + (cx - p.cx), panY: p.panY + (cy - p.cy) }));
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== e.pointerId) return;
+      setView((v) => ({ ...v, panX: pan.panX + (cx - pan.cx), panY: pan.panY + (cy - pan.cy) }));
       return;
     }
 
@@ -690,28 +974,29 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       renderActive(); // cursor or polygon rubber band only
       return;
     }
+    if (stroke.pointerId !== e.pointerId) return;
     const { ix, iy } = toImage(cx, cy);
-    flushRect(stampSegment(stroke.lastIx, stroke.lastIy, ix, iy, brushSize / 2, stroke.erase, stroke.dirty));
+    flushRect(stampSegment(stroke.lastIx, stroke.lastIy, ix, iy, brushSize / 2, stroke.erase, stroke.journal));
     stroke.lastIx = ix;
     stroke.lastIy = iy;
     renderActive();
   };
 
   const endStroke = (e) => {
-    if (panRef.current) {
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== e.pointerId) return;
       panRef.current = null;
+      safeRelease(activeCanvasRef.current, e.pointerId);
       return;
     }
     const stroke = strokeRef.current;
-    strokeRef.current = null;
-    if (!stroke) return;
-    activeCanvasRef.current?.releasePointerCapture?.(e.pointerId);
-    if (stroke.dirty.size === 0) return;
-    pushUndo(stroke.dirty);
+    if (!stroke || stroke.pointerId !== e.pointerId) return;
+    safeRelease(activeCanvasRef.current, e.pointerId);
     // Encode once per stroke rather than per mousemove: a full column-major
     // walk of a 12-megapixel mask is tens of milliseconds, fine on mouseup and
     // very much not fine at 60 Hz.
-    emit();
+    finishStroke();
   };
 
   const handlePointerLeave = () => {
@@ -719,22 +1004,34 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     renderActive();
   };
 
-  const handleWheel = (e) => {
-    e.preventDefault();
-    const { cx, cy } = posOf(e);
-    setView((v) => {
-      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-      if (zoom === v.zoom) return v;
-      // Keep the image point under the cursor fixed while zooming.
-      const before = rectOf(v);
-      const fx = before.w ? (cx - before.x) / before.w : 0.5;
-      const fy = before.h ? (cy - before.y) / before.h : 0.5;
-      const after = rectOf({ ...v, zoom, panX: 0, panY: 0 });
-      return { zoom, panX: cx - (after.x + fx * after.w), panY: cy - (after.y + fy * after.h) };
-    });
-  };
+  // React registers wheel/touchstart/touchmove on the root as *passive*, so
+  // preventDefault() inside an onWheel prop is ignored and the page scrolls
+  // behind the zoom. A native non-passive listener is the only way to stop it.
+  useEffect(() => {
+    const canvas = activeCanvasRef.current;
+    if (!canvas) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const box = canvas.getBoundingClientRect();
+      const cx = e.clientX - box.left;
+      const cy = e.clientY - box.top;
+      setView((v) => {
+        const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+        if (zoom === v.zoom) return v;
+        // Keep the image point under the cursor fixed while zooming.
+        const before = rectOf(v);
+        const fx = before.w ? (cx - before.x) / before.w : 0.5;
+        const fy = before.h ? (cy - before.y) / before.h : 0.5;
+        const after = rectOf({ ...v, zoom, panX: 0, panY: 0 });
+        return { zoom, panX: cx - (after.x + fx * after.w), panY: cy - (after.y + fy * after.h) };
+      });
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [rectOf]);
 
   const hasActive = Boolean(activeMaskId);
+  const editable = hasActive && !maskError;
   const overlayStyle = {
     position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
   };
@@ -764,7 +1061,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
           ...overlayStyle,
           // The brush ring drawn on this canvas IS the cursor; a native one on
           // top of it just misleads about where the stroke lands.
-          cursor: !hasActive ? 'default' : tool === 'polygon' ? 'crosshair' : 'none',
+          cursor: !editable ? 'default' : tool === 'polygon' ? 'crosshair' : 'none',
           touchAction: 'none',
         }}
         onPointerDown={handlePointerDown}
@@ -772,8 +1069,19 @@ const MaskCanvas = forwardRef(function MaskCanvas({
         onPointerUp={endStroke}
         onPointerCancel={endStroke}
         onPointerLeave={handlePointerLeave}
-        onDoubleClick={(e) => { if (tool === 'polygon') { e.preventDefault(); commitPolygon(e.altKey); } }}
-        onWheel={handleWheel}
+        onDoubleClick={(e) => {
+          if (tool !== 'polygon') return;
+          e.preventDefault();
+          // The two pointerdowns behind a double click already pushed two
+          // vertices in the same spot; drop the duplicate before closing.
+          const poly = polyRef.current;
+          if (poly.length >= 2) {
+            const a = poly[poly.length - 1];
+            const b = poly[poly.length - 2];
+            if (Math.hypot(a.ix - b.ix, a.iy - b.iy) < 1) poly.pop();
+          }
+          commitPolygon(e.altKey);
+        }}
         onContextMenu={(e) => e.preventDefault()}
       />
       {!imgLoaded && (
@@ -788,6 +1096,24 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       {imgLoaded && !hasActive && (
         <div style={{ ...chip, bottom: 12, left: '50%', transform: 'translateX(-50%)' }}>
           Add or select a mask layer to start painting
+        </div>
+      )}
+      {imgLoaded && maskError && (
+        <div style={{
+          ...chip, bottom: 12, left: 12, right: 12, textAlign: 'center',
+          background: 'rgba(122, 34, 34, 0.92)',
+        }}>
+          This layer cannot be shown or edited ({maskError}). It is left exactly
+          as stored — delete the layer if you want to redraw it.
+        </div>
+      )}
+      {imgLoaded && !maskError && unreadableOthers > 0 && (
+        <div style={{
+          ...chip, bottom: 12, left: 12, right: 12, textAlign: 'center',
+          background: 'rgba(122, 34, 34, 0.92)',
+        }}>
+          {unreadableOthers} other mask {unreadableOthers === 1 ? 'layer' : 'layers'} cannot be
+          shown and {unreadableOthers === 1 ? 'is' : 'are'} left exactly as stored.
         </div>
       )}
       {view.zoom > 1 && (

@@ -13,7 +13,9 @@ import BBoxCanvas, { getClassColor } from '../components/BBoxCanvas';
 import MaskCanvas from '../components/MaskCanvas';
 import MaskToolPanel from '../components/MaskToolPanel';
 import ImageAdjust from '../components/ImageAdjust';
-import { countsOf } from '../utils/rle';
+import {
+  stripServerFields, preserveExcept, maskIsUsable, maskLayerPayload, statusFromSaved,
+} from '../utils/annotationPayload';
 import {
   fetchProject,
   fetchProjectStats,
@@ -73,10 +75,14 @@ export default function LabelingView() {
   const [maskHistory, setMaskHistory] = useState({ canUndo: false, canRedo: false });
   const maskCanvasRef = useRef(null);
   const nextMaskId = useRef(1);
-  // annotate-batch replaces every annotation on the sample, so anything that
-  // isn't a mask has to be handed back verbatim or saving a mask silently
-  // deletes it.
-  const preservedAnnotations = useRef([]);
+  // The sample's annotations exactly as the server returned them. Every save
+  // path derives its "hand these back untouched" list from this, rather than
+  // from the editor state it happens to have loaded.
+  const sampleAnnotations = useRef([]);
+  // Whether the mask layers differ from what the server holds. Needed to tell
+  // "the user erased everything" (a save that deletes) from "nothing was
+  // edited" (a save that should not).
+  const masksDirty = useRef(false);
 
   // Display-only image adjustment, shared by the bbox and mask canvases.
   const [adjust, setAdjust] = useState({ brightness: 1, contrast: 1 });
@@ -198,6 +204,8 @@ export default function LabelingView() {
     try {
       const s = await fetchSample(projectId, sampleList[idx].id);
       setSample(s);
+      sampleAnnotations.current = s.annotations || [];
+      masksDirty.current = false;
 
       // Load existing annotations for re-labeling
       if (s.annotations && s.annotations.length > 0) {
@@ -220,16 +228,13 @@ export default function LabelingView() {
             classIndex: Math.max(0, (project?.class_list || []).indexOf(a.label)),
             isDraft: Boolean(a.is_draft),
             mask_json: a.mask_json,
+            // The record this layer came from. An untouched layer is saved from
+            // `source` rather than rebuilt, which is what keeps a draft a draft
+            // and keeps a mask this build cannot decode byte-identical.
+            source: stripServerFields(a),
           }));
         setMaskLayers(existingMasks);
         setActiveMaskId(existingMasks.length > 0 ? existingMasks[0].id : null);
-        preservedAnnotations.current = s.annotations
-          .filter(a => a.ann_type !== 'mask')
-          .map(a => ({
-            label: a.label,
-            ann_type: a.ann_type,
-            bbox_json: a.bbox_json ?? null,
-          }));
 
         const existingLabels = new Set(
           s.annotations
@@ -242,7 +247,6 @@ export default function LabelingView() {
         setSelectedLabels(new Set());
         setMaskLayers([]);
         setActiveMaskId(null);
-        preservedAnnotations.current = [];
       }
       setSelectedBoxId(null);
       undoStack.current = [];
@@ -312,14 +316,17 @@ export default function LabelingView() {
   // Uses functional updaters so rapid clicks always see latest state.
   const needsWork = (s) => s.status === 'unlabeled' || s.status === 'pre_labeled';
 
-  const markCurrentAndAdvance = useCallback(() => {
+  // `status` is what the server actually recorded. It used to be hardcoded to
+  // 'labeled', which was right while every save stored at least one accepted
+  // annotation; a save that stores nothing, or only drafts, does not.
+  const markCurrentAndAdvance = useCallback((status = 'labeled') => {
     loadStats();
     if (historyOpen) loadHistory();
 
     setSampleList(prevList => {
       const curIdx = currentIndexRef.current;
       const updated = prevList.map((s, i) =>
-        i === curIdx ? { ...s, status: 'labeled' } : s
+        i === curIdx ? { ...s, status } : s
       );
 
       let nextIdx = updated.findIndex((s, i) => i > curIdx && needsWork(s));
@@ -352,12 +359,16 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
-      const annotations = [...selectedLabels].map(label => ({
-        label,
-        ann_type: 'classification',
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
-      markCurrentAndAdvance();
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'classification'),
+        ...[...selectedLabels].map(label => ({
+          label,
+          ann_type: 'classification',
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Annotation failed:', err);
       setActionError(humanizeApiError(err));
@@ -476,18 +487,27 @@ export default function LabelingView() {
         }
         if (isSegmentation) {
           const predLayers = preds
-            .filter(p => p.ann_type === 'mask' && countsOf(p.mask_json))
+            .filter(p => p.ann_type === 'mask' && maskIsUsable(p.mask_json))
             .map(p => ({
               id: `pred-${nextMaskId.current++}`,
               label: p.label,
               classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
               isDraft: true,
               mask_json: p.mask_json,
+              source: null,
+              dirty: true,
             }));
-          setMaskLayers(predLayers);
-          setActiveMaskId(predLayers.length > 0 ? predLayers[0].id : null);
           if (predLayers.length === 0) {
+            // Nothing usable came back, so nothing changes. Replacing the
+            // layers here used to wipe the user's saved and unsaved masks and
+            // the next Save deleted them server-side.
             setActionError('Model returned predictions but no usable masks for this image.');
+          } else {
+            // Predictions join the existing masks; only the previous round of
+            // drafts is displaced.
+            setMaskLayers(prev => [...prev.filter(l => !l.isDraft), ...predLayers]);
+            masksDirty.current = true;
+            setActiveMaskId(predLayers[0].id);
           }
         }
       }
@@ -512,13 +532,17 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
-      const annotations = predictions.map(p => ({
-        label: p.label,
-        ann_type: p.ann_type,
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'classification'),
+        ...predictions.map(p => ({
+          label: p.label,
+          ann_type: p.ann_type,
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
       setPredictions(null);
-      markCurrentAndAdvance();
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Accept failed:', err);
       setActionError(humanizeApiError(err));
@@ -530,8 +554,17 @@ export default function LabelingView() {
   const handleRejectPrediction = () => {
     setPredictions(null);
     setBoxes([]);
-    setMaskLayers([]);
-    setActiveMaskId(null);
+    // Only the model's drafts are rejected. Clearing every layer also threw
+    // away the masks the user had already saved or painted by hand.
+    setMaskLayers(prev => {
+      const next = prev.filter(l => !l.isDraft);
+      setActiveMaskId(cur => (
+        next.some(l => String(l.id) === String(cur))
+          ? cur
+          : (next.length > 0 ? next[next.length - 1].id : null)
+      ));
+      return next;
+    });
   };
 
   // Detection: box CRUD
@@ -598,13 +631,17 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
-      const annotations = boxes.map(b => ({
-        label: b.label,
-        ann_type: 'bbox',
-        bbox_json: { x: b.x, y: b.y, w: b.w, h: b.h },
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
-      markCurrentAndAdvance();
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'bbox'),
+        ...boxes.map(b => ({
+          label: b.label,
+          ann_type: 'bbox',
+          bbox_json: { x: b.x, y: b.y, w: b.w, h: b.h },
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Save failed:', err);
       setActionError(humanizeApiError(err));
@@ -623,6 +660,10 @@ export default function LabelingView() {
       classIndex: activeClassIndex,
       isDraft: false,
       mask_json: null,
+      // No server record behind this layer, and nothing to store until it is
+      // painted, so it is not an edit yet.
+      source: null,
+      dirty: false,
     };
     setMaskLayers(prev => [...prev, layer]);
     setActiveMaskId(layer.id);
@@ -631,47 +672,72 @@ export default function LabelingView() {
   // Called once per brush stroke. `mask` is null when the layer was erased
   // empty; the layer stays so the user can keep painting, it just won't save.
   const handleMaskUpdated = useCallback((id, mask) => {
+    masksDirty.current = true;
     setMaskLayers(prev => prev.map(l => (
-      String(l.id) === String(id) ? { ...l, mask_json: mask, isDraft: false } : l
+      String(l.id) === String(id) ? { ...l, mask_json: mask, isDraft: false, dirty: true } : l
     )));
   }, []);
 
   const handleDeleteMaskLayer = useCallback((id) => {
-    setMaskLayers(prev => {
-      const next = prev.filter(l => String(l.id) !== String(id));
-      setActiveMaskId(cur => (
-        String(cur) === String(id) ? (next.length > 0 ? next[next.length - 1].id : null) : cur
-      ));
-      return next;
-    });
-  }, []);
+    masksDirty.current = true;
+    // `next` is computed outside the updater: nesting one setState inside
+    // another's updater runs it twice under StrictMode.
+    const next = maskLayers.filter(l => String(l.id) !== String(id));
+    setMaskLayers(next);
+    setActiveMaskId(cur => (
+      String(cur) === String(id)
+        ? (next.length > 0 ? next[next.length - 1].id : null)
+        : cur
+    ));
+  }, [maskLayers]);
 
   const handleRelabelMaskLayer = useCallback((id, classIndex) => {
     const label = project?.class_list?.[classIndex];
     if (!label) return;
+    masksDirty.current = true;
     setMaskLayers(prev => prev.map(l => (
-      String(l.id) === String(id) ? { ...l, classIndex, label } : l
+      String(l.id) === String(id) ? { ...l, classIndex, label, dirty: true } : l
     )));
   }, [project]);
 
   // Segmentation: Save & Next
   const handleSaveMasks = useCallback(async () => {
     if (!sample || saving) return;
-    const painted = maskLayers.filter(l => countsOf(l.mask_json));
-    if (painted.length === 0) return;
+
+    // A stroke still under the pointer has painted pixels the user can see but
+    // has not reached `maskLayers` yet (Enter mid-stroke used to save the
+    // pre-stroke mask). Take the finalized snapshot and use it here directly:
+    // the setState it triggers is not visible inside this handler.
+    const flushed = maskCanvasRef.current?.flushStroke?.() || null;
+    const layers = flushed
+      ? maskLayers.map(l => (
+          String(l.id) === String(flushed.id)
+            ? { ...l, mask_json: flushed.mask, isDraft: false, dirty: true }
+            : l
+        ))
+      : maskLayers;
+
+    const annotations = [
+      ...preserveExcept(sampleAnnotations.current, 'mask'),
+      ...layers.map(maskLayerPayload).filter(Boolean),
+    ];
+    const edited = masksDirty.current || Boolean(flushed);
+    if (annotations.length === 0 && !edited) {
+      setActionError('Nothing to save on this image — paint a mask first.');
+      return;
+    }
+
     setSaving(true);
     setActionError('');
     try {
-      const annotations = [
-        ...preservedAnnotations.current,
-        ...painted.map(l => ({
-          label: l.label,
-          ann_type: 'mask',
-          mask_json: l.mask_json,
-        })),
-      ];
-      await annotateSampleBatch(projectId, sample.id, annotations);
-      markCurrentAndAdvance();
+      // An empty replacement is a real edit here ("I erased them all"), so it
+      // has to be declared rather than guessed at by the server.
+      const saved = await annotateSampleBatch(
+        projectId, sample.id, annotations, annotations.length === 0,
+      );
+      sampleAnnotations.current = saved;
+      masksDirty.current = false;
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Save failed:', err);
       setActionError(humanizeApiError(err));

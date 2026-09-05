@@ -233,10 +233,25 @@ class AnnotationCreate(BaseModel):
     # and compressed server-side; the submitted size is checked against the
     # image's real dimensions rather than trusted.
     mask_json: Optional[dict] = None
+    # annotate-batch replaces every annotation on the sample, so a client that
+    # edits one annotation type has to hand the others back. Without this field
+    # it cannot: every round trip silently promotes a model draft to accepted.
+    # Defaults to False, which is what an ordinary human annotation is.
+    is_draft: bool = False
+    # Provenance, only honoured for a `model:` marker on a draft (see
+    # routes.labeling._resolve_created_by). It exists because the draft-clearing
+    # endpoints match on that marker, so a preserved draft that lost it would
+    # show a "Clear drafts" button that does nothing.
+    created_by: Optional[str] = None
 
 
 class AnnotationBatchCreate(BaseModel):
     annotations: list[AnnotationCreate]
+    # An empty list is a legitimate edit -- "this image has nothing on it", or
+    # the user erased the last mask -- but it is also what a bug looks like, and
+    # this endpoint deletes whatever it replaces. Callers say which one they
+    # mean rather than having the server guess.
+    allow_empty: bool = False
 
 
 class AnnotationOut(BaseModel):
