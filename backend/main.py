@@ -147,7 +147,7 @@ def app_config():
     """Public app configuration exposed to the frontend."""
     from .deps import is_lakebase
     from .finetune_triggers import resolve_finetune_job_id
-    from .dataset_exports import supports_reference_training
+    from .dataset_exports import default_export_volume, supports_reference_training
     export_vol = os.environ.get("EXPORT_VOLUME_PATH", "").strip().rstrip("/")
     if not export_vol:
         export_vol = os.environ.get("DEMO_VOLUME_PATH", "").strip().rstrip("/")
@@ -159,8 +159,7 @@ def app_config():
     return {
         "demo_volume_path": os.environ.get("DEMO_VOLUME_PATH", ""),
         "export_volume_path": export_vol,
-        "export_default_path": os.environ.get("EXPORT_VOLUME_PATH", "").strip().rstrip("/")
-        or (export_vol + "/exports" if export_vol else ""),
+        "export_default_path": default_export_volume(),
         "finetune_supports_reference_datasets": supports_reference_training(),
         "finetune_job_configured": resolve_finetune_job_id() is not None,
         "finetune_base_models": [m.strip() for m in finetune_base_models if m.strip()],

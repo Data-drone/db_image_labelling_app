@@ -21,11 +21,20 @@ REFERENCE_FORMAT = CLASSIFICATION_REFERENCE_FORMAT  # Backward-compatible import
 REFERENCE_FORMATS = {CLASSIFICATION_REFERENCE_FORMAT, DETECTION_REFERENCE_FORMAT}
 
 
-def default_export_volume(project):
+def default_export_volume(project=None):
+    """Default export destination.
+
+    With a project, falls back to its source volume; without one (e.g. app
+    config, before a project is chosen) it returns "" when nothing is configured.
+    """
     configured = os.environ.get("EXPORT_VOLUME_PATH", "").strip().rstrip("/")
     if configured:
         return configured
-    source = os.environ.get("DEMO_VOLUME_PATH", "").strip() or project.source_volume
+    source = os.environ.get("DEMO_VOLUME_PATH", "").strip()
+    if not source and project is not None:
+        source = project.source_volume
+    if not source:
+        return ""
     return source.rstrip("/") + "/exports"
 
 
