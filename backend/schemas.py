@@ -300,6 +300,11 @@ class FinetuneRunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ExportRequest(BaseModel):
+    export_volume: str = ""
+    mode: Literal["copy", "reference"] = "copy"
+
+
 class ExportInfo(BaseModel):
     """Metadata about an available export in the export volume."""
     export_path: str
@@ -312,6 +317,8 @@ class ExportInfo(BaseModel):
     exported_at: str
     exported_by: str
     format: str
+    huggingface_code: Optional[str] = None
+    loading_code: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

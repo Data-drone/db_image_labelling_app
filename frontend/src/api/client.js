@@ -44,8 +44,8 @@ export const fetchDetailedProjectStats = (id) => api.get(`/projects/${id}/stats/
 
 export const cloneProject = (id) => api.post(`/projects/${id}/clone`).then(r => r.data);
 
-export const exportProject = (id, exportVolume) =>
-  api.post(`/projects/${id}/export`, { export_volume: exportVolume }, { timeout: 300000 }).then(r => r.data);
+export const exportProject = (id, exportVolume, mode = 'copy') =>
+  api.post(`/projects/${id}/export`, { export_volume: exportVolume, mode }, { timeout: mode === 'reference' ? 60000 : 300000 }).then(r => r.data);
 
 // ---------------------------------------------------------------------------
 // Samples
@@ -115,7 +115,7 @@ export function preAnnotateProjectStream(projectId, params = {}, { onProgress, s
         if (!res.ok) {
           return res.text().then((body) => {
             let detail = body;
-            try { detail = JSON.parse(body).detail || body; } catch {}
+            try { detail = JSON.parse(body).detail || body; } catch { /* keep the raw response body */ }
             reject(new Error(detail));
           });
         }
@@ -142,7 +142,7 @@ export function preAnnotateProjectStream(projectId, params = {}, { onProgress, s
                   lastData = data;
                   if (eventType === 'progress' && onProgress) onProgress(data);
                   if (eventType === 'done') { resolve(data); return; }
-                } catch {}
+                } catch { /* ignore malformed stream frames */ }
               }
             }
             pump();

@@ -1,6 +1,7 @@
 """Finetuning job management — trigger after export, status polling."""
 
 import logging
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -9,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
+from ..dataset_exports import REFERENCE_FORMATS, supports_reference_training, validate_volume_path
+from ..volumes import _get_workspace_client
 from ..finetune_triggers import resolve_finetune_job_id, trigger_finetune_job
 from ..job_utils import get_project_or_404, sync_run_status
 from ..models import LabelingProject, FinetuneRun
@@ -21,13 +24,12 @@ router = APIRouter(prefix="/api/projects/{project_id}", tags=["finetune-jobs"])
 
 def _validate_export_path(export_path: str) -> None:
     """Raise 400 if export_path is unsafe or outside allowed volume."""
-    if not export_path.startswith("/Volumes/"):
-        raise HTTPException(status_code=400, detail="export_path must be a UC Volume path.")
+    validate_volume_path(export_path)
     parts = PurePosixPath(export_path).parts
     if ".." in parts:
         raise HTTPException(status_code=400, detail="export_path must not contain '..' segments.")
     allowed_prefix = os.environ.get("EXPORT_VOLUME_PATH", "").strip().rstrip("/")
-    if allowed_prefix and not export_path.startswith(allowed_prefix):
+    if allowed_prefix and not export_path.startswith(allowed_prefix + "/"):
         raise HTTPException(
             status_code=400,
             detail=f"export_path must be under the configured export volume ({allowed_prefix}).",
@@ -55,6 +57,23 @@ def trigger_finetune(
 
     # Blocker #2: validate path is safe and under allowed volume
     _validate_export_path(export_path)
+
+    try:
+        response = _get_workspace_client().files.download(f"{export_path}/metadata.json")
+        with response.contents as contents:
+            metadata = json.load(contents)
+        if not isinstance(metadata, dict):
+            raise ValueError("Dataset metadata must be an object")
+    except Exception as exc:
+        raise HTTPException(400, "Cannot read completed dataset metadata. Prepare the dataset before training.") from exc
+    if metadata.get("project_id") != project_id:
+        raise HTTPException(400, "This dataset belongs to another project.")
+    if metadata.get("format") in REFERENCE_FORMATS:
+        if metadata.get("status") != "ready":
+            raise HTTPException(400, "This dataset is not ready for training.")
+        if not supports_reference_training():
+            raise HTTPException(400, "The configured training job does not yet support reference datasets. "
+                                "Use the supplied loading code, or configure a compatible training job.")
 
     # Blocker #4: reject if a run is already active for this project
     active = (

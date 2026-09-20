@@ -12,7 +12,7 @@ Built on **Lakebase** (managed PostgreSQL) for persistent storage with automatic
 - **Sample scrubber**: navigate forward/backward through images, revisit and re-label previous samples
 - **Gallery view**: thumbnail grid with status filters (all/unlabeled/labeled/skipped)
 - **Project versioning**: clone projects to create new versions for iterative labeling
-- **Dataset export**: one-click export to UC Volume in COCO JSON (detection) or CSV (classification) format
+- **Training datasets**: lightweight Hugging Face classification snapshots referencing Volume images; optional CSV/image copies and detection COCO exports
 - **Lakebase integration**: auto-provisioned by default (opt out for DAB-managed deployments) with token refresh and Lakehouse Sync to Delta
 - **Multi-user support**: user identity via Databricks SSO, per-user labeling stats
 
@@ -295,13 +295,45 @@ Bounding boxes are stored as normalised `[0, 1]` coordinates: `{"x": float, "y":
 
 ## Dataset Export
 
-From the Project Dashboard, click **Export Dataset** to export labeled data to a UC Volume:
+For classification, choose **Prepare training dataset** from the Project Dashboard Actions menu or the **Datasets & training** tab. Confirm the labeled-image and class counts, then click **Prepare dataset**. The default destination comes from `EXPORT_VOLUME_PATH` (or `DEMO_VOLUME_PATH/exports`, falling back to the project's source path plus `/exports`). Advanced settings allow an override.
 
-- **Detection projects**: COCO JSON format (`annotations.json` + `images/` directory)
-- **Classification projects**: CSV format (`labels.csv` + `images/` directory)
-- Both include a `metadata.json` with project info, class list, and export stats
+The default classification export writes three files into a unique snapshot directory:
 
-Bounding box coordinates are converted from normalised (0-1) to absolute pixels in the COCO output.
+- `train.jsonl`: one record per labeled sample, with `sample_id`, absolute `/Volumes/...` image path in `image`, and numeric `label`.
+- `classes.json`: `names` in project class order and the matching `label2id` mapping.
+- `metadata.json`: project/version, snapshot ID, counts, timestamp, author and sample/annotation lineage. Written last as the completion marker; incomplete snapshots are not listed as ready.
+
+Only confirmed classification annotations on labeled samples are included. Missing, ambiguous or unknown labels fail validation before any files are written. Draft predictions and unlabeled images are excluded. No image bytes are read, decoded or copied, so preparation performs three uploads regardless of image count. This snapshots labels, not image contents: keep source images unchanged and available. Existence and decoding are checked when training reads them.
+
+The ready screen and dataset history provide copyable Hugging Face loading code. On Databricks compute with `datasets` and `Pillow` installed:
+
+```python
+import json
+from pathlib import Path
+from datasets import ClassLabel, Image, load_dataset
+
+export_dir = Path("/Volumes/catalog/schema/output/snapshot_directory")
+classes = json.loads((export_dir / "classes.json").read_text())
+dataset = load_dataset("json", data_files=str(export_dir / "train.jsonl"), split="train")
+dataset = dataset.cast_column("label", ClassLabel(names=classes["names"]))
+dataset = dataset.cast_column("image", Image())
+```
+
+The training identity needs `USE CATALOG`, `USE SCHEMA` and `READ VOLUME` on both source and export Volumes. Images are decoded when accessed; model-specific transforms/collation and train/validation splitting belong in the training code. Vision-language `SFTTrainer` additionally requires the selected model's message/image format; the manifest is not itself an SFT conversation dataset.
+
+The **Datasets & training** tab remains available without a configured training job. It lists snapshots in the default destination (including legacy snapshots under its `exports/` child). Custom destinations must be saved separately; they are not discovered after refresh.
+
+Existing external finetuning jobs may expect CSV or COCO. Update the job's loader to consume `train.jsonl` and `classes.json`, then set `FINETUNE_SUPPORTS_REFERENCE_DATASETS=true` in the App environment to enable launching reference datasets. Until then, loading code is available but reference datasets cannot be submitted to that job. The existing `export_path` job parameter is unchanged.
+
+Detection uses the same lightweight approach by default. It writes `annotations.json` with absolute source Volume paths and `bbox_normalized` values, followed by `metadata.json` as the completion marker. It does not open or copy any image, so the amount of export I/O is independent of the number and size of the images. The ready screen supplies loading code that opens each image during training, adds its dimensions, and converts the normalized boxes to standard pixel COCO in memory.
+
+The lightweight detection format is named `coco_reference` because its on-disk manifest is not standard portable COCO: image dimensions are deliberately deferred and boxes use normalized coordinates. After running the supplied loader, the in-memory object has standard `width`, `height`, `bbox`, and `area` fields and can be indexed with `pycocotools` or adapted to a training framework.
+
+For a portable classification or detection export, select **Advanced settings → Include image copies**. Detection then produces standard COCO `annotations.json` plus `images/`. Copied exports retain the existing synchronous image-transfer behavior and can still time out for large datasets.
+
+API clients keep their existing copied-export behavior by default. To prepare a reference snapshot, use `POST /api/projects/{id}/export` with `{"mode": "reference"}` and optionally `export_volume`. Its response includes the snapshot path, counts, timestamp and loading code. Dataset history uses `GET /api/projects/{id}/exports`.
+
+For copied COCO exports, bounding boxes are converted from normalised (0-1) to absolute pixels during export. For `coco_reference`, that conversion happens when the supplied loader reads image dimensions during training.
 
 ## Tech Stack
 

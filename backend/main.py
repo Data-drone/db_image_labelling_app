@@ -147,9 +147,10 @@ def app_config():
     """Public app configuration exposed to the frontend."""
     from .deps import is_lakebase
     from .finetune_triggers import resolve_finetune_job_id
-    export_vol = os.environ.get("EXPORT_VOLUME_PATH", "")
+    from .dataset_exports import default_export_volume, supports_reference_training
+    export_vol = os.environ.get("EXPORT_VOLUME_PATH", "").strip().rstrip("/")
     if not export_vol:
-        export_vol = os.environ.get("DEMO_VOLUME_PATH", "")
+        export_vol = os.environ.get("DEMO_VOLUME_PATH", "").strip().rstrip("/")
     finetune_base_models = os.environ.get(
         "FINETUNE_BASE_MODELS",
         "facebook/sam-vit-large,facebook/sam-vit-base,facebook/sam-vit-huge"
@@ -158,6 +159,8 @@ def app_config():
     return {
         "demo_volume_path": os.environ.get("DEMO_VOLUME_PATH", ""),
         "export_volume_path": export_vol,
+        "export_default_path": default_export_volume(),
+        "finetune_supports_reference_datasets": supports_reference_training(),
         "finetune_job_configured": resolve_finetune_job_id() is not None,
         "finetune_base_models": [m.strip() for m in finetune_base_models if m.strip()],
         "finetune_default_epochs": int(os.environ.get("FINETUNE_DEFAULT_EPOCHS", "10")),
