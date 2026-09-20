@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
+from ..dataset_exports import default_export_volume, export_reference_dataset, validate_volume_path
 from ..models import LabelingProject, ProjectSample, Annotation
+from ..schemas import ExportRequest
 from ..volumes import is_volume_path, read_image_bytes, _get_workspace_client
 
 log = logging.getLogger(__name__)
@@ -22,14 +24,21 @@ router = APIRouter(prefix="/api/projects/{project_id}", tags=["export"])
 @router.post("/export")
 def export_project(
     project_id: int,
-    body: dict,
+    body: ExportRequest,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Export labeled dataset to a UC Volume in COCO or CSV format."""
+    """Prepare a reference snapshot or copy a labeled dataset to a UC Volume."""
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    export_path = body.export_volume.strip().rstrip("/") or default_export_volume(p)
+    validate_volume_path(export_path)
+    if body.mode == "reference":
+        return export_reference_dataset(p, export_path, get_user_email(request), db, _get_workspace_client())
     from PIL import Image as PILImage
 
-    export_path = (body.get("export_volume") or "").strip().rstrip("/")
     log.info("Export requested: project=%s, export_path=%r", project_id, export_path)
     if not export_path:
         raise HTTPException(status_code=400, detail="export_volume is required.")

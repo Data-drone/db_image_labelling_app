@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   listExports,
   listFinetuneRuns,
@@ -6,12 +6,14 @@ import {
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from './Spinner';
+import DatasetReady from './DatasetReady';
 
-export default function FinetuneTab({ projectId, appConfig }) {
+export default function FinetuneTab({ projectId, appConfig, preparedDataset, onPrepare }) {
   // Export list
   const [exports, setExports] = useState([]);
   const [exportsLoading, setExportsLoading] = useState(true);
   const [selectedExport, setSelectedExport] = useState('');
+  const [exportsError, setExportsError] = useState('');
 
   // Config
   const baseModels = appConfig?.finetune_base_models || ['facebook/sam-vit-large'];
@@ -28,38 +30,7 @@ export default function FinetuneTab({ projectId, appConfig }) {
   const [error, setError] = useState('');
   const pollRef = useRef(null);
 
-  useEffect(() => {
-    loadExports();
-    loadRuns();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [projectId]);
-
-  const loadExports = async () => {
-    setExportsLoading(true);
-    try {
-      const data = await listExports(projectId);
-      setExports(data);
-      if (data.length > 0) setSelectedExport(data[0].export_path);
-    } catch (e) {
-      console.error('Failed to load exports', e);
-    }
-    setExportsLoading(false);
-  };
-
-  const loadRuns = async () => {
-    setRunsLoading(true);
-    try {
-      const data = await listFinetuneRuns(projectId);
-      setRuns(data);
-      const active = data.find(r => ['submitting', 'queued', 'running'].includes(r.status));
-      if (active) startPolling();
-    } catch (e) {
-      console.error('Failed to load runs', e);
-    }
-    setRunsLoading(false);
-  };
-
-  const startPolling = () => {
+  const startPolling = useCallback(() => {
     if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
       try {
@@ -70,15 +41,61 @@ export default function FinetuneTab({ projectId, appConfig }) {
           clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch (e) {
+      } catch {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
     }, 5000);
-  };
+  }, [projectId]);
+
+  const loadExports = useCallback(async () => {
+    setExportsLoading(true);
+    setExportsError('');
+    try {
+      const data = [...await listExports(projectId)];
+      if (preparedDataset && !data.some(dataset => dataset.export_path === preparedDataset.export_path)) {
+        data.unshift({ ...preparedDataset, image_count: preparedDataset.images, project_name: 'Prepared dataset' });
+      }
+      setExports(data);
+      if (data.length > 0) setSelectedExport(preparedDataset?.export_path || data[0].export_path);
+      else setSelectedExport('');
+    } catch (e) {
+      setExportsError(humanizeApiError(e));
+      const fallback = preparedDataset
+        ? [{ ...preparedDataset, image_count: preparedDataset.images, project_name: 'Prepared dataset' }]
+        : [];
+      setExports(fallback);
+      setSelectedExport(fallback[0]?.export_path || '');
+    }
+    setExportsLoading(false);
+  }, [preparedDataset, projectId]);
+
+  const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
+    try {
+      const data = await listFinetuneRuns(projectId);
+      setRuns(data);
+      const active = data.find(r => ['submitting', 'queued', 'running'].includes(r.status));
+      if (active) startPolling();
+    } catch (e) {
+      console.error('Failed to load runs', e);
+    }
+    setRunsLoading(false);
+  }, [projectId, startPolling]);
+
+  useEffect(() => {
+    const initialLoad = setTimeout(() => {
+      loadExports();
+      if (appConfig?.finetune_job_configured) loadRuns();
+    }, 0);
+    return () => {
+      clearTimeout(initialLoad);
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [appConfig?.finetune_job_configured, loadExports, loadRuns]);
 
   const handleLaunch = async () => {
-    if (!selectedExport) return;
+    if (!selectedExport || !canTrain) return;
     setSubmitting(true);
     setError('');
     try {
@@ -100,6 +117,10 @@ export default function FinetuneTab({ projectId, appConfig }) {
   };
 
   const activeRun = runs.find(r => ['submitting', 'queued', 'running'].includes(r.status));
+  const selectedDataset = exports.find(dataset => dataset.export_path === selectedExport);
+  const referenceSelected = ['hf_jsonl', 'coco_reference'].includes(selectedDataset?.format);
+  const canTrain = appConfig?.finetune_job_configured
+    && !!selectedDataset && (!referenceSelected || appConfig?.finetune_supports_reference_datasets);
 
   const statusColor = (status) => {
     if (status === 'succeeded') return '#10b981';
@@ -140,19 +161,23 @@ export default function FinetuneTab({ projectId, appConfig }) {
       {/* Launch Section */}
       <div className="card">
         <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: '0 0 1rem 0' }}>
-          Launch Finetuning Run
+          Training datasets
         </h3>
+        <button className="btn btn-primary" onClick={onPrepare} style={{ marginBottom: '1rem' }}>
+          Prepare new dataset
+        </button>
 
         {/* Export Picker */}
         <div style={{ marginBottom: '1rem' }}>
           <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem' }}>
-            Export Dataset
+            Dataset history
           </label>
+          {exportsError && <p role="alert">{exportsError} <button onClick={loadExports}>Retry</button></p>}
           {exportsLoading ? (
             <Spinner size={14} />
           ) : exports.length === 0 ? (
             <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', padding: '0.5rem', background: 'var(--bg-secondary)', borderRadius: 6 }}>
-              No exports available. Export a labeled dataset first from the Actions menu.
+              No datasets yet. Prepare a snapshot of your confirmed labels to get started.
             </div>
           ) : (
             <select
@@ -162,14 +187,26 @@ export default function FinetuneTab({ projectId, appConfig }) {
             >
               {exports.map((exp) => (
                 <option key={exp.export_path} value={exp.export_path}>
-                  {exp.project_name} v{exp.version} — {exp.image_count} images, {exp.format} ({exp.exported_at.slice(0, 10)})
+                  {exp.project_name}{exp.version ? ` v${exp.version}` : ''} — {exp.image_count} images, {['hf_jsonl', 'coco_reference'].includes(exp.format) ? 'Volume references' : exp.format}{exp.exported_at ? ` (${new Date(exp.exported_at).toLocaleString()})` : ''}
                 </option>
               ))}
             </select>
           )}
         </div>
 
+        {referenceSelected && <DatasetReady key={selectedExport} dataset={selectedDataset} />}
+        {!canTrain && selectedExport && (
+          <p style={{ color: 'var(--text-secondary)' }}>
+            {referenceSelected
+              ? (appConfig?.finetune_job_configured
+                ? 'The configured training job needs support for reference datasets. You can use the supplied loading code now.'
+                : 'Use the loading code on Databricks, or configure a training job to launch training here.')
+              : 'Configure a training job to launch this copied dataset here.'}
+          </p>
+        )}
+
         {/* Config Grid */}
+        {canTrain && <>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
           <div>
             <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem' }}>
@@ -277,9 +314,11 @@ export default function FinetuneTab({ projectId, appConfig }) {
             Wait for the current run to finish before launching another.
           </span>
         )}
+        </>}
       </div>
 
       {/* Run History */}
+      {appConfig?.finetune_job_configured && (
       <div className="card">
         <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: '0 0 0.75rem 0' }}>
           Run History
@@ -353,6 +392,7 @@ export default function FinetuneTab({ projectId, appConfig }) {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

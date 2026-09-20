@@ -54,6 +54,11 @@ def test_client(tmp_dir: Path):
             yield c, main_mod, tmp_dir
 
 
+# This is a reusable context-manager helper, not a pytest test.  Its public
+# name is retained because several unittest modules import it directly.
+test_client.__test__ = False
+
+
 def make_sample_volume(tmp_dir: Path) -> Path:
     """A fake local 'source volume' directory with tiny image stubs."""
     vol = tmp_dir / "vol"

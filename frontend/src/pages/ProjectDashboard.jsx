@@ -7,7 +7,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
   fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus,
-  preAnnotateProject, preAnnotateProjectStream,
+  preAnnotateProjectStream,
   acceptAllDrafts, clearAllModelDrafts,
   fetchInferenceSettings, enqueuePreannotateJob, fetchPreannotateRun, fetchLatestPreannotateRun,
   fetchAppConfig, triggerFinetune, fetchLatestFinetuneRun,
@@ -20,6 +20,7 @@ import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
 import ClusterMap from '../components/ClusterMap';
 import FinetuneTab from '../components/FinetuneTab';
+import DatasetReady from '../components/DatasetReady';
 
 export default function ProjectDashboard() {
   const { id: projectId } = useParams();
@@ -41,6 +42,8 @@ export default function ProjectDashboard() {
   const [exportVolume, setExportVolume] = useState('');
   const [exportResult, setExportResult] = useState(null);
   const [exportError, setExportError] = useState('');
+  const [exportMode, setExportMode] = useState('reference');
+  const exportRequestRef = useRef(0);
 
   const [configExportVolume, setConfigExportVolume] = useState('');
 
@@ -112,7 +115,7 @@ export default function ProjectDashboard() {
 
   // Smart Queue state
   const [diversityLoading, setDiversityLoading] = useState(false);
-  const [diversityQueue, setDiversityQueue] = useState(null);
+  const [, setDiversityQueue] = useState(null);
   const [diversityError, setDiversityError] = useState('');
   const [smartQueueStrategy, setSmartQueueStrategy] = useState('active_learning'); // 'diversity' | 'active_learning'
 
@@ -154,6 +157,12 @@ export default function ProjectDashboard() {
   }, [actionsOpen]);
 
   useEffect(() => {
+    exportRequestRef.current += 1;
+    setExportResult(null);
+    setExportError('');
+    setExporting(false);
+    setShowExport(false);
+    setActiveTab('overview');
     setActiveAsyncRunId(null);
     setAsyncRunMessage('');
     setAsyncRunStatus(null);
@@ -185,7 +194,7 @@ export default function ProjectDashboard() {
         setInferenceSettings(inf);
         setAppConfig(cfg);
         setFinetuneConfigured(!!cfg.finetune_job_configured);
-        if (cfg.export_volume_path) setConfigExportVolume(cfg.export_volume_path);
+        setConfigExportVolume(cfg.export_default_path || '');
       })
       .catch(() => navigate('/projects'))
       .finally(() => setLoading(false));
@@ -249,7 +258,7 @@ export default function ProjectDashboard() {
           setDetailedStats(detailed);
           setGalleryPage(0);
         }
-      } catch (_) { /* still running */ }
+      } catch { /* still running */ }
     };
     tick();
     const id = setInterval(tick, 4000);
@@ -397,11 +406,12 @@ export default function ProjectDashboard() {
 
   const openExportModal = () => {
     if (configExportVolume) {
-      setExportVolume(configExportVolume.replace(/\/+$/, '') + '/exports');
+      setExportVolume(configExportVolume);
     } else if (project?.source_volume) {
       setExportVolume(project.source_volume.replace(/\/+$/, '') + '/exports');
     }
     setExportResult(null);
+    setExportMode('reference');
     setExportError('');
     setFinetuneRun(null);
     setFinetuneError('');
@@ -411,21 +421,23 @@ export default function ProjectDashboard() {
 
   const handleExport = async () => {
     if (exporting || !exportVolume.trim()) return;
+    const requestId = ++exportRequestRef.current;
     setExporting(true);
     setExportError('');
     setExportResult(null);
     setFinetuneRun(null);
     setFinetuneError('');
     try {
-      const result = await exportProject(projectId, exportVolume.trim());
+      const result = await exportProject(projectId, exportVolume.trim(), exportMode);
+      if (requestId !== exportRequestRef.current) return;
       setExportResult(result);
 
-      if (triggerFinetuneAfterExport && result.export_path) {
+      if (triggerFinetuneAfterExport && result.export_path && (!['hf_jsonl', 'coco_reference'].includes(result.format) || appConfig?.finetune_supports_reference_datasets)) {
         setFinetuneTriggering(true);
         try {
           const ftRun = await triggerFinetune(projectId, result.export_path);
           setFinetuneRun(ftRun);
-          startFinetunePolling(ftRun.id);
+          startFinetunePolling();
         } catch (ftErr) {
           setFinetuneError(humanizeApiError(ftErr));
         } finally {
@@ -433,13 +445,13 @@ export default function ProjectDashboard() {
         }
       }
     } catch (err) {
-      setExportError(humanizeApiError(err));
+      if (requestId === exportRequestRef.current) setExportError(humanizeApiError(err));
     } finally {
-      setExporting(false);
+      if (requestId === exportRequestRef.current) setExporting(false);
     }
   };
 
-  const startFinetunePolling = (runId) => {
+  const startFinetunePolling = () => {
     if (finetunePollingRef.current) clearInterval(finetunePollingRef.current);
     finetunePollingRef.current = setInterval(async () => {
       try {
@@ -816,7 +828,7 @@ export default function ProjectDashboard() {
                   onClick={() => { openExportModal(); setActionsOpen(false); }}
                   disabled={!stats || stats.labeled === 0}
                 >
-                  Export Dataset
+                  Prepare training dataset
                 </button>
                 <button
                   className="dropdown-item"
@@ -906,7 +918,7 @@ export default function ProjectDashboard() {
       </div>
 
       {/* Tab Navigation */}
-      {finetuneConfigured && (
+      {(
         <div style={{
           display: 'flex',
           gap: '0',
@@ -929,14 +941,15 @@ export default function ProjectDashboard() {
                 cursor: 'pointer',
               }}
             >
-              {tab === 'finetuning' ? 'Finetuning' : 'Overview'}
+              {tab === 'finetuning' ? 'Datasets & training' : 'Overview'}
             </button>
           ))}
         </div>
       )}
 
-      {activeTab === 'finetuning' && finetuneConfigured && (
-        <FinetuneTab projectId={projectId} appConfig={appConfig} />
+      {activeTab === 'finetuning' && (
+        <FinetuneTab key={projectId} projectId={projectId} appConfig={appConfig} preparedDataset={exportResult}
+          onPrepare={() => { setActiveTab('overview'); openExportModal(); }} />
       )}
 
       {activeTab === 'overview' && (<>
@@ -1246,7 +1259,7 @@ export default function ProjectDashboard() {
         <div className="card" style={{ marginBottom: '1.5rem', border: '1px solid var(--accent-blue)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
             <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
-              Export Dataset
+              Prepare training dataset
             </h3>
             <button
               onClick={() => setShowExport(false)}
@@ -1257,10 +1270,25 @@ export default function ProjectDashboard() {
           </div>
 
           <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-            Export {stats?.labeled || 0} labeled samples as {project.task_type === 'detection' ? 'COCO JSON' : 'CSV + images'} to a UC Volume.
+            {stats?.labeled || 0} labeled images · {project.class_list.length} classes.
+            {' '}Unlabeled images and unconfirmed predictions are excluded.
+            {exportMode === 'reference' && (
+              <p>
+                Save a snapshot of your labels for training on Databricks. Images stay in their existing Volume.
+                {project.task_type === 'detection' && ' Image dimensions and pixel COCO boxes are materialized when training loads the snapshot.'}
+              </p>
+            )}
           </div>
 
-          <div style={{ marginBottom: '0.75rem' }}>
+          <details style={{ marginBottom: '0.75rem' }}>
+            <summary style={{ cursor: 'pointer', marginBottom: '0.5rem' }}>Advanced settings</summary>
+            {(
+              <label style={{ display: 'block', marginBottom: '0.75rem' }}>
+                <input type="checkbox" checked={exportMode === 'copy'} disabled={exporting || !!exportResult}
+                  onChange={(event) => { setExportMode(event.target.checked ? 'copy' : 'reference'); setTriggerFinetuneAfterExport(false); }} />
+                {' '}Include image copies (portable {project.task_type === 'detection' ? 'COCO' : 'CSV'} dataset; large exports can take several minutes or time out)
+              </label>
+            )}
             <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.3rem' }}>
               Export Volume Path
             </label>
@@ -1269,7 +1297,7 @@ export default function ProjectDashboard() {
               value={exportVolume}
               onChange={(e) => setExportVolume(e.target.value)}
               placeholder="/Volumes/catalog/schema/volume"
-              disabled={exporting}
+              disabled={exporting || !!exportResult}
               style={{
                 width: '100%',
                 padding: '0.5rem 0.75rem',
@@ -1280,9 +1308,10 @@ export default function ProjectDashboard() {
                 fontSize: '0.85rem',
               }}
             />
-          </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Dataset history lists the default destination. Save the path if you choose a custom destination.</p>
+          </details>
 
-          {finetuneConfigured && !exportResult && (
+          {finetuneConfigured && !exportResult && (exportMode === 'copy' || appConfig?.finetune_supports_reference_datasets) && (
             <label style={{
               display: 'flex', alignItems: 'center', gap: '0.5rem',
               fontSize: '0.85rem', color: 'var(--text-secondary)',
@@ -1294,7 +1323,7 @@ export default function ProjectDashboard() {
                 onChange={(e) => setTriggerFinetuneAfterExport(e.target.checked)}
                 disabled={exporting}
               />
-              Trigger finetuning job after export
+              Start training when the dataset is ready
             </label>
           )}
 
@@ -1322,8 +1351,9 @@ export default function ProjectDashboard() {
               marginBottom: '0.75rem',
             }}>
               <div style={{ color: 'var(--status-success)', fontWeight: 600, marginBottom: '0.3rem' }}>
-                Export complete!
+                Dataset ready
               </div>
+              {['hf_jsonl', 'coco_reference'].includes(exportResult.format) ? <DatasetReady key={exportResult.export_path} dataset={exportResult} /> : <>
               <div style={{ color: 'var(--text-secondary)' }}>
                 <strong>{exportResult.images}</strong> images, <strong>{exportResult.annotations}</strong> annotations
               </div>
@@ -1342,6 +1372,7 @@ export default function ProjectDashboard() {
               <div style={{ color: 'var(--text-muted)', marginTop: '0.3rem', fontSize: '0.75rem' }}>
                 Format: {exportResult.format === 'coco' ? 'COCO JSON (annotations.json + images/)' : 'CSV (labels.csv + images/)'}
               </div>
+              </>}
             </div>
           )}
 
@@ -1411,9 +1442,9 @@ export default function ProjectDashboard() {
               disabled={exporting || finetuneTriggering || !exportVolume.trim() || !!exportResult}
               style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
             >
-              {exporting ? 'Exporting...' : finetuneTriggering ? 'Triggering finetuning...' : 'Export'}
+              {exporting ? 'Preparing dataset...' : finetuneTriggering ? 'Starting training...' : 'Prepare dataset'}
             </button>
-            {exportResult && finetuneConfigured && !finetuneRun && !finetuneError && (
+            {exportResult && finetuneConfigured && !finetuneRun && !finetuneError && (!['hf_jsonl', 'coco_reference'].includes(exportResult.format) || appConfig?.finetune_supports_reference_datasets) && (
               <button
                 className="btn-primary"
                 onClick={async () => {
@@ -1421,7 +1452,7 @@ export default function ProjectDashboard() {
                   try {
                     const ftRun = await triggerFinetune(projectId, exportResult.export_path);
                     setFinetuneRun(ftRun);
-                    startFinetunePolling(ftRun.id);
+                    startFinetunePolling();
                   } catch (ftErr) {
                     setFinetuneError(humanizeApiError(ftErr));
                   } finally {
@@ -1432,6 +1463,11 @@ export default function ProjectDashboard() {
                 style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
               >
                 {finetuneTriggering ? 'Triggering...' : 'Trigger Finetuning'}
+              </button>
+            )}
+            {exportResult && (
+              <button className="btn btn-secondary" onClick={() => { setShowExport(false); setActiveTab('finetuning'); }}>
+                View datasets & training
               </button>
             )}
             <button
