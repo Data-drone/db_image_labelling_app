@@ -59,11 +59,18 @@ class TestDatasetExport(unittest.TestCase):
             ) for index in range(count)]
             db.add_all(samples)
             db.flush()
+            if task_type == "detection":
+                ann_type, bbox_json, mask_json = "bbox", {"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.5}, None
+            elif task_type == "segmentation":
+                ann_type, bbox_json, mask_json = "mask", None, {"size": [4, 4], "counts": [0, 16]}
+            else:
+                ann_type, bbox_json, mask_json = "classification", None, None
             db.add_all([Annotation(
                 project_id=project.id, sample_id=sample.id,
                 label=project.class_list[index % 2],
-                ann_type="bbox" if task_type == "detection" else "classification",
-                bbox_json={"x": 0.1, "y": 0.2, "w": 0.5, "h": 0.5} if task_type == "detection" else None,
+                ann_type=ann_type,
+                bbox_json=bbox_json,
+                mask_json=mask_json,
                 is_draft=False,
             ) for index, sample in enumerate(samples)])
             db.commit()
@@ -179,7 +186,7 @@ class TestDatasetExport(unittest.TestCase):
             response = self.prepare(project_id, export_volume=path)
             self.assertEqual(response.status_code, 400, response.text)
         with deps.get_session_factory()() as db:
-            db.query(LabelingProject).first().task_type = "segmentation"
+            db.query(LabelingProject).first().task_type = "captioning"
             db.commit()
         self.assertEqual(self.prepare(project_id).status_code, 400)
         self.assertEqual(self.prepare(999).status_code, 404)
@@ -222,6 +229,24 @@ class TestDatasetExport(unittest.TestCase):
         self.assertEqual(metadata["bbox_format"], "relative_xywh")
         self.assertTrue(metadata["requires_dimension_materialization"])
         self.assertEqual(list(self.files)[-1], f"{export_path}/metadata.json")
+
+    def test_segmentation_reference_writes_rle_without_image_io(self):
+        project_id = self.seed(2, task_type="segmentation")
+        with patch("backend.routes.export.read_image_bytes", side_effect=AssertionError("image read")) as read_image:
+            response = self.prepare(project_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        read_image.assert_not_called()
+        result = response.json()
+        self.assertEqual(result["format"], "coco_reference")
+        self.assertEqual(result["images"], 2)
+        self.assertEqual(result["annotations"], 2)
+        coco = json.loads(self.files[f"{result['export_path']}/annotations.json"])
+        ann = coco["annotations"][0]
+        self.assertEqual(ann["segmentation"]["size"], [4, 4])
+        self.assertEqual(ann["area"], 16)
+        self.assertEqual(ann["bbox_normalized"], [0.0, 0.0, 1.0, 1.0])
+        self.assertIsInstance(ann["segmentation"]["counts"], str)
+        self.assertNotIn("bbox", ann)
 
     def test_detection_rejects_non_finite_boolean_and_out_of_source_boxes(self):
         for bbox, filepath in (

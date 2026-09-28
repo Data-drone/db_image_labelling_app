@@ -1,7 +1,8 @@
 /**
  * Labeling View — project-centric annotation interface.
  * 3-zone layout: top bar, center image (75%), right panel (25%).
- * Supports classification (numbered buttons) and detection (bbox canvas).
+ * Supports classification (numbered buttons), detection (bbox canvas) and
+ * segmentation (mask brush canvas).
  * Sample scrubber: navigate back/forth through all samples.
  */
 
@@ -9,6 +10,12 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import Spinner from '../components/Spinner';
 import BBoxCanvas, { getClassColor } from '../components/BBoxCanvas';
+import MaskCanvas from '../components/MaskCanvas';
+import MaskToolPanel from '../components/MaskToolPanel';
+import ImageAdjust from '../components/ImageAdjust';
+import {
+  stripServerFields, preserveExcept, maskIsUsable, maskLayerPayload, statusFromSaved,
+} from '../utils/annotationPayload';
 import {
   fetchProject,
   fetchProjectStats,
@@ -59,6 +66,27 @@ export default function LabelingView() {
   const undoStack = useRef([]);
   const MAX_UNDO = 20;
 
+  // Segmentation mode state. A "layer" is one mask annotation: label + a
+  // COCO-RLE mask over the whole image. Only the active layer is editable.
+  const [maskLayers, setMaskLayers] = useState([]);
+  const [activeMaskId, setActiveMaskId] = useState(null);
+  const [maskTool, setMaskTool] = useState('brush');
+  const [brushSize, setBrushSize] = useState(24);
+  const [maskHistory, setMaskHistory] = useState({ canUndo: false, canRedo: false });
+  const maskCanvasRef = useRef(null);
+  const nextMaskId = useRef(1);
+  // The sample's annotations exactly as the server returned them. Every save
+  // path derives its "hand these back untouched" list from this, rather than
+  // from the editor state it happens to have loaded.
+  const sampleAnnotations = useRef([]);
+  // Whether the mask layers differ from what the server holds. Needed to tell
+  // "the user erased everything" (a save that deletes) from "nothing was
+  // edited" (a save that should not).
+  const masksDirty = useRef(false);
+
+  // Display-only image adjustment, shared by the bbox and mask canvases.
+  const [adjust, setAdjust] = useState({ brightness: 1, contrast: 1 });
+
   // Multi-label classification state
   const [selectedLabels, setSelectedLabels] = useState(new Set());
 
@@ -80,6 +108,7 @@ export default function LabelingView() {
   const [actionError, setActionError] = useState('');
 
   const isDetection = project?.task_type === 'detection';
+  const isSegmentation = project?.task_type === 'segmentation';
   const total = sampleList.length;
   const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
@@ -166,6 +195,16 @@ export default function LabelingView() {
     setActionError('');
   }, [sample?.id]);
 
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (!masksDirty.current) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
+
   // Load sample when currentIndex changes
   const loadSampleAtIndex = useCallback(async (idx) => {
     if (idx < 0 || idx >= sampleList.length) return;
@@ -175,6 +214,8 @@ export default function LabelingView() {
     try {
       const s = await fetchSample(projectId, sampleList[idx].id);
       setSample(s);
+      sampleAnnotations.current = s.annotations || [];
+      masksDirty.current = false;
 
       // Load existing annotations for re-labeling
       if (s.annotations && s.annotations.length > 0) {
@@ -189,6 +230,22 @@ export default function LabelingView() {
           }));
         setBoxes(existingBoxes);
 
+        const existingMasks = s.annotations
+          .filter(a => a.ann_type === 'mask' && a.mask_json)
+          .map(a => ({
+            id: `existing-${nextMaskId.current++}`,
+            label: a.label,
+            classIndex: Math.max(0, (project?.class_list || []).indexOf(a.label)),
+            isDraft: Boolean(a.is_draft),
+            mask_json: a.mask_json,
+            // The record this layer came from. An untouched layer is saved from
+            // `source` rather than rebuilt, which is what keeps a draft a draft
+            // and keeps a mask this build cannot decode byte-identical.
+            source: stripServerFields(a),
+          }));
+        setMaskLayers(existingMasks);
+        setActiveMaskId(existingMasks.length > 0 ? existingMasks[0].id : null);
+
         const existingLabels = new Set(
           s.annotations
             .filter(a => a.ann_type === 'classification')
@@ -198,6 +255,8 @@ export default function LabelingView() {
       } else {
         setBoxes([]);
         setSelectedLabels(new Set());
+        setMaskLayers([]);
+        setActiveMaskId(null);
       }
       setSelectedBoxId(null);
       undoStack.current = [];
@@ -243,8 +302,14 @@ export default function LabelingView() {
   }, [historyOpen, sample, loadHistory]);
 
   // Navigation
+  const confirmLeaveUnsavedMasks = useCallback(() => {
+    if (!isSegmentation || !masksDirty.current) return true;
+    return window.confirm('This image has unsaved mask edits. Leave without saving?');
+  }, [isSegmentation]);
+
   const goTo = (idx) => {
     if (idx >= 0 && idx < sampleList.length && idx !== currentIndex) {
+      if (!confirmLeaveUnsavedMasks()) return;
       setCurrentIndex(idx);
     }
   };
@@ -267,14 +332,17 @@ export default function LabelingView() {
   // Uses functional updaters so rapid clicks always see latest state.
   const needsWork = (s) => s.status === 'unlabeled' || s.status === 'pre_labeled';
 
-  const markCurrentAndAdvance = useCallback(() => {
+  // `status` is what the server actually recorded. It used to be hardcoded to
+  // 'labeled', which was right while every save stored at least one accepted
+  // annotation; a save that stores nothing, or only drafts, does not.
+  const markCurrentAndAdvance = useCallback((status = 'labeled') => {
     loadStats();
     if (historyOpen) loadHistory();
 
     setSampleList(prevList => {
       const curIdx = currentIndexRef.current;
       const updated = prevList.map((s, i) =>
-        i === curIdx ? { ...s, status: 'labeled' } : s
+        i === curIdx ? { ...s, status } : s
       );
 
       let nextIdx = updated.findIndex((s, i) => i > curIdx && needsWork(s));
@@ -307,12 +375,16 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
-      const annotations = [...selectedLabels].map(label => ({
-        label,
-        ann_type: 'classification',
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
-      markCurrentAndAdvance();
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'classification'),
+        ...[...selectedLabels].map(label => ({
+          label,
+          ann_type: 'classification',
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Annotation failed:', err);
       setActionError(humanizeApiError(err));
@@ -429,6 +501,31 @@ export default function LabelingView() {
             }));
           setBoxes(predBoxes);
         }
+        if (isSegmentation) {
+          const predLayers = preds
+            .filter(p => p.ann_type === 'mask' && maskIsUsable(p.mask_json))
+            .map(p => ({
+              id: `pred-${nextMaskId.current++}`,
+              label: p.label,
+              classIndex: Math.max(0, (project?.class_list || []).indexOf(p.label)),
+              isDraft: true,
+              mask_json: p.mask_json,
+              source: null,
+              dirty: true,
+            }));
+          if (predLayers.length === 0) {
+            // Nothing usable came back, so nothing changes. Replacing the
+            // layers here used to wipe the user's saved and unsaved masks and
+            // the next Save deleted them server-side.
+            setActionError('Model returned predictions but no usable masks for this image.');
+          } else {
+            // Predictions join the existing masks; only the previous round of
+            // drafts is displaced.
+            setMaskLayers(prev => [...prev.filter(l => !l.isDraft), ...predLayers]);
+            masksDirty.current = true;
+            setActiveMaskId(predLayers[0].id);
+          }
+        }
       }
     } catch (err) {
       console.error('Prediction failed:', err);
@@ -444,16 +541,24 @@ export default function LabelingView() {
       handleSaveBoxes();
       return;
     }
+    if (isSegmentation) {
+      handleSaveMasks();
+      return;
+    }
     setSaving(true);
     setActionError('');
     try {
-      const annotations = predictions.map(p => ({
-        label: p.label,
-        ann_type: p.ann_type,
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'classification'),
+        ...predictions.map(p => ({
+          label: p.label,
+          ann_type: p.ann_type,
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
       setPredictions(null);
-      markCurrentAndAdvance();
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Accept failed:', err);
       setActionError(humanizeApiError(err));
@@ -465,6 +570,17 @@ export default function LabelingView() {
   const handleRejectPrediction = () => {
     setPredictions(null);
     setBoxes([]);
+    // Only the model's drafts are rejected. Clearing every layer also threw
+    // away the masks the user had already saved or painted by hand.
+    setMaskLayers(prev => {
+      const next = prev.filter(l => !l.isDraft);
+      setActiveMaskId(cur => (
+        next.some(l => String(l.id) === String(cur))
+          ? cur
+          : (next.length > 0 ? next[next.length - 1].id : null)
+      ));
+      return next;
+    });
   };
 
   // Detection: box CRUD
@@ -531,13 +647,17 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
-      const annotations = boxes.map(b => ({
-        label: b.label,
-        ann_type: 'bbox',
-        bbox_json: { x: b.x, y: b.y, w: b.w, h: b.h },
-      }));
-      await annotateSampleBatch(projectId, sample.id, annotations);
-      markCurrentAndAdvance();
+      const annotations = [
+        ...preserveExcept(sampleAnnotations.current, 'bbox'),
+        ...boxes.map(b => ({
+          label: b.label,
+          ann_type: 'bbox',
+          bbox_json: { x: b.x, y: b.y, w: b.w, h: b.h },
+        })),
+      ];
+      const saved = await annotateSampleBatch(projectId, sample.id, annotations);
+      sampleAnnotations.current = saved;
+      markCurrentAndAdvance(statusFromSaved(saved));
     } catch (err) {
       console.error('Save failed:', err);
       setActionError(humanizeApiError(err));
@@ -546,12 +666,110 @@ export default function LabelingView() {
     }
   };
 
+  // ---------- Segmentation: mask layer CRUD ----------
+  const handleAddMaskLayer = useCallback(() => {
+    const label = project?.class_list?.[activeClassIndex];
+    if (!label) return;
+    const layer = {
+      id: `new-${nextMaskId.current++}`,
+      label,
+      classIndex: activeClassIndex,
+      isDraft: false,
+      mask_json: null,
+      // No server record behind this layer, and nothing to store until it is
+      // painted, so it is not an edit yet.
+      source: null,
+      dirty: false,
+    };
+    setMaskLayers(prev => [...prev, layer]);
+    setActiveMaskId(layer.id);
+  }, [project, activeClassIndex]);
+
+  // Called once per brush stroke. `mask` is null when the layer was erased
+  // empty; the layer stays so the user can keep painting, it just won't save.
+  const handleMaskUpdated = useCallback((id, mask) => {
+    masksDirty.current = true;
+    setMaskLayers(prev => prev.map(l => (
+      String(l.id) === String(id) ? { ...l, mask_json: mask, isDraft: false, dirty: true } : l
+    )));
+  }, []);
+
+  const handleDeleteMaskLayer = useCallback((id) => {
+    masksDirty.current = true;
+    // `next` is computed outside the updater: nesting one setState inside
+    // another's updater runs it twice under StrictMode.
+    const next = maskLayers.filter(l => String(l.id) !== String(id));
+    setMaskLayers(next);
+    setActiveMaskId(cur => (
+      String(cur) === String(id)
+        ? (next.length > 0 ? next[next.length - 1].id : null)
+        : cur
+    ));
+  }, [maskLayers]);
+
+  const handleRelabelMaskLayer = useCallback((id, classIndex) => {
+    const label = project?.class_list?.[classIndex];
+    if (!label) return;
+    masksDirty.current = true;
+    setMaskLayers(prev => prev.map(l => (
+      String(l.id) === String(id) ? { ...l, classIndex, label, dirty: true } : l
+    )));
+  }, [project]);
+
+  // Segmentation: Save & Next
+  const handleSaveMasks = useCallback(async () => {
+    if (!sample || saving) return;
+
+    // A stroke still under the pointer has painted pixels the user can see but
+    // has not reached `maskLayers` yet (Enter mid-stroke used to save the
+    // pre-stroke mask). Take the finalized snapshot and use it here directly:
+    // the setState it triggers is not visible inside this handler.
+    const flushed = maskCanvasRef.current?.flushPending?.()
+      || maskCanvasRef.current?.flushStroke?.()
+      || null;
+    const layers = flushed
+      ? maskLayers.map(l => (
+          String(l.id) === String(flushed.id)
+            ? { ...l, mask_json: flushed.mask, isDraft: false, dirty: true }
+            : l
+        ))
+      : maskLayers;
+
+    const annotations = [
+      ...preserveExcept(sampleAnnotations.current, 'mask'),
+      ...layers.map(maskLayerPayload).filter(Boolean),
+    ];
+    const edited = masksDirty.current || Boolean(flushed);
+    if (annotations.length === 0 && !edited) {
+      setActionError('Nothing to save on this image — paint a mask first.');
+      return;
+    }
+
+    setSaving(true);
+    setActionError('');
+    try {
+      // An empty replacement is a real edit here ("I erased them all"), so it
+      // has to be declared rather than guessed at by the server.
+      const saved = await annotateSampleBatch(
+        projectId, sample.id, annotations, annotations.length === 0,
+      );
+      sampleAnnotations.current = saved;
+      masksDirty.current = false;
+      markCurrentAndAdvance(statusFromSaved(saved));
+    } catch (err) {
+      console.error('Save failed:', err);
+      setActionError(humanizeApiError(err));
+    } finally {
+      setSaving(false);
+    }
+  }, [sample, saving, maskLayers, projectId, markCurrentAndAdvance]);
+
   // Keyboard shortcuts
   useEffect(() => {
     if (!project || !sample) return;
 
     const handler = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
       const isMod = e.ctrlKey || e.metaKey;
 
@@ -562,10 +780,51 @@ export default function LabelingView() {
         return;
       }
 
+      // Segmentation undo/redo is per brush stroke and lives in MaskCanvas,
+      // which owns the pixel diffs.
+      if (isMod && (e.key === 'z' || e.key === 'Z') && isSegmentation) {
+        e.preventDefault();
+        if (e.shiftKey) maskCanvasRef.current?.redo();
+        else maskCanvasRef.current?.undo();
+        return;
+      }
+      if (isMod && e.key === 'y' && isSegmentation) {
+        e.preventDefault();
+        maskCanvasRef.current?.redo();
+        return;
+      }
+
       // [ / ]: cycle box selection (detection only)
       if ((e.key === '[' || e.key === ']') && isDetection) {
         e.preventDefault();
         cycleSelectedBox(e.key === '[');
+        return;
+      }
+
+      // [ / ]: brush size (segmentation)
+      if ((e.key === '[' || e.key === ']') && isSegmentation) {
+        e.preventDefault();
+        setBrushSize(prev => {
+          const step = Math.max(1, Math.round(prev * 0.25));
+          return Math.min(200, Math.max(2, e.key === '[' ? prev - step : prev + step));
+        });
+        return;
+      }
+
+      // B / E: brush or eraser
+      if ((e.key === 'b' || e.key === 'B') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('brush');
+        return;
+      }
+      if ((e.key === 'e' || e.key === 'E') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('eraser');
+        return;
+      }
+      if ((e.key === 'p' || e.key === 'P') && isSegmentation && !isMod) {
+        e.preventDefault();
+        setMaskTool('polygon');
         return;
       }
 
@@ -591,6 +850,9 @@ export default function LabelingView() {
 
           if (isDetection) {
             setActiveClassIndex(idx);
+          } else if (isSegmentation) {
+            setActiveClassIndex(idx);
+            if (activeMaskId) handleRelabelMaskLayer(activeMaskId, idx);
           } else {
             toggleLabel(project.class_list[idx]);
           }
@@ -612,12 +874,21 @@ export default function LabelingView() {
         e.preventDefault();
         if (isDetection) {
           handleSaveBoxes();
+        } else if (isSegmentation) {
+          handleSaveMasks();
         } else {
           handleSaveClassification();
         }
       } else if (e.key === 'Escape') {
+        // Escape is overloaded: abandon the in-progress polygon first, and only
+        // leave the page once there is nothing local left to cancel.
+        if (isSegmentation && maskCanvasRef.current?.cancelPolygon()) {
+          return;
+        }
         if (isDetection && selectedBoxId) {
           setSelectedBoxId(null);
+        } else if (isSegmentation && !confirmLeaveUnsavedMasks()) {
+          return;
         } else {
           navigate(`/projects/${projectId}`);
         }
@@ -625,7 +896,10 @@ export default function LabelingView() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [project, sample, saving, projectId, navigate, isDetection, selectedBoxId, boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels, handleSaveClassification, toggleLabel]);
+  }, [project, sample, saving, projectId, navigate, isDetection, isSegmentation, selectedBoxId,
+      boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
+      handleSaveClassification, handleSaveMasks, toggleLabel, activeMaskId,
+      handleRelabelMaskLayer, confirmLeaveUnsavedMasks]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -703,7 +977,7 @@ export default function LabelingView() {
         <h2 style={{ fontWeight: 600, fontSize: '1.1rem', margin: 0 }}>
           {project.name}
         </h2>
-        <span className={`badge ${isDetection ? 'badge-yellow' : 'badge-blue'}`}>
+        <span className={`badge ${isDetection || isSegmentation ? 'badge-yellow' : 'badge-blue'}`}>
           {project.task_type}
         </span>
 
@@ -729,7 +1003,7 @@ export default function LabelingView() {
           </span>
         )}
 
-        {isDetection && project.class_list[activeClassIndex] && (
+        {(isDetection || isSegmentation) && project.class_list[activeClassIndex] && (
           <span style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -877,6 +1151,27 @@ export default function LabelingView() {
                 onBoxUpdated={handleBoxUpdated}
                 onBoxSelected={setSelectedBoxId}
                 onBoxDeleted={handleBoxDeleted}
+                brightness={adjust.brightness}
+                contrast={adjust.contrast}
+              />
+            ) : isSegmentation ? (
+              <MaskCanvas
+                ref={maskCanvasRef}
+                imageSrc={sampleImageUrl(projectId, sample.id)}
+                imageWidth={sample.width}
+                imageHeight={sample.height}
+                masks={maskLayers}
+                activeMaskId={activeMaskId}
+                activeClassIndex={activeClassIndex}
+                classList={project.class_list}
+                tool={maskTool}
+                brushSize={brushSize}
+                brightness={adjust.brightness}
+                contrast={adjust.contrast}
+                onMaskUpdated={handleMaskUpdated}
+                onMaskSelected={setActiveMaskId}
+                onNeedLayer={handleAddMaskLayer}
+                onHistoryChange={setMaskHistory}
               />
             ) : (
               <>
@@ -916,7 +1211,7 @@ export default function LabelingView() {
             padding: '1rem',
             display: 'flex',
             flexDirection: 'column',
-            overflow: 'hidden',
+            overflowY: 'auto',
           }}
         >
           {sample && (
@@ -1014,6 +1309,14 @@ export default function LabelingView() {
                     >
                       + Add
                     </button>
+                  </div>
+
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <ImageAdjust
+                      brightness={adjust.brightness}
+                      contrast={adjust.contrast}
+                      onChange={setAdjust}
+                    />
                   </div>
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0 0 0.75rem' }} />
@@ -1146,6 +1449,53 @@ export default function LabelingView() {
 
                   <KeyboardShortcutLegend maxClassKey={Math.min(9, project.class_list.length)} />
                 </>
+              ) : isSegmentation ? (
+                /* ===== SEGMENTATION MODE ===== */
+                <MaskToolPanel
+                  classList={project.class_list}
+                  activeClassIndex={activeClassIndex}
+                  onActiveClassChange={setActiveClassIndex}
+                  flashIndex={flashIndex}
+                  layers={maskLayers}
+                  activeMaskId={activeMaskId}
+                  onSelectLayer={setActiveMaskId}
+                  onAddLayer={handleAddMaskLayer}
+                  onDeleteLayer={handleDeleteMaskLayer}
+                  onRelabelLayer={handleRelabelMaskLayer}
+                  imageWidth={sample.width}
+                  imageHeight={sample.height}
+                  tool={maskTool}
+                  onToolChange={setMaskTool}
+                  brushSize={brushSize}
+                  onBrushSizeChange={setBrushSize}
+                  adjust={adjust}
+                  onAdjustChange={setAdjust}
+                  canUndo={maskHistory.canUndo}
+                  canRedo={maskHistory.canRedo}
+                  onUndo={() => maskCanvasRef.current?.undo()}
+                  onRedo={() => maskCanvasRef.current?.redo()}
+                  onClearMask={() => maskCanvasRef.current?.clear()}
+                  newClassName={newClassName}
+                  onNewClassNameChange={setNewClassName}
+                  onAddClass={handleAddClass}
+                  addingClass={addingClass}
+                  saving={saving}
+                  onSave={handleSaveMasks}
+                  onSkip={handleSkip}
+                  predictions={predictions}
+                  endpointReady={endpointReady}
+                  predicting={predicting}
+                  onPredict={handlePredict}
+                  hasDraftAnnotations={hasDraftAnnotations}
+                  onAcceptDrafts={handleAcceptDraftsOnly}
+                  onClearDrafts={handleClearDraftsOnly}
+                >
+                  <KeyboardShortcutLegend
+                    maxClassKey={Math.min(9, project.class_list.length)}
+                    mode="segmentation"
+                    collapsible
+                  />
+                </MaskToolPanel>
               ) : (
                 /* ===== CLASSIFICATION MODE (multi-label) ===== */
                 <>
@@ -1456,33 +1806,51 @@ const kbdStyle = {
   textAlign: 'center',
 };
 
-function KeyboardShortcutLegend({ maxClassKey }) {
-  const shortcuts = [
-    { keys: [`1-${maxClassKey}`], desc: 'Select class' },
+function KeyboardShortcutLegend({ maxClassKey, mode = 'detection', collapsible = false }) {
+  const common = [
+    { keys: [`1-${maxClassKey}`], desc: mode === 'segmentation' ? 'Class / relabel layer' : 'Select class' },
     { keys: ['Enter'], desc: 'Save & next' },
-    { keys: ['Del'], desc: 'Delete box' },
-    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
-    { keys: [']'], desc: 'Next box' },
-    { keys: ['['], desc: 'Prev box' },
     { keys: ['N'], desc: 'Next unlabeled' },
     { keys: ['S'], desc: 'Skip' },
     { keys: ['\u2190 \u2192'], desc: 'Navigate' },
     { keys: ['Esc'], desc: 'Deselect / Back' },
   ];
+  const shortcuts = mode === 'segmentation' ? [
+    ...common.slice(0, 2),
+    { keys: ['B'], desc: 'Brush' },
+    { keys: ['E'], desc: 'Eraser' },
+    { keys: ['P'], desc: 'Polygon' },
+    { keys: [']'], desc: 'Bigger brush' },
+    { keys: ['['], desc: 'Smaller brush' },
+    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo stroke' },
+    { keys: ['\u21e7\u2318/Ctrl', 'Z'], desc: 'Redo stroke' },
+    { keys: ['Shift', 'drag'], desc: 'Pan' },
+    { keys: ['Scroll'], desc: 'Zoom' },
+    ...common.slice(2),
+  ] : [
+    ...common.slice(0, 2),
+    { keys: ['Del'], desc: 'Delete box' },
+    { keys: ['\u2318/Ctrl', 'Z'], desc: 'Undo' },
+    { keys: [']'], desc: 'Next box' },
+    { keys: ['['], desc: 'Prev box' },
+    ...common.slice(2),
+  ];
 
-  return (
+  const body = (
     <div style={{
-      borderTop: '1px solid var(--border-color)',
-      paddingTop: '0.5rem',
+      borderTop: collapsible ? undefined : '1px solid var(--border-color)',
+      paddingTop: collapsible ? 0 : '0.5rem',
     }}>
-      <div style={{
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        color: 'var(--text-secondary)',
-        marginBottom: '0.35rem',
-      }}>
-        Shortcuts
-      </div>
+      {!collapsible && (
+        <div style={{
+          fontSize: '0.7rem',
+          fontWeight: 600,
+          color: 'var(--text-secondary)',
+          marginBottom: '0.35rem',
+        }}>
+          Shortcuts
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
         {shortcuts.map(({ keys, desc }) => (
           <div key={desc} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem' }}>
@@ -1494,5 +1862,25 @@ function KeyboardShortcutLegend({ maxClassKey }) {
         ))}
       </div>
     </div>
+  );
+
+  if (!collapsible) return body;
+
+  return (
+    <details style={{
+      borderTop: '1px solid var(--border-color)',
+      paddingTop: '0.5rem',
+    }}>
+      <summary style={{
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        color: 'var(--text-secondary)',
+        cursor: 'pointer',
+        marginBottom: '0.35rem',
+      }}>
+        Shortcuts
+      </summary>
+      {body}
+    </details>
   );
 }

@@ -66,3 +66,26 @@ def make_sample_volume(tmp_dir: Path) -> Path:
     for name in ("a.jpg", "b.jpg", "c.jpg"):
         (vol / name).write_bytes(b"\xff\xd8\xff\xd9")
     return vol
+
+
+def make_image_volume(tmp_dir: Path, sizes: dict | None = None) -> Path:
+    """A fake source volume holding *real* decodable images.
+
+    ``make_sample_volume`` writes 4-byte JPEG stubs, which is fine for tests
+    that never open the file. Mask tests need genuine pixel dimensions, and
+    one image with an EXIF orientation tag so the transpose behaviour is
+    covered: ``exif_orient.jpg`` is stored 40x20 with orientation 6, so a
+    browser (and the backend) must see it as 20x40.
+    """
+    from PIL import Image
+
+    vol = tmp_dir / "imgvol"
+    vol.mkdir()
+    for name, (w, h) in (sizes or {"a.png": (16, 12), "b.png": (8, 8)}).items():
+        Image.new("RGB", (w, h), (10, 20, 30)).save(vol / name)
+
+    img = Image.new("RGB", (40, 20), (200, 100, 50))
+    exif = img.getexif()
+    exif[274] = 6  # Orientation: rotate 90 CW on display
+    img.save(vol / "exif_orient.jpg", exif=exif)
+    return vol

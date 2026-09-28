@@ -6,12 +6,15 @@ the Databricks SDK or os.listdir for image access directly.
 """
 
 import io
+import logging
 import os
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from .models import ProjectSample
+
+log = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 
@@ -92,7 +95,12 @@ def scan_volume_for_samples(
                             filename=entry.name,
                         ))
                         count += 1
-        except Exception:
+        except Exception as e:
+            # Returning a partial count keeps a long scan's progress, but log
+            # the cause: without this, a permissions failure is indistinguishable
+            # from an empty folder to every caller.
+            log.warning("Volume scan of %s stopped after %d samples: %s",
+                        volume_path, count, e)
             return count
     elif os.path.isdir(volume_path):
         for fname in sorted(os.listdir(volume_path)):

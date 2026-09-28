@@ -120,7 +120,7 @@ function ProjectGroup({ root, allVersions, navigate, onDelete }) {
             <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {baseName}
             </h3>
-            <span className={`badge ${root.task_type === 'detection' ? 'badge-yellow' : 'badge-blue'}`}>
+            <span className={`badge ${root.task_type === 'classification' ? 'badge-blue' : 'badge-yellow'}`}>
               {root.task_type}
             </span>
           </div>

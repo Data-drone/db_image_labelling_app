@@ -81,5 +81,134 @@ class TestCocoDefensiveParsing(unittest.TestCase):
         self.assertEqual(errors[0].row, 1)  # 1-based sequential, not 999
 
 
+def _coco(images, categories, annotations) -> bytes:
+    return json.dumps({
+        "images": images,
+        "categories": categories,
+        "annotations": annotations,
+    }).encode()
+
+
+def _tiny_image(iid=1, fname="a.jpg", w=4, h=4):
+    return {"id": iid, "file_name": fname, "width": w, "height": h}
+
+
+class TestCocoMaskImport(unittest.TestCase):
+    """COCO ``segmentation`` → uncompressed wire RLE."""
+
+    def test_bbox_only_still_emits_bbox(self):
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [0, 0, 2, 2]}],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(items), 1)
+        ann = items[0].annotations[0]
+        self.assertEqual(ann.ann_type, "bbox")
+        self.assertIsNone(ann.mask_json)
+        self.assertEqual(ann.bbox_json, {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5})
+
+    def test_uncompressed_rle_emits_mask(self):
+        counts = [0, 16]
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "bbox": [0, 0, 4, 4],
+                "segmentation": {"size": [4, 4], "counts": counts},
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(errors, [])
+        ann = items[0].annotations[0]
+        self.assertEqual(ann.ann_type, "mask")
+        self.assertEqual(ann.mask_json, {"size": [4, 4], "counts": counts})
+        self.assertIsNone(ann.bbox_json)
+
+    def test_compressed_rle_is_uncompressed_on_the_wire(self):
+        from backend import masks as mask_utils
+        counts = [0, 16]
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "segmentation": {
+                    "size": [4, 4],
+                    "counts": mask_utils.rle_to_string(counts),
+                },
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(errors, [])
+        ann = items[0].annotations[0]
+        self.assertEqual(ann.ann_type, "mask")
+        self.assertEqual(ann.mask_json, {"size": [4, 4], "counts": counts})
+
+    def test_polygon_list_emits_mask(self):
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "segmentation": [[0, 0, 4, 0, 4, 4, 0, 4]],
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(errors, [])
+        ann = items[0].annotations[0]
+        self.assertEqual(ann.ann_type, "mask")
+        self.assertEqual(ann.mask_json["size"], [4, 4])
+        self.assertEqual(sum(ann.mask_json["counts"]), 16)
+        from backend import masks as mask_utils
+        self.assertGreater(mask_utils.rle_area(ann.mask_json["counts"]), 0)
+
+    def test_invalid_rle_is_a_row_error(self):
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "segmentation": {"size": [4, 4], "counts": [1, 2]},
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(items, [])
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].row, 1)
+        self.assertIn("segmentation", errors[0].reason.lower())
+
+    def test_empty_segmentation_falls_back_to_bbox(self):
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "bbox": [0, 0, 2, 2],
+                "segmentation": [],
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(errors, [])
+        self.assertEqual(items[0].annotations[0].ann_type, "bbox")
+
+    def test_bad_polygon_is_a_row_error_not_a_crash(self):
+        raw = _coco(
+            [_tiny_image()],
+            [{"id": 1, "name": "cat"}],
+            [{
+                "id": 1, "image_id": 1, "category_id": 1,
+                "segmentation": [[0, 0, 1]],
+            }],
+        )
+        items, errors = coco_parse(raw)
+        self.assertEqual(items, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("polygon", errors[0].reason.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

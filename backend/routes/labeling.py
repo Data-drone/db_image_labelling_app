@@ -3,6 +3,7 @@ Labeling workflow routes — next sample, annotate, skip, image serving.
 """
 
 import io
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, subqueryload
 
+from .. import image_meta, masks
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
 from ..models import ProjectSample, Annotation, AnnotationHistory
 from ..preannotate import refresh_sample_status_after_annotation_change
@@ -24,6 +26,62 @@ from ..schemas import (
 from ..volumes import read_image_bytes
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["labeling"])
+
+
+_MODEL_PROVENANCE = re.compile(r"^model:[A-Za-z0-9][A-Za-z0-9._:/ -]{0,180}$")
+
+
+def _resolve_created_by(ann, user_email: str) -> str:
+    """Who a resubmitted annotation is attributed to.
+
+    annotate-batch replaces every annotation on a sample, so a client editing
+    one type hands the rest back -- drafts included. The draft endpoints match a
+    draft on ``is_draft`` *and* a ``model:`` provenance marker, so stamping the
+    acting human on every re-inserted row would leave those drafts visible,
+    counted, and impossible to clear or accept.
+
+    A ``model:`` marker on a draft is therefore carried across. Anything else,
+    in particular an attempt to attribute the row to some other person, is
+    ignored in favour of the user actually making the request.
+    """
+    claimed = (ann.created_by or "").strip()
+    if ann.is_draft and _MODEL_PROVENANCE.match(claimed):
+        return claimed
+    return user_email
+
+
+def _prepare_mask(db, sample, payload):
+    """Validate an incoming mask and return ``(stored_mask, bbox_json)``.
+
+    The API accepts uncompressed RLE; the DB holds the compressed form. The
+    bounding box that comes back is derived from the mask itself rather than
+    taken from the client, so the box and the mask can never disagree.
+
+    Returns ``(None, payload.bbox_json)`` when the payload carries no mask.
+    """
+    raw = getattr(payload, "mask_json", None)
+    if raw is None:
+        return None, payload.bbox_json
+
+    dims = image_meta.resolve_dimensions(db, sample)
+    if not dims:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Cannot save a mask for this sample: its image dimensions "
+                "could not be read, so there is no grid to store the mask "
+                "against."
+            ),
+        )
+    img_w, img_h = dims
+    try:
+        height, width, counts = masks.validate_uncompressed(raw, img_h, img_w)
+    except masks.MaskValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid mask: {e}")
+
+    return masks.to_storage(counts, height, width), masks.normalized_bbox(
+        counts, height, width
+    )
 
 
 @router.get("/next", response_model=Optional[SampleOut])
@@ -83,6 +141,8 @@ def annotate_sample(
 
     user_email = get_user_email(request)
 
+    mask_json, bbox_json = _prepare_mask(db, sample, payload)
+
     existing = (
         db.query(Annotation)
         .filter_by(sample_id=sample_id, project_id=project_id, ann_type="classification")
@@ -100,7 +160,9 @@ def annotate_sample(
                 old_ann_type=old.ann_type,
                 new_ann_type=payload.ann_type,
                 old_bbox_json=old.bbox_json,
-                new_bbox_json=payload.bbox_json,
+                new_bbox_json=bbox_json,
+                old_mask_json=old.mask_json,
+                new_mask_json=mask_json,
                 changed_by=user_email,
             ))
         db.query(Annotation).filter_by(
@@ -116,7 +178,9 @@ def annotate_sample(
             old_ann_type=None,
             new_ann_type=payload.ann_type,
             old_bbox_json=None,
-            new_bbox_json=payload.bbox_json,
+            new_bbox_json=bbox_json,
+            old_mask_json=None,
+            new_mask_json=mask_json,
             changed_by=user_email,
         ))
 
@@ -125,7 +189,8 @@ def annotate_sample(
         project_id=project_id,
         label=payload.label,
         ann_type=payload.ann_type,
-        bbox_json=payload.bbox_json,
+        bbox_json=bbox_json,
+        mask_json=mask_json,
         is_draft=False,
         created_by=user_email,
     )
@@ -156,10 +221,18 @@ def annotate_sample_batch(
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
 
-    if not payload.annotations:
-        raise HTTPException(status_code=400, detail="At least one annotation is required.")
+    if not payload.annotations and not payload.allow_empty:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one annotation is required. Send allow_empty=true to "
+                   "record that this sample has no annotations.",
+        )
 
     user_email = get_user_email(request)
+
+    # Validate every mask before touching the DB, so a bad mask half way
+    # through a batch cannot leave the sample with its annotations deleted.
+    prepared = [_prepare_mask(db, sample, ann) for ann in payload.annotations]
 
     old_annotations = (
         db.query(Annotation)
@@ -178,12 +251,14 @@ def annotate_sample_batch(
                 new_ann_type=None,
                 old_bbox_json=old.bbox_json,
                 new_bbox_json=None,
+                old_mask_json=old.mask_json,
+                new_mask_json=None,
                 changed_by=user_email,
             ))
         db.query(Annotation).filter_by(sample_id=sample_id, project_id=project_id).delete()
 
     created = []
-    for ann in payload.annotations:
+    for ann, (mask_json, bbox_json) in zip(payload.annotations, prepared):
         db.add(AnnotationHistory(
             sample_id=sample_id,
             project_id=project_id,
@@ -193,7 +268,9 @@ def annotate_sample_batch(
             old_ann_type=None,
             new_ann_type=ann.ann_type,
             old_bbox_json=None,
-            new_bbox_json=ann.bbox_json,
+            new_bbox_json=bbox_json,
+            old_mask_json=None,
+            new_mask_json=mask_json,
             changed_by=user_email,
         ))
         a = Annotation(
@@ -201,14 +278,28 @@ def annotate_sample_batch(
             project_id=project_id,
             label=ann.label,
             ann_type=ann.ann_type,
-            bbox_json=ann.bbox_json,
-            is_draft=False,
-            created_by=user_email,
+            bbox_json=bbox_json,
+            mask_json=mask_json,
+            # Round-tripped, not forced: a client replacing the masks on a
+            # sample also resubmits the draft bboxes it did not touch, and
+            # those must come back as drafts.
+            is_draft=ann.is_draft,
+            created_by=_resolve_created_by(ann, user_email),
         )
         db.add(a)
         created.append(a)
 
-    sample.status = "labeled"
+    # This used to force "labeled" unconditionally, which was fine while every
+    # batch was a non-empty set of accepted annotations. Now that drafts round
+    # trip and an empty batch is legal, the status has to describe what is
+    # actually stored -- same rule as refresh_sample_status_after_annotation_change,
+    # except that batching over a skipped sample still un-skips it.
+    if not created:
+        sample.status = "unlabeled"
+    elif any(a.is_draft for a in created):
+        sample.status = "pre_labeled"
+    else:
+        sample.status = "labeled"
     sample.locked_by = None
     sample.locked_at = None
 
@@ -469,6 +560,9 @@ def serve_sample_image(
     data = read_image_bytes(sample.filepath)
     if data is None:
         raise HTTPException(status_code=404, detail="Image not found.")
+    # The bytes are already in hand and the editor always loads the image
+    # before a user can draw, so this warms the mask grid for free.
+    image_meta.cache_dimensions(db, sample, data)
     return StreamingResponse(io.BytesIO(data), media_type="image/jpeg")
 
 
@@ -484,12 +578,17 @@ def serve_sample_thumbnail(
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
 
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     data = read_image_bytes(sample.filepath)
     if data is None:
         raise HTTPException(status_code=404, detail="Image not found.")
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    image_meta.cache_dimensions(db, sample, data)
+    # exif_transpose matches what the browser does with the full-size image.
+    # Without it an EXIF-rotated photo appears sideways in the grid but
+    # upright in the editor, and mask overlays drawn on thumbnails would be
+    # rotated relative to the mask they represent.
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
 
     img.thumbnail((size, size), Image.Resampling.LANCZOS)
     buf = io.BytesIO()

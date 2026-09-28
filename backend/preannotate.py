@@ -163,6 +163,7 @@ def run_preannotate_for_samples(
                     label=pred["label"],
                     ann_type=pred["ann_type"],
                     bbox_json=pred.get("bbox_json"),
+                    mask_json=_draft_mask(db, sample, pred.get("mask_json")),
                     is_draft=True,
                     created_by=created_by,
                 )
@@ -197,3 +198,25 @@ def run_preannotate_for_samples(
         "skipped": skipped,
         "total": len(samples),
     }
+
+
+def _draft_mask(db, sample, raw):
+    """Validate and compress a model-supplied mask, or return None.
+
+    A bad mask from an endpoint must never fail the whole pre-annotation run,
+    so anything unusable is logged and dropped -- the draft keeps its box.
+    """
+    if not raw:
+        return None
+    from . import image_meta, masks
+    dims = image_meta.resolve_dimensions(db, sample)
+    if not dims:
+        log.warning("No dimensions for sample %s, dropping predicted mask", sample.id)
+        return None
+    img_w, img_h = dims
+    try:
+        height, width, counts = masks.validate_uncompressed(raw, img_h, img_w)
+    except masks.MaskValidationError as e:
+        log.warning("Dropping invalid predicted mask for sample %s: %s", sample.id, e)
+        return None
+    return masks.to_storage(counts, height, width)

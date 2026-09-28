@@ -11,6 +11,9 @@
  *   onBoxUpdated: (id, {x, y, w, h}) => void
  *   onBoxSelected: (id|null) => void
  *   onBoxDeleted: (id) => void
+ *   brightness, contrast: number — 1 = unchanged. Applied to the photo only,
+ *     via ctx.filter, so the box overlays keep their true colours. A CSS filter
+ *     on the canvas element would tint them too.
  */
 
 import { useRef, useState, useEffect, useCallback } from 'react';
@@ -37,6 +40,8 @@ export default function BBoxCanvas({
   onBoxUpdated,
   onBoxSelected,
   onBoxDeleted,
+  brightness = 1,
+  contrast = 1,
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -108,8 +113,12 @@ export default function BBoxCanvas({
     canvas.height = canvasSize.h;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Image (letterboxed)
+    // Image (letterboxed). ctx.filter is unsupported on a few older engines,
+    // where it stays undefined and the assignment is a harmless no-op.
+    const filter = `brightness(${brightness}) contrast(${contrast})`;
+    if (filter !== 'brightness(1) contrast(1)') ctx.filter = filter;
     ctx.drawImage(imgRef.current, imageRect.x, imageRect.y, imageRect.w, imageRect.h);
+    ctx.filter = 'none';
 
     // Boxes
     for (const box of boxes) {
@@ -170,7 +179,8 @@ export default function BBoxCanvas({
       ctx.strokeRect(x, y, w, h);
       ctx.setLineDash([]);
     }
-  }, [boxes, selectedBoxId, imgLoaded, canvasSize, imageRect, toCanvas, activeClassIndex, classList, drawPreview]);
+  }, [boxes, selectedBoxId, imgLoaded, canvasSize, imageRect, toCanvas, activeClassIndex,
+      classList, drawPreview, brightness, contrast]);
 
   // ---------- Mouse interaction ----------
   const getMousePos = (e) => {

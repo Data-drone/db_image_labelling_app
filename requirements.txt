@@ -3,6 +3,9 @@ uvicorn[standard]>=0.27.0
 sqlalchemy>=2.0.0
 python-multipart>=0.0.9
 Pillow>=10.0.0
+# Used directly by backend/masks.py and the mask PNG export; previously
+# only present transitively via scikit-learn / umap-learn.
+numpy>=1.24.0
 pydantic>=2.0.0
 psycopg2-binary>=2.9.0
 pgvector>=0.3.6

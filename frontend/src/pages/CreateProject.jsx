@@ -303,7 +303,7 @@ export default function CreateProject() {
         <div style={{ marginBottom: '1.25rem' }}>
           <label style={labelStyle}>Task Type *</label>
           <div style={{ display: 'flex', gap: '0.75rem' }}>
-            {['classification', 'detection'].map((t) => (
+            {['classification', 'detection', 'segmentation'].map((t) => (
               <button
                 key={t}
                 type="button"
@@ -532,7 +532,8 @@ export default function CreateProject() {
             Pre-Label with SAM 3.1
           </h2>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
-            Define classes and an optional text prompt for automatic bounding-box pre-annotation using SAM 3.1.
+            Define classes and an optional text prompt for automatic pre-annotation using SAM 3.1
+            (boxes for detection, masks for segmentation when the endpoint returns them).
           </p>
 
           {/* Classes */}

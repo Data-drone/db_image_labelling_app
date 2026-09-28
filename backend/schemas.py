@@ -4,7 +4,9 @@ Pydantic schemas for the CV Explorer API.
 
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+from backend import masks
 
 
 # ---------------------------------------------------------------------------
@@ -13,7 +15,7 @@ from pydantic import BaseModel
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
-    task_type: str  # 'classification' or 'detection'
+    task_type: str  # 'classification', 'detection' or 'segmentation'
     class_list: list[str]
     source_volume: str  # UC Volume path
     serving_endpoint: Optional[str] = None
@@ -88,6 +90,7 @@ class PredictionOut(BaseModel):
     label: str
     ann_type: str
     bbox_json: Optional[dict] = None
+    mask_json: Optional[dict] = None  # uncompressed RLE, see backend/masks.py
     confidence: Optional[float] = None
 
 
@@ -204,6 +207,8 @@ class SampleOut(BaseModel):
     status: str
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     annotations: list["AnnotationOut"] = []
     labels: list[str] = []
 
@@ -222,12 +227,31 @@ class SamplePage(BaseModel):
 # ---------------------------------------------------------------------------
 class AnnotationCreate(BaseModel):
     label: str
-    ann_type: str  # 'classification' or 'bbox'
+    ann_type: str  # 'classification', 'bbox' or 'mask'
     bbox_json: Optional[dict] = None  # {"x":..,"y":..,"w":..,"h":..}
+    # Uncompressed COCO RLE: {"size": [h, w], "counts": [int, ...]}. Validated
+    # and compressed server-side; the submitted size is checked against the
+    # image's real dimensions rather than trusted.
+    mask_json: Optional[dict] = None
+    # annotate-batch replaces every annotation on the sample, so a client that
+    # edits one annotation type has to hand the others back. Without this field
+    # it cannot: every round trip silently promotes a model draft to accepted.
+    # Defaults to False, which is what an ordinary human annotation is.
+    is_draft: bool = False
+    # Provenance, only honoured for a `model:` marker on a draft (see
+    # routes.labeling._resolve_created_by). It exists because the draft-clearing
+    # endpoints match on that marker, so a preserved draft that lost it would
+    # show a "Clear drafts" button that does nothing.
+    created_by: Optional[str] = None
 
 
 class AnnotationBatchCreate(BaseModel):
     annotations: list[AnnotationCreate]
+    # An empty list is a legitimate edit -- "this image has nothing on it", or
+    # the user erased the last mask -- but it is also what a bug looks like, and
+    # this endpoint deletes whatever it replaces. Callers say which one they
+    # mean rather than having the server guess.
+    allow_empty: bool = False
 
 
 class AnnotationOut(BaseModel):
@@ -237,11 +261,22 @@ class AnnotationOut(BaseModel):
     label: str
     ann_type: str
     bbox_json: Optional[dict] = None
+    mask_json: Optional[dict] = None
     is_draft: bool = False
     created_by: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _mask_to_wire(self):
+        # The DB holds the compressed string form; clients get the
+        # uncompressed counts array so no JS ever has to implement the
+        # compression. Doing it here covers every route that returns an
+        # annotation, present and future.
+        if self.mask_json is not None:
+            self.mask_json = masks.to_wire(self.mask_json)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +293,20 @@ class AnnotationHistoryOut(BaseModel):
     new_ann_type: Optional[str] = None
     old_bbox_json: Optional[dict] = None
     new_bbox_json: Optional[dict] = None
+    old_mask_json: Optional[dict] = None
+    new_mask_json: Optional[dict] = None
     changed_by: str
     changed_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _masks_to_wire(self):
+        if self.old_mask_json is not None:
+            self.old_mask_json = masks.to_wire(self.old_mask_json)
+        if self.new_mask_json is not None:
+            self.new_mask_json = masks.to_wire(self.new_mask_json)
+        return self
 
 
 # ---------------------------------------------------------------------------

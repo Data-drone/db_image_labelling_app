@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from .. import image_meta, masks as mask_utils
 from ..deps import get_db, get_user_email
 from ..dataset_exports import default_export_volume, export_reference_dataset, validate_volume_path
 from ..models import LabelingProject, ProjectSample, Annotation
@@ -78,9 +79,13 @@ def export_project(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     export_dir = f"{export_path}/{safe_name}_v{p.version}_{ts}"
 
-    is_detection = p.task_type == "detection"
+    is_segmentation = p.task_type == "segmentation"
+    # Segmentation exports in COCO too -- the same file, with a `segmentation`
+    # field alongside each `bbox`.
+    is_coco = p.task_type == "detection" or is_segmentation
     image_count = 0
     annotation_count = 0
+    mask_count = 0
 
     coco = {
         "info": {
@@ -103,8 +108,13 @@ def export_project(
                 log.warning("Skipping missing image: %s", sample.filepath)
                 continue
 
-            img = PILImage.open(io.BytesIO(img_data))
-            img_w, img_h = img.size
+            # Upload upright bytes and record the matching dimensions, so the
+            # exported image shares the coordinate frame the masks and boxes
+            # were drawn in.
+            img_data, img_w, img_h = image_meta.normalize_for_export(img_data)
+            if img_w is None or img_h is None:
+                img = PILImage.open(io.BytesIO(img_data))
+                img_w, img_h = img.size
 
             dest_path = f"{export_dir}/images/{sample.filename}"
             w.files.upload(dest_path, io.BytesIO(img_data), overwrite=True)
@@ -120,7 +130,7 @@ def export_project(
             if not a.is_draft
         ]
 
-        if is_detection:
+        if is_coco:
             coco_img_id = image_count
             coco["images"].append({
                 "id": coco_img_id,
@@ -129,21 +139,48 @@ def export_project(
                 "height": img_h,
             })
 
+            union_mask = None
             for a in sample_anns:
-                if a.ann_type == "bbox" and a.bbox_json:
-                    bx = a.bbox_json["x"] * img_w
-                    by = a.bbox_json["y"] * img_h
-                    bw = a.bbox_json["w"] * img_w
-                    bh = a.bbox_json["h"] * img_h
-                    annotation_count += 1
-                    coco["annotations"].append({
-                        "id": annotation_count,
-                        "image_id": coco_img_id,
-                        "category_id": class_to_id.get(a.label, 0),
-                        "bbox": [round(bx, 2), round(by, 2), round(bw, 2), round(bh, 2)],
-                        "area": round(bw * bh, 2),
-                        "iscrowd": 0,
-                    })
+                if a.ann_type not in ("bbox", "mask") or not a.bbox_json:
+                    continue
+                bx = a.bbox_json["x"] * img_w
+                by = a.bbox_json["y"] * img_h
+                bw = a.bbox_json["w"] * img_w
+                bh = a.bbox_json["h"] * img_h
+                annotation_count += 1
+                entry = {
+                    "id": annotation_count,
+                    "image_id": coco_img_id,
+                    "category_id": class_to_id.get(a.label, 0),
+                    "bbox": [round(bx, 2), round(by, 2), round(bw, 2), round(bh, 2)],
+                    "area": round(bw * bh, 2),
+                    "iscrowd": 0,
+                }
+
+                counts = _mask_counts(a, img_h, img_w, sample.filename)
+                if counts is not None:
+                    # pycocotools wants the compressed string, and `area` must
+                    # be the mask's pixel count -- not the box area, which
+                    # would inflate every AP number computed from this file.
+                    entry["segmentation"] = {
+                        "size": [img_h, img_w],
+                        "counts": mask_utils.rle_to_string(counts),
+                    }
+                    entry["area"] = mask_utils.rle_area(counts)
+                    union_mask = _accumulate(union_mask, counts, img_h, img_w)
+
+                coco["annotations"].append(entry)
+
+            if union_mask is not None:
+                png = _mask_png(union_mask)
+                if png is not None:
+                    stem = sample.filename.rsplit(".", 1)[0]
+                    w.files.upload(
+                        f"{export_dir}/masks/{stem}.png",
+                        io.BytesIO(png),
+                        overwrite=True,
+                    )
+                    mask_count += 1
         else:
             label = sample_anns[0].label if sample_anns else "unknown"
             csv_rows.append(f"{sample.filename},{label}")
@@ -155,7 +192,7 @@ def export_project(
             detail += f" First error: {first_error}"
         raise HTTPException(status_code=400, detail=detail)
 
-    if is_detection:
+    if is_coco:
         coco_bytes = json.dumps(coco, indent=2).encode("utf-8")
         w.files.upload(f"{export_dir}/annotations.json", io.BytesIO(coco_bytes), overwrite=True)
     else:
@@ -173,7 +210,15 @@ def export_project(
         "annotation_count": annotation_count,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "exported_by": get_user_email(request),
-        "format": "coco" if is_detection else "csv",
+        "format": "coco" if is_coco else "csv",
+        "mask_count": mask_count,
+        # The `masks/` PNGs are a convenience for MVTec-AD / anomalib style
+        # pipelines: one single-channel 0/255 image per sample, the union of
+        # that sample's masks. Class and instance information is deliberately
+        # not encoded there -- annotations.json carries it losslessly as
+        # per-instance COCO RLE, and a label-map PNG would silently drop
+        # overlapping instances.
+        "mask_format": "binary_union_png_0_255" if mask_count else None,
         # UC Lineage: track which samples/annotations produced this export
         "lineage": {
             "source_volume_uc": p.source_volume,
@@ -194,7 +239,53 @@ def export_project(
 
     return {
         "export_path": export_dir,
-        "format": "coco" if is_detection else "csv",
+        "format": "coco" if is_coco else "csv",
         "images": image_count,
         "annotations": annotation_count,
+        "masks": mask_count,
     }
+
+
+def _mask_counts(ann, img_h: int, img_w: int, filename: str):
+    """Uncompressed runs for an annotation's mask, or None if unusable.
+
+    A mask whose grid does not match the image it is being exported against
+    is skipped rather than written out wrong -- a missing `segmentation` is
+    recoverable, a misaligned one silently poisons training.
+    """
+    if not ann.mask_json:
+        return None
+    wire = mask_utils.to_wire(ann.mask_json)
+    if not wire:
+        log.warning("Unreadable mask on annotation %s, skipping", ann.id)
+        return None
+    if wire["size"] != [img_h, img_w]:
+        log.warning(
+            "Mask size %s on annotation %s does not match image %s (%dx%d), skipping",
+            wire["size"], ann.id, filename, img_h, img_w,
+        )
+        return None
+    return wire["counts"]
+
+
+def _accumulate(union, counts, img_h: int, img_w: int):
+    """OR a mask into a running union bitmap."""
+    try:
+        import numpy as np
+        bitmap = mask_utils.bitmap_from_counts(counts, img_h, img_w)
+        return bitmap if union is None else np.maximum(union, bitmap)
+    except Exception as e:
+        log.warning("Could not rasterise mask for PNG export: %s", e)
+        return union
+
+
+def _mask_png(bitmap):
+    """Encode a 0/1 bitmap as a single-channel 0/255 PNG."""
+    try:
+        from PIL import Image as PILImage
+        buf = io.BytesIO()
+        PILImage.fromarray((bitmap * 255).astype("uint8"), mode="L").save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        log.warning("Could not encode mask PNG: %s", e)
+        return None
