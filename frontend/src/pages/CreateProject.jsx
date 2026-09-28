@@ -11,6 +11,9 @@ import {
   fetchVolumes,
   browseDirectory,
   fetchInferenceDefaults,
+  fetchTables,
+  fetchTablePreview,
+  fetchAppConfig,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import FilterableSelect from '../components/FilterableSelect';
@@ -30,6 +33,10 @@ export default function CreateProject() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const volumeFromBrowser = searchParams.get('volume') || '';
+  const tableFromBrowser = searchParams.get('source') === 'table'
+    ? (searchParams.get('table') || '')
+    : '';
+  const tablePrefill = useRef(tableFromBrowser);
 
   // Form fields
   const [name, setName] = useState('');
@@ -39,6 +46,13 @@ export default function CreateProject() {
   const [classInput, setClassInput] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
   const [samPrompt, setSamPrompt] = useState('');
+  const [sourceKind, setSourceKind] = useState(tableFromBrowser ? 'table' : 'volume'); // volume | table
+  const [tablesList, setTablesList] = useState([]);
+  const [tableName, setTableName] = useState('');
+  const [pathColumn, setPathColumn] = useState(searchParams.get('path_column') || 'image_path');
+  const [sourceFilter, setSourceFilter] = useState(searchParams.get('filter') || '');
+  const [tablePreview, setTablePreview] = useState(null);
+  const [warehouseConfigured, setWarehouseConfigured] = useState(true);
 
   // Volume browser — if arriving from Browse Volumes, split the path into
   // base volume (/Volumes/cat/sch/vol) and any nested subfolder portion.
@@ -104,27 +118,106 @@ export default function CreateProject() {
     };
   }, []);
 
-  // Load catalogs for picker mode
+  // Load catalogs for picker or table mode
   useEffect(() => {
-    if (volumeMode !== 'picker' || catalogs.length > 0) return;
+    if (sourceKind !== 'table' && volumeMode !== 'picker') return;
+    if (catalogs.length > 0) return;
     fetchCatalogs().then(setCatalogs).catch(() => {});
-  }, [volumeMode, catalogs.length]);
+  }, [sourceKind, volumeMode, catalogs.length]);
 
   useEffect(() => {
-    setSchema('');
+    fetchAppConfig()
+      .then((cfg) => setWarehouseConfigured(Boolean(cfg.sql_warehouse_configured)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (tableFromBrowser) {
+      const parts = tableFromBrowser.split('.');
+      if (parts.length === 3) setCatalog(parts[0]);
+    }
+  }, [tableFromBrowser]);
+
+  useEffect(() => {
     setVolume('');
-    setSchemas([]);
     setVolumesList([]);
-    if (!catalog) return;
-    fetchSchemas(catalog).then(setSchemas).catch(() => {});
+    setSchemas([]);
+    const prefill = tablePrefill.current;
+    const keepSchema = Boolean(prefill && prefill.split('.')[0] === catalog);
+    if (!keepSchema) setSchema('');
+    if (!catalog) {
+      setSchema('');
+      return;
+    }
+    fetchSchemas(catalog)
+      .then((list) => {
+        setSchemas(list);
+        const prefill = tablePrefill.current;
+        if (prefill) {
+          const parts = prefill.split('.');
+          if (parts.length === 3 && parts[0] === catalog) setSchema(parts[1]);
+        }
+      })
+      .catch(() => {});
   }, [catalog]);
 
   useEffect(() => {
     setVolume('');
     setVolumesList([]);
-    if (!catalog || !schema) return;
-    fetchVolumes(catalog, schema).then(setVolumesList).catch(() => {});
-  }, [catalog, schema]);
+    setTablesList([]);
+    if (!catalog || !schema) {
+      setTableName('');
+      return;
+    }
+    if (sourceKind === 'table') {
+      fetchTables(catalog, schema)
+        .then((list) => {
+          setTablesList(list);
+          const prefill = tablePrefill.current;
+          if (prefill) {
+            const parts = prefill.split('.');
+            if (parts.length === 3 && parts[0] === catalog && parts[1] === schema) {
+              setTableName(parts[2]);
+              tablePrefill.current = '';
+            }
+          }
+        })
+        .catch(() => setTablesList([]));
+    } else {
+      setTableName('');
+      fetchVolumes(catalog, schema).then(setVolumesList).catch(() => {});
+    }
+  }, [catalog, schema, sourceKind]);
+
+  const tableFqn = useMemo(() => {
+    if (!catalog || !schema || !tableName) return '';
+    return `${catalog}.${schema}.${tableName}`;
+  }, [catalog, schema, tableName]);
+
+  useEffect(() => {
+    setTablePreview(null);
+    if (sourceKind !== 'table' || !tableFqn) return;
+    let cancelled = false;
+    fetchTablePreview(tableFqn)
+      .then((data) => {
+        if (cancelled) return;
+        setTablePreview(data);
+        const cols = (data.columns || []).map((c) => c.name).filter(Boolean);
+        const fromQuery = searchParams.get('path_column');
+        if (fromQuery && cols.includes(fromQuery)) setPathColumn(fromQuery);
+        else if (!cols.includes(pathColumn)) {
+          if (cols.includes('image_path')) setPathColumn('image_path');
+          else if (cols.includes('path')) setPathColumn('path');
+          else if (cols.length) setPathColumn(cols[0]);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTablePreview(null);
+      });
+    return () => { cancelled = true; };
+    // pathColumn omitted: we only default when the table changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKind, tableFqn]);
 
   const volumeBasePath = useMemo(() => {
     if (volumeMode === 'picker') {
@@ -149,20 +242,16 @@ export default function CreateProject() {
     return `${volumeBasePath.replace(/\/+$/, '')}/${nestedSubpath}`;
   }, [volumeBasePath, nestedSubpath]);
 
-  const sourceVolumeReady = useMemo(
-    () => Boolean(sourceVolume) && isValidSourceVolumePath(sourceVolume),
-    [sourceVolume],
-  );
-
   useEffect(() => {
     setBrowseResult(null);
   }, [sourceVolume]);
 
   const showVolumeFolderNav = useMemo(() => {
+    if (sourceKind !== 'volume') return false;
     if (!volumeBasePath) return false;
     if (volumeMode === 'picker') return true;
     return isValidSourceVolumePath(volumeBasePath);
-  }, [volumeMode, volumeBasePath]);
+  }, [sourceKind, volumeMode, volumeBasePath]);
 
   useEffect(() => {
     if (!showVolumeFolderNav) {
@@ -221,13 +310,20 @@ export default function CreateProject() {
   const submitBlockers = useMemo(() => {
     const parts = [];
     if (!name.trim()) parts.push('enter a project name');
-    if (!sourceVolume) parts.push('choose a source volume (catalog picker or full direct path)');
-    else if (!isValidSourceVolumePath(sourceVolume)) {
-      parts.push('use a full Unity Catalog path: /Volumes/catalog/schema/volume');
+    if (sourceKind === 'table') {
+      if (!warehouseConfigured) {
+        parts.push('configure SQL_WAREHOUSE_ID on the app to use a Delta table');
+      }
+      if (!tableFqn) parts.push('choose catalog, schema, and table');
+    } else {
+      if (!sourceVolume) parts.push('choose a source volume (catalog picker or full direct path)');
+      else if (!isValidSourceVolumePath(sourceVolume)) {
+        parts.push('use a full Unity Catalog path: /Volumes/catalog/schema/volume');
+      }
     }
     if (classList.length === 0) parts.push('add at least one class (type a label and click Add or press Enter)');
     return parts;
-  }, [name, sourceVolume, classList.length]);
+  }, [name, sourceKind, warehouseConfigured, tableFqn, sourceVolume, classList.length]);
 
   const canSubmit = submitBlockers.length === 0;
 
@@ -245,8 +341,16 @@ export default function CreateProject() {
         description: description.trim(),
         task_type: taskType,
         class_list: classList,
-        source_volume: sourceVolume,
       };
+      if (sourceKind === 'table') {
+        payload.source_type = 'table';
+        payload.source_table = tableFqn;
+        payload.image_path_column = pathColumn.trim() || 'image_path';
+        if (sourceFilter.trim()) payload.source_filter = sourceFilter.trim();
+      } else {
+        payload.source_type = 'volume';
+        payload.source_volume = sourceVolume;
+      }
       if (servingEndpoint.trim()) {
         payload.serving_endpoint = servingEndpoint.trim();
       }
@@ -270,7 +374,7 @@ export default function CreateProject() {
         New Project
       </h1>
       <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '2rem' }}>
-        Set up a labeling project by choosing a source volume and defining classes.
+        Set up a labeling project from a UC Volume of images or a Delta table of image paths.
       </p>
 
       <form onSubmit={handleSubmit}>
@@ -327,7 +431,39 @@ export default function CreateProject() {
           </div>
         </div>
 
+        {/* Image source */}
+        <div style={{ marginBottom: '1.25rem' }}>
+          <label style={labelStyle}>Image source *</label>
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            {[{ id: 'volume', label: 'UC Volume' }, { id: 'table', label: 'Delta table' }].map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setSourceKind(opt.id)}
+                style={{
+                  padding: '0.35rem 0.75rem',
+                  borderRadius: 6,
+                  border: '1px solid var(--border-color)',
+                  background: sourceKind === opt.id ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
+                  color: sourceKind === opt.id ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                  fontWeight: sourceKind === opt.id ? 600 : 400,
+                  cursor: 'pointer',
+                  fontSize: '0.8rem',
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {sourceKind === 'table' && !warehouseConfigured && (
+            <div style={{ fontSize: '0.8rem', color: '#e2a03f', marginBottom: '0.75rem' }}>
+              Requires a SQL warehouse on the app (<code>SQL_WAREHOUSE_ID</code>). Volume source still works without it.
+            </div>
+          )}
+        </div>
+
         {/* Source volume */}
+        {sourceKind === 'volume' && (
         <div style={{ marginBottom: '1.25rem' }}>
           <label style={labelStyle}>Source Volume *</label>
 
@@ -517,6 +653,81 @@ export default function CreateProject() {
             </div>
           )}
         </div>
+        )}
+
+        {sourceKind === 'table' && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={labelStyle}>Source table *</label>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={catalogs}
+                  value={catalog}
+                  onChange={setCatalog}
+                  placeholder="Catalog..."
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={schemas}
+                  value={schema}
+                  onChange={setSchema}
+                  placeholder="Schema..."
+                  disabled={!catalog}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <FilterableSelect
+                  options={tablesList}
+                  value={tableName}
+                  onChange={setTableName}
+                  placeholder="Table..."
+                  disabled={!schema}
+                />
+              </div>
+            </div>
+            <div style={{ marginTop: '0.75rem' }}>
+              <label style={labelStyle}>Image path column</label>
+              {tablePreview?.columns?.length ? (
+                <FilterableSelect
+                  options={tablePreview.columns.map((c) => c.name).filter(Boolean)}
+                  value={pathColumn}
+                  onChange={setPathColumn}
+                  placeholder="image_path"
+                />
+              ) : (
+                <input
+                  type="text"
+                  value={pathColumn}
+                  onChange={(e) => setPathColumn(e.target.value)}
+                  placeholder="image_path"
+                  style={inputStyle}
+                />
+              )}
+            </div>
+            <div style={{ marginTop: '0.75rem' }}>
+              <label style={labelStyle}>Filter (optional WHERE)</label>
+              <input
+                type="text"
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                placeholder="split = 'train'"
+                style={inputStyle}
+              />
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                Simple predicate only. Typical workflow: land files in a volume, Auto Loader writes this table, then create the project from the table. New Auto Loader rows are picked up with Actions → Sync new table rows. Paths may be <code>dbfs:/Volumes/...</code> or <code>/Volumes/...</code>; bytes still load from the volume.
+                {tablePreview?.row_count != null && (
+                  <> Catalog reports {tablePreview.row_count} rows.</>
+                )}
+              </div>
+            </div>
+            {tableFqn && (
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                {tableFqn}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Pre-Label with SAM 3.1 */}
         <div

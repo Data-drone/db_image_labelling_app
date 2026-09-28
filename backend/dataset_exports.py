@@ -14,6 +14,7 @@ from sqlalchemy import and_
 
 from . import masks as mask_utils
 from .models import Annotation, ProjectSample
+from .uc_tables import attach_labeled_delta_table, normalize_image_path
 
 log = logging.getLogger(__name__)
 CLASSIFICATION_REFERENCE_FORMAT = "hf_jsonl"
@@ -53,10 +54,15 @@ def validate_volume_path(path):
         raise HTTPException(400, "Use a UC Volume path: /Volumes/catalog/schema/volume/...")
 
 
-def _is_source_image_path(path, source_volume):
-    """Return whether path is a valid child of the project's source directory."""
+def _is_source_image_path(path, source_volume, source_type="volume"):
+    """Return whether path is a valid UC Volume image path for this project."""
     try:
         validate_volume_path(path)
+    except HTTPException:
+        return False
+    if (source_type or "volume") == "table":
+        return True
+    try:
         validate_volume_path(source_volume)
     except HTTPException:
         return False
@@ -152,7 +158,11 @@ def _snapshot_context(project, export_path, exported_by, image_count, annotation
         "source_images_verified": False,
         "status": "ready",
         "lineage": {
+            "source_type": getattr(project, "source_type", None) or "volume",
             "source_volume_uc": project.source_volume,
+            "source_table_uc": getattr(project, "source_table", None),
+            "image_path_column": getattr(project, "image_path_column", None),
+            "source_filter": getattr(project, "source_filter", None),
             "export_volume_uc": export_path,
             "sample_ids": sample_ids,
             "sample_count": image_count,
@@ -204,7 +214,10 @@ def _export_classification_reference(project, export_path, exported_by, db, work
     for row in rows:
         if row.id in records or row.annotation_id is None or row.ann_type != "classification" or row.label not in label_to_id:
             invalid.add(row.id)
-        if not _is_source_image_path(row.filepath, project.source_volume):
+        if not _is_source_image_path(
+            row.filepath, project.source_volume,
+            getattr(project, "source_type", None) or "volume",
+        ):
             invalid.add(row.id)
         records[row.id] = {
             "sample_id": row.id,
@@ -231,6 +244,25 @@ def _export_classification_reference(project, export_path, exported_by, db, work
         ("classes.json", json.dumps({"names": classes, "label2id": label_to_id}, ensure_ascii=False, indent=2)),
         ("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2)),
     ])
+    lineage_rows = [
+        {
+            "image_path": normalize_image_path(record["image"]),
+            "annotations": [{
+                "label": classes[record["label"]],
+                "ann_type": "classification",
+            }],
+        }
+        for record in records.values()
+    ]
+    labeled_table = attach_labeled_delta_table(
+        project, export_dir, lineage_rows, workspace, metadata,
+    )
+    if (getattr(project, "source_type", None) or "volume") == "table":
+        workspace.files.upload(
+            f"{export_dir}/metadata.json",
+            io.BytesIO(json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")),
+            overwrite=True,
+        )
 
     return {
         "export_path": export_dir,
@@ -242,6 +274,8 @@ def _export_classification_reference(project, export_path, exported_by, db, work
         "snapshot_id": metadata["snapshot_id"],
         "huggingface_code": huggingface_loading_code(export_dir),
         "loading_code": huggingface_loading_code(export_dir),
+        "labeled_table": labeled_table,
+        "labeled_table_error": metadata["lineage"].get("labeled_table_error"),
     }
 
 
@@ -282,7 +316,10 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
         if row.id not in seen_samples:
             seen_samples.add(row.id)
             sample_ids.append(row.id)
-            if not _is_source_image_path(row.filepath, project.source_volume):
+            if not _is_source_image_path(
+            row.filepath, project.source_volume,
+            getattr(project, "source_type", None) or "volume",
+        ):
                 invalid.add(row.id)
             coco_images.append({"id": row.id, "file_name": row.filepath})
 
@@ -345,6 +382,29 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
         ("annotations.json", json.dumps(coco, ensure_ascii=False, separators=(",", ":"), allow_nan=False)),
         ("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2)),
     ])
+    categories = {item["id"]: item["name"] for item in coco["categories"]}
+    lineage_by_image = {
+        image["id"]: {
+            "image_path": normalize_image_path(image["file_name"]),
+            "annotations": [],
+        }
+        for image in coco["images"]
+    }
+    for annotation in coco["annotations"]:
+        lineage_by_image[annotation["image_id"]]["annotations"].append({
+            "label": categories[annotation["category_id"]],
+            "ann_type": "mask" if "segmentation" in annotation else "bbox",
+            "bbox": annotation.get("bbox_normalized"),
+        })
+    labeled_table = attach_labeled_delta_table(
+        project, export_dir, list(lineage_by_image.values()), workspace, metadata,
+    )
+    if (getattr(project, "source_type", None) or "volume") == "table":
+        workspace.files.upload(
+            f"{export_dir}/metadata.json",
+            io.BytesIO(json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")),
+            overwrite=True,
+        )
     loading_code = coco_loading_code(export_dir)
     return {
         "export_path": export_dir,
@@ -355,6 +415,8 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
         "version": metadata["version"],
         "snapshot_id": metadata["snapshot_id"],
         "loading_code": loading_code,
+        "labeled_table": labeled_table,
+        "labeled_table_error": metadata["lineage"].get("labeled_table_error"),
     }
 
 

@@ -15,8 +15,9 @@ from ..deps import get_db, get_user_email
 from ..models import LabelingProject, ProjectSample, Annotation
 from ..schemas import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats,
-    ClassCount, DailyVelocity, DetailedProjectStats,
+    ClassCount, DailyVelocity, DetailedProjectStats, SourceSyncOut,
 )
+from ..uc_tables import TableScanResult, TableSourceError, scan_table_for_samples
 from ..volumes import scan_volume_for_samples
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,45 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _source_type(p) -> str:
+    return (getattr(p, "source_type", None) or "volume").strip().lower()
+
+
+def _scan_project_source(db: Session, project: LabelingProject):
+    """Populate project_samples from the project's configured source.
+
+    Incremental: existing sample rows are kept (labels stay).
+    Returns a TableScanResult (added / skipped_existing / volume_hint).
+    """
+    if _source_type(project) == "table":
+        result = scan_table_for_samples(
+            db,
+            project.id,
+            project.source_table,
+            path_column=project.image_path_column or "image_path",
+            source_filter=project.source_filter,
+        )
+        if result.volume_hint and not (project.source_volume or "").strip():
+            project.source_volume = result.volume_hint
+        return result
+    added = scan_volume_for_samples(db, project.id, project.source_volume)
+    return TableScanResult(added=added, skipped_existing=0, volume_hint=project.source_volume)
+
+
+def _table_source_changed(p: LabelingProject, payload) -> bool:
+    if payload.source_type is not None and payload.source_type != _source_type(p):
+        return True
+    if payload.source_table is not None and (payload.source_table or "").strip() != (p.source_table or ""):
+        return True
+    if payload.image_path_column is not None and (
+        (payload.image_path_column or "image_path") != (p.image_path_column or "image_path")
+    ):
+        return True
+    if payload.source_filter is not None and (payload.source_filter or "").strip() != (p.source_filter or ""):
+        return True
+    return False
 
 
 def _project_out(p, total=None, labeled=None):
@@ -36,6 +76,10 @@ def _project_out(p, total=None, labeled=None):
         task_type=p.task_type,
         class_list=p.class_list,
         source_volume=p.source_volume,
+        source_type=getattr(p, "source_type", None) or "volume",
+        source_table=getattr(p, "source_table", None),
+        image_path_column=getattr(p, "image_path_column", None),
+        source_filter=getattr(p, "source_filter", None),
         serving_endpoint=p.serving_endpoint,
         endpoint_config=p.endpoint_config,
         created_by=p.created_by,
@@ -53,7 +97,7 @@ def create_project(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Create a labeling project and scan the source volume for images."""
+    """Create a labeling project and scan the volume or Delta table for images."""
     existing = db.query(LabelingProject).filter_by(name=payload.name).first()
     if existing:
         raise HTTPException(status_code=409, detail=f"Project '{payload.name}' already exists.")
@@ -78,12 +122,17 @@ def create_project(
         env_adapter = os.environ.get("SERVING_ENDPOINT_ADAPTER", "").strip()
         if env_adapter:
             ep_config["adapter"] = env_adapter
+    source_type = payload.source_type or "volume"
     project = LabelingProject(
         name=payload.name,
         description=payload.description,
         task_type=payload.task_type,
         class_list=payload.class_list,
-        source_volume=payload.source_volume,
+        source_volume=(payload.source_volume or "").strip(),
+        source_type=source_type,
+        source_table=(payload.source_table or "").strip() or None,
+        image_path_column=(payload.image_path_column or None),
+        source_filter=(payload.source_filter or "").strip() or None,
         serving_endpoint=serving_ep,
         endpoint_config=ep_config or None,
         created_by=user_email,
@@ -91,7 +140,14 @@ def create_project(
     db.add(project)
     db.flush()
 
-    sample_count = scan_volume_for_samples(db, project.id, payload.source_volume)
+    try:
+        scan_result = _scan_project_source(db, project)
+    except TableSourceError as e:
+        db.rollback()
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     if _env_truthy("PRE_ANNOTATE_ON_IMPORT"):
         from ..inference import check_endpoint_health, resolve_endpoint
@@ -120,7 +176,7 @@ def create_project(
     db.commit()
     db.refresh(project)
 
-    return _project_out(project, sample_count, 0)
+    return _project_out(project, scan_result.added, 0)
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -144,6 +200,38 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
     return _project_out(p, total, labeled)
+
+
+@router.post("/{project_id}/sync-source", response_model=SourceSyncOut)
+def sync_project_source(project_id: int, db: Session = Depends(get_db)):
+    """Pick up new images from the project's volume folder or Delta table.
+
+    Does not delete samples or annotations. Rows Auto Loader already ingested
+    into this project are skipped.
+    """
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    try:
+        result = _scan_project_source(db, p)
+    except TableSourceError as e:
+        db.rollback()
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    db.commit()
+    total = db.query(ProjectSample).filter_by(project_id=p.id).count()
+    labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
+    return SourceSyncOut(
+        added=result.added,
+        skipped_existing=result.skipped_existing,
+        sample_count=total,
+        labeled_count=labeled,
+        source_type=_source_type(p),
+        source_table=getattr(p, "source_table", None),
+        source_volume=p.source_volume or "",
+    )
 
 
 @router.post("/{project_id}/classes")
@@ -176,18 +264,40 @@ def update_project(
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    if payload.source_volume is not None and payload.source_volume != p.source_volume:
+    volume_changed = (
+        payload.source_volume is not None
+        and payload.source_volume != p.source_volume
+        and _source_type(p) == "volume"
+        and (payload.source_type or _source_type(p)) == "volume"
+    )
+    table_changed = _table_source_changed(p, payload)
+    if volume_changed or table_changed:
         if not payload.confirm_source_change:
             raise HTTPException(
                 status_code=400,
-                detail="Changing source volume will delete all samples and annotations. "
+                detail="Changing the image source will delete all samples and annotations. "
                        "Set confirm_source_change=true to proceed.",
             )
         db.query(Annotation).filter_by(project_id=project_id).delete()
         db.query(ProjectSample).filter_by(project_id=project_id).delete()
-        p.source_volume = payload.source_volume
-
-        scan_volume_for_samples(db, p.id, payload.source_volume)
+        if payload.source_type is not None:
+            p.source_type = payload.source_type
+        if payload.source_table is not None:
+            p.source_table = (payload.source_table or "").strip() or None
+        if payload.image_path_column is not None:
+            p.image_path_column = payload.image_path_column
+        if payload.source_filter is not None:
+            p.source_filter = (payload.source_filter or "").strip() or None
+        if payload.source_volume is not None:
+            p.source_volume = payload.source_volume
+        try:
+            _scan_project_source(db, p)
+        except TableSourceError as e:
+            db.rollback()
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        except ValueError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     if payload.name is not None:
         existing = db.query(LabelingProject).filter(
@@ -264,6 +374,10 @@ def clone_project(
         task_type=parent.task_type,
         class_list=list(parent.class_list),
         source_volume=parent.source_volume,
+        source_type=getattr(parent, "source_type", None) or "volume",
+        source_table=getattr(parent, "source_table", None),
+        image_path_column=getattr(parent, "image_path_column", None),
+        source_filter=getattr(parent, "source_filter", None),
         serving_endpoint=parent.serving_endpoint,
         endpoint_config=parent.endpoint_config,
         created_by=user_email,

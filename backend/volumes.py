@@ -81,6 +81,10 @@ def scan_volume_for_samples(
     """
     volume_path = volume_path.rstrip("/")
     count = 0
+    existing = {
+        fp for (fp,) in db.query(ProjectSample.filepath).filter_by(project_id=project_id)
+        if fp
+    }
 
     if is_volume_path(volume_path):
         try:
@@ -89,11 +93,15 @@ def scan_volume_for_samples(
                 if not entry.is_directory:
                     ext = os.path.splitext(entry.name)[1].lower()
                     if ext in IMAGE_EXTENSIONS:
+                        filepath = volume_path + "/" + entry.name
+                        if filepath in existing:
+                            continue
                         db.add(ProjectSample(
                             project_id=project_id,
-                            filepath=volume_path + "/" + entry.name,
+                            filepath=filepath,
                             filename=entry.name,
                         ))
+                        existing.add(filepath)
                         count += 1
         except Exception as e:
             # Returning a partial count keeps a long scan's progress, but log
@@ -106,11 +114,15 @@ def scan_volume_for_samples(
         for fname in sorted(os.listdir(volume_path)):
             ext = os.path.splitext(fname)[1].lower()
             if ext in IMAGE_EXTENSIONS:
+                filepath = os.path.join(volume_path, fname)
+                if filepath in existing:
+                    continue
                 db.add(ProjectSample(
                     project_id=project_id,
-                    filepath=os.path.join(volume_path, fname),
+                    filepath=filepath,
                     filename=fname,
                 ))
+                existing.add(filepath)
                 count += 1
 
     return count

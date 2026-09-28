@@ -17,6 +17,8 @@ resources:
             value: "false"
           - name: USE_LAKEBASE
             value: "true"
+          - name: LAKEBASE_PROJECT_ID
+            value: ${var.lakebase_project_id}
           - name: DEMO_VOLUME_PATH
             value_from: demo-volume
           - name: SERVING_ENDPOINT
@@ -31,6 +33,8 @@ resources:
             value_from: export-volume
           - name: FINETUNE_DATABRICKS_JOB_ID
             value_from: app-finetune-job
+          - name: SQL_WAREHOUSE_ID
+            value_from: sql-warehouse
       resources:
         - name: lakebase-db
           postgres:
@@ -47,6 +51,10 @@ resources:
             securable_type: VOLUME
             securable_full_name: ${var.export_volume_full_name}
             permission: WRITE_VOLUME
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
         - name: serving-endpoint
           serving_endpoint:
             name: ${var.serving_endpoint_name}

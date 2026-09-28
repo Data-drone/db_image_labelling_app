@@ -101,6 +101,7 @@ class TestDatasetExport(unittest.TestCase):
         metadata = json.loads(self.files[f"{path}/metadata.json"])
         self.assertEqual(metadata["exported_by"], "labeler@example.com")
         self.assertEqual(metadata["lineage"]["sample_count"], 6500)
+        self.assertEqual(metadata["lineage"]["source_type"], "volume")
         self.assertFalse(metadata["images_copied"])
         self.assertFalse(metadata["source_images_verified"])
         self.assertEqual(list(self.files)[-1], f"{path}/metadata.json")
@@ -115,6 +116,40 @@ class TestDatasetExport(unittest.TestCase):
         response = self.prepare(project_id)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["images"], 1)
+
+    def test_table_source_lineage_and_nested_paths(self):
+        with deps.get_session_factory()() as db:
+            project = LabelingProject(
+                name="table-src", task_type="classification", class_list=["cat"],
+                source_volume="/Volumes/catalog/schema/images",
+                source_type="table",
+                source_table="main.cv.image_catalog",
+                image_path_column="image_path",
+                source_filter="split = 'train'",
+            )
+            db.add(project)
+            db.flush()
+            sample = ProjectSample(
+                project_id=project.id,
+                filepath="/Volumes/catalog/schema/images/nested/0.png",
+                filename="0.png",
+                status="labeled",
+            )
+            db.add(sample)
+            db.flush()
+            db.add(Annotation(
+                project_id=project.id, sample_id=sample.id,
+                label="cat", ann_type="classification", is_draft=False,
+            ))
+            db.commit()
+            pid = project.id
+        response = self.prepare(pid)
+        self.assertEqual(response.status_code, 200, response.text)
+        path = response.json()["export_path"]
+        metadata = json.loads(self.files[f"{path}/metadata.json"])
+        self.assertEqual(metadata["lineage"]["source_type"], "table")
+        self.assertEqual(metadata["lineage"]["source_table_uc"], "main.cv.image_catalog")
+        self.assertEqual(metadata["lineage"]["source_filter"], "split = 'train'")
 
     @unittest.skipUnless(importlib.util.find_spec("datasets"), "Install datasets to run the Hugging Face integration check")
     def test_huggingface_loading_code_decodes_images_and_preserves_class_ids(self):

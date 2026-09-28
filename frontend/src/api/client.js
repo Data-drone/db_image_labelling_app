@@ -44,6 +44,9 @@ export const fetchDetailedProjectStats = (id) => api.get(`/projects/${id}/stats/
 
 export const cloneProject = (id) => api.post(`/projects/${id}/clone`).then(r => r.data);
 
+export const syncProjectSource = (id) =>
+  api.post(`/projects/${id}/sync-source`, {}, { timeout: 120000 }).then(r => r.data);
+
 export const exportProject = (id, exportVolume, mode = 'copy') =>
   api.post(`/projects/${id}/export`, { export_volume: exportVolume, mode }, { timeout: mode === 'reference' ? 60000 : 300000 }).then(r => r.data);
 
@@ -223,6 +226,14 @@ export const fetchSchemas = (catalog) =>
 
 export const fetchVolumes = (catalog, schema) =>
   api.get('/volumes', { params: { catalog, schema } }).then(r => r.data);
+
+export const fetchTables = (catalog, schema) =>
+  api.get('/tables', { params: { catalog, schema } }).then(r => r.data);
+
+export const fetchTablePreview = (fullName, { path_column, source_filter, limit } = {}) =>
+  api.get('/tables/preview', {
+    params: { full_name: fullName, path_column, source_filter, limit },
+  }).then(r => r.data);
 
 export const browseDirectory = (path, { page, page_size } = {}) =>
   api.get('/browse', { params: { path, page, page_size } }).then(r => r.data);

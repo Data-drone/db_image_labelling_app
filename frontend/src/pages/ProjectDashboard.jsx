@@ -6,6 +6,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
+  syncProjectSource,
   fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus,
   preAnnotateProjectStream,
   acceptAllDrafts, clearAllModelDrafts,
@@ -31,6 +32,7 @@ export default function ProjectDashboard() {
   const [detailedStats, setDetailedStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [cloning, setCloning] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editForm, setEditForm] = useState({});
@@ -276,6 +278,30 @@ export default function ProjectDashboard() {
       alert('Failed to create new version: ' + humanizeApiError(err));
     } finally {
       setCloning(false);
+    }
+  };
+
+  const handleSyncSource = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const result = await syncProjectSource(projectId);
+      const [proj, st, detailed] = await Promise.all([
+        fetchProject(projectId),
+        fetchProjectStats(projectId),
+        fetchDetailedProjectStats(projectId),
+      ]);
+      setProject(proj);
+      setStats(st);
+      setDetailedStats(detailed);
+      const extra = result.skipped_existing
+        ? ` (${result.skipped_existing} already in the project)`
+        : '';
+      alert(`Synced source: ${result.added} new image${result.added === 1 ? '' : 's'}${extra}. Total samples: ${result.sample_count}.`);
+    } catch (err) {
+      alert('Failed to sync source: ' + humanizeApiError(err));
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -693,6 +719,10 @@ export default function ProjectDashboard() {
       name: project.name,
       description: project.description || '',
       source_volume: project.source_volume,
+      source_type: project.source_type || 'volume',
+      source_table: project.source_table || '',
+      image_path_column: project.image_path_column || 'image_path',
+      source_filter: project.source_filter || '',
       class_list: [...project.class_list],
       serving_endpoint: project.serving_endpoint || '',
     });
@@ -714,15 +744,25 @@ export default function ProjectDashboard() {
       if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
       if ((editForm.serving_endpoint || '') !== (project.serving_endpoint || '')) patch.serving_endpoint = editForm.serving_endpoint;
 
-      const sourceChanged = editForm.source_volume !== project.source_volume;
+      const sourceChanged = editForm.source_volume !== project.source_volume
+        || (editForm.source_type || 'volume') !== (project.source_type || 'volume')
+        || (editForm.source_table || '') !== (project.source_table || '')
+        || (editForm.image_path_column || 'image_path') !== (project.image_path_column || 'image_path')
+        || (editForm.source_filter || '') !== (project.source_filter || '');
       if (sourceChanged) {
         if (!confirm(
-          'Changing the source volume will DELETE all existing samples and annotations for this project. This cannot be undone.\n\nAre you sure?'
+          'Changing the image source will DELETE all existing samples and annotations for this project. This cannot be undone.\n\nAre you sure?'
         )) {
           setSaving(false);
           return;
         }
+        patch.source_type = editForm.source_type || 'volume';
         patch.source_volume = editForm.source_volume;
+        if ((editForm.source_type || 'volume') === 'table') {
+          patch.source_table = editForm.source_table;
+          patch.image_path_column = editForm.image_path_column || 'image_path';
+          patch.source_filter = editForm.source_filter || '';
+        }
         patch.confirm_source_change = true;
       }
 
@@ -829,6 +869,17 @@ export default function ProjectDashboard() {
                   disabled={!stats || stats.labeled === 0}
                 >
                   Prepare training dataset
+                </button>
+                <button
+                  className="dropdown-item"
+                  onClick={() => { handleSyncSource(); setActionsOpen(false); }}
+                  disabled={syncing}
+                >
+                  {syncing
+                    ? 'Syncing…'
+                    : (project.source_type === 'table'
+                      ? 'Sync new table rows'
+                      : 'Scan volume for new images')}
                 </button>
                 <button
                   className="dropdown-item"
@@ -1370,6 +1421,25 @@ export default function ProjectDashboard() {
               }}>
                 {exportResult.export_path}
               </div>
+              {exportResult.labeled_table && (
+                <div style={{
+                  marginTop: '0.4rem',
+                  padding: '0.3rem 0.5rem',
+                  background: 'var(--bg-secondary)',
+                  borderRadius: 3,
+                  fontFamily: 'monospace',
+                  fontSize: '0.75rem',
+                  color: 'var(--text-primary)',
+                  wordBreak: 'break-all',
+                }}>
+                  Labeled Delta table: {exportResult.labeled_table}
+                </div>
+              )}
+              {exportResult.labeled_table_error && (
+                <div style={{ color: '#e2a03f', marginTop: '0.3rem', fontSize: '0.75rem' }}>
+                  Labeled Delta table could not be created: {exportResult.labeled_table_error}
+                </div>
+              )}
               <div style={{ color: 'var(--text-muted)', marginTop: '0.3rem', fontSize: '0.75rem' }}>
                 Format: {exportResult.format === 'coco' ? 'COCO JSON (annotations.json + images/)' : 'CSV (labels.csv + images/)'}
               </div>
@@ -2482,7 +2552,11 @@ export default function ProjectDashboard() {
                   {project.description || '(none)'}
                 </span>
                 <span style={{ color: 'var(--text-muted)' }}>Source</span>
-                <span style={{ wordBreak: 'break-all' }}>{project.source_volume}</span>
+                <span style={{ wordBreak: 'break-all' }}>
+                  {(project.source_type || 'volume') === 'table'
+                    ? `${project.source_table || '(no table)'} (${project.source_volume || 'volume hint unset'})`
+                    : project.source_volume}
+                </span>
                 <span style={{ color: 'var(--text-muted)' }}>Classes</span>
                 <span>
                   {project.class_list.map((c) => (
@@ -2534,14 +2608,57 @@ export default function ProjectDashboard() {
                 />
                 <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Source</span>
                 <div>
-                  <input
-                    type="text"
-                    value={editForm.source_volume}
-                    onChange={(e) => setEditForm({ ...editForm, source_volume: e.target.value })}
+                  <select
+                    value={editForm.source_type || 'volume'}
+                    onChange={(e) => setEditForm({ ...editForm, source_type: e.target.value })}
                     className="input"
-                    style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
-                  />
-                  {editForm.source_volume !== project.source_volume && (
+                    style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%', marginBottom: '0.35rem' }}
+                  >
+                    <option value="volume">UC Volume</option>
+                    <option value="table">Delta table</option>
+                  </select>
+                  {(editForm.source_type || 'volume') === 'table' ? (
+                    <>
+                      <input
+                        type="text"
+                        value={editForm.source_table || ''}
+                        onChange={(e) => setEditForm({ ...editForm, source_table: e.target.value })}
+                        placeholder="catalog.schema.table"
+                        className="input"
+                        style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%', marginBottom: '0.35rem' }}
+                      />
+                      <input
+                        type="text"
+                        value={editForm.image_path_column || 'image_path'}
+                        onChange={(e) => setEditForm({ ...editForm, image_path_column: e.target.value })}
+                        placeholder="image_path column"
+                        className="input"
+                        style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%', marginBottom: '0.35rem' }}
+                      />
+                      <input
+                        type="text"
+                        value={editForm.source_filter || ''}
+                        onChange={(e) => setEditForm({ ...editForm, source_filter: e.target.value })}
+                        placeholder="optional WHERE filter"
+                        className="input"
+                        style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
+                      />
+                    </>
+                  ) : (
+                    <input
+                      type="text"
+                      value={editForm.source_volume}
+                      onChange={(e) => setEditForm({ ...editForm, source_volume: e.target.value })}
+                      className="input"
+                      style={{ padding: '0.4rem 0.6rem', fontSize: '0.85rem', width: '100%' }}
+                    />
+                  )}
+                  {(
+                    editForm.source_volume !== project.source_volume
+                    || (editForm.source_type || 'volume') !== (project.source_type || 'volume')
+                    || (editForm.source_table || '') !== (project.source_table || '')
+                    || (editForm.source_filter || '') !== (project.source_filter || '')
+                  ) && (
                     <div style={{
                       fontSize: '0.75rem',
                       color: '#ff6b6b',

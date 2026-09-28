@@ -42,7 +42,11 @@ class LabelingProject(Base):
     description = Column(Text, default="")
     task_type = Column(String(50), nullable=False)  # 'classification', 'detection' or 'segmentation'
     class_list = Column(JSON, nullable=False)  # e.g. ["cat", "dog", "car"]
-    source_volume = Column(Text, nullable=False)  # UC Volume path
+    source_volume = Column(Text, nullable=False)  # UC Volume path (hint prefix for table sources)
+    source_type = Column(String(20), nullable=False, default="volume")  # 'volume' or 'table'
+    source_table = Column(Text, nullable=True)  # catalog.schema.table when source_type='table'
+    image_path_column = Column(String(255), nullable=True)
+    source_filter = Column(Text, nullable=True)  # optional WHERE body for table scan
     serving_endpoint = Column(String(255), nullable=True)  # Model Serving endpoint name
     endpoint_config = Column(JSON, nullable=True)  # response parsing overrides
     created_by = Column(String(255), default="")

@@ -41,6 +41,80 @@ def list_volumes(catalog: str = Query(...), schema: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/tables")
+def list_tables(catalog: str = Query(...), schema: str = Query(...)):
+    """List Unity Catalog tables in a schema (Create Project table picker)."""
+    try:
+        w = _get_workspace_client()
+        names = []
+        for t in w.tables.list(catalog_name=catalog, schema_name=schema):
+            name = getattr(t, "name", None)
+            if name:
+                names.append(name)
+        return sorted(names)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tables/preview")
+def preview_table(
+    full_name: str = Query(...),
+    path_column: str | None = Query(None),
+    source_filter: str | None = Query(None),
+    limit: int = Query(12, ge=0, le=50),
+):
+    """Column list, optional row count, and sample image paths for a UC table."""
+    from ..uc_tables import (
+        TableSourceError, count_table_rows, parse_table_fqn, sample_table_paths,
+        validate_path_column,
+    )
+
+    try:
+        catalog, schema, table = parse_table_fqn(full_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        w = _get_workspace_client()
+        info = w.tables.get(full_name=f"{catalog}.{schema}.{table}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"cannot load table: {e}") from e
+    columns = []
+    for col in getattr(info, "columns", None) or []:
+        columns.append({
+            "name": getattr(col, "name", ""),
+            "type_name": str(getattr(col, "type_name", None) or getattr(col, "type_text", "") or ""),
+        })
+    fqn = f"{catalog}.{schema}.{table}"
+    row_count = None
+    try:
+        row_count = count_table_rows(fqn, source_filter)
+    except TableSourceError:
+        row_count = None
+    sample_paths = []
+    col_name = path_column
+    if not col_name:
+        names = [c["name"] for c in columns]
+        if "image_path" in names:
+            col_name = "image_path"
+        elif "path" in names:
+            col_name = "path"
+    if col_name:
+        try:
+            validate_path_column(col_name)
+            sample_paths = sample_table_paths(
+                fqn, col_name, source_filter=source_filter, limit=limit,
+            )
+        except (TableSourceError, ValueError):
+            sample_paths = []
+    return {
+        "full_name": fqn,
+        "columns": columns,
+        "row_count": row_count,
+        "path_column": col_name,
+        "sample_paths": sample_paths,
+    }
+
+
 @router.get("/browse")
 def browse_directory(
     path: str = Query(...),
