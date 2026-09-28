@@ -12,6 +12,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy import and_
 
+from . import masks as mask_utils
 from .models import Annotation, ProjectSample
 
 log = logging.getLogger(__name__)
@@ -93,9 +94,11 @@ for image in coco["images"]:
 
 for annotation in coco["annotations"]:
     width, height = image_sizes[annotation["image_id"]]
-    x, y, box_width, box_height = annotation.pop("bbox_normalized")
-    annotation["bbox"] = [x * width, y * height, box_width * width, box_height * height]
-    annotation["area"] = annotation["bbox"][2] * annotation["bbox"][3]
+    if "bbox_normalized" in annotation:
+        x, y, box_width, box_height = annotation.pop("bbox_normalized")
+        annotation["bbox"] = [x * width, y * height, box_width * width, box_height * height]
+        if "segmentation" not in annotation:
+            annotation["area"] = annotation["bbox"][2] * annotation["bbox"][3]
 
 # Optional pycocotools index without writing or copying images:
 # from pycocotools.coco import COCO
@@ -106,7 +109,7 @@ for annotation in coco["annotations"]:
 
 
 def reference_loading_code(export_path, task_type):
-    if task_type == "detection":
+    if task_type in ("detection", "segmentation"):
         return coco_loading_code(export_path)
     return huggingface_loading_code(export_path)
 
@@ -255,6 +258,7 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
             Annotation.label,
             Annotation.ann_type,
             Annotation.bbox_json,
+            Annotation.mask_json,
         )
         .outerjoin(Annotation, and_(
             Annotation.sample_id == ProjectSample.id,
@@ -282,40 +286,32 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
                 invalid.add(row.id)
             coco_images.append({"id": row.id, "file_name": row.filepath})
 
-        # A labeled detection image with no boxes is a valid negative sample.
+        # A labeled image with no instances is a valid negative sample.
         if row.annotation_id is None:
             continue
-        bbox = row.bbox_json
-        if (
-            row.ann_type != "bbox"
-            or row.label not in class_to_id
-            or not isinstance(bbox, dict)
-            or any(key not in bbox for key in ("x", "y", "w", "h"))
-        ):
+        expected_type = "mask" if project.task_type == "segmentation" else "bbox"
+        if row.ann_type != expected_type or row.label not in class_to_id:
             invalid.add(row.id)
             continue
-        values = [bbox[key] for key in ("x", "y", "w", "h")]
-        if (
-            any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                for value in values
-            )
-            or values[0] < 0 or values[1] < 0
-            or values[2] <= 0 or values[3] <= 0
-            or values[0] + values[2] > 1
-            or values[1] + values[3] > 1
-        ):
-            invalid.add(row.id)
-            continue
-        coco_annotations.append({
+        entry = {
             "id": row.annotation_id,
             "image_id": row.id,
             "category_id": class_to_id[row.label],
-            "bbox_normalized": values,
             "iscrowd": 0,
-        })
+        }
+        if expected_type == "mask":
+            mask_entry = _coco_mask_entry(row.mask_json)
+            if mask_entry is None:
+                invalid.add(row.id)
+                continue
+            entry.update(mask_entry)
+        else:
+            bbox_values = _normalized_bbox_values(row.bbox_json)
+            if bbox_values is None:
+                invalid.add(row.id)
+                continue
+            entry["bbox_normalized"] = bbox_values
+        coco_annotations.append(entry)
         annotation_ids.append(row.annotation_id)
 
     if invalid:
@@ -362,10 +358,51 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
     }
 
 
+def _normalized_bbox_values(bbox):
+    if not isinstance(bbox, dict) or any(key not in bbox for key in ("x", "y", "w", "h")):
+        return None
+    values = [bbox[key] for key in ("x", "y", "w", "h")]
+    if (
+        any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in values
+        )
+        or values[0] < 0 or values[1] < 0
+        or values[2] <= 0 or values[3] <= 0
+        or values[0] + values[2] > 1
+        or values[1] + values[3] > 1
+    ):
+        return None
+    return values
+
+
+def _coco_mask_entry(mask_json):
+    wire = mask_utils.to_wire(mask_json)
+    if not wire:
+        return None
+    try:
+        height, width, counts = mask_utils.validate_uncompressed(wire)
+    except mask_utils.MaskValidationError:
+        return None
+    if mask_utils.rle_area(counts) <= 0:
+        return None
+    bbox = mask_utils.normalized_bbox(counts, height, width)
+    return {
+        "segmentation": {
+            "size": [height, width],
+            "counts": mask_utils.rle_to_string(counts),
+        },
+        "area": mask_utils.rle_area(counts),
+        "bbox_normalized": [bbox["x"], bbox["y"], bbox["w"], bbox["h"]],
+    }
+
+
 def export_reference_dataset(project, export_path, exported_by, db, workspace):
     classes = _validated_classes(project)
     if project.task_type == "classification":
         return _export_classification_reference(project, export_path, exported_by, db, workspace, classes)
-    if project.task_type == "detection":
+    if project.task_type in ("detection", "segmentation"):
         return _export_detection_reference(project, export_path, exported_by, db, workspace, classes)
     raise HTTPException(400, f"Unsupported project task type: {project.task_type}.")

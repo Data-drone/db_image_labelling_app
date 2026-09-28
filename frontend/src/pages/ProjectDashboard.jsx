@@ -1287,7 +1287,7 @@ export default function ProjectDashboard() {
               <label style={{ display: 'block', marginBottom: '0.75rem' }}>
                 <input type="checkbox" checked={exportMode === 'copy'} disabled={exporting || !!exportResult}
                   onChange={(event) => { setExportMode(event.target.checked ? 'copy' : 'reference'); setTriggerFinetuneAfterExport(false); }} />
-                {' '}Include image copies (portable {project.task_type === 'detection' ? 'COCO' : 'CSV'} dataset; large exports can take several minutes or time out)
+                {' '}Include image copies (portable {project.task_type === 'classification' ? 'CSV' : 'COCO'} dataset; large exports can take several minutes or time out)
               </label>
             )}
             <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.3rem' }}>
