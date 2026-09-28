@@ -163,13 +163,96 @@ export default function MaskToolPanel({
 
       <div style={divider} />
 
+      {/* Mask layers first so + Layer stays visible on short screens. */}
+      <div style={{ flexShrink: 0, minHeight: 88, marginBottom: '0.75rem' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: '0.5rem',
+        }}>
+          <h4 style={{ ...sectionTitle, marginBottom: 0 }}>Mask layers ({layers.length})</h4>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onAddLayer}
+            disabled={classList.length === 0}
+            style={{ fontSize: '0.7rem', padding: '0.2rem 0.45rem' }}
+          >
+            + Layer
+          </button>
+        </div>
+        {layers.length === 0 ? (
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+            Click the image or + Layer, then paint
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+            {layers.map((layer) => {
+              const isActive = String(layer.id) === String(activeMaskId);
+              const pct = coverage(layer, imageWidth, imageHeight);
+              const coverageLabel = !layer.mask_json
+                ? 'empty'
+                : (pct == null ? '…' : `${pct < 0.1 ? '<0.1' : pct.toFixed(1)}%`);
+              return (
+                <div
+                  key={layer.id}
+                  onClick={() => onSelectLayer(layer.id)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.4rem',
+                    padding: '0.3rem 0.5rem', borderRadius: 4, fontSize: '0.8rem',
+                    cursor: 'pointer',
+                    background: isActive ? 'var(--bg-hover)' : 'transparent',
+                    border: isActive ? '1px solid var(--border-hover)' : '1px solid transparent',
+                  }}
+                >
+                  <span style={{
+                    width: 10, height: 10, borderRadius: 2, flexShrink: 0,
+                    background: getClassColor(layer.classIndex),
+                    outline: layer.isDraft ? '1px dashed var(--text-muted)' : undefined,
+                    outlineOffset: 1,
+                  }} />
+                  <select
+                    value={layer.classIndex}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => onRelabelLayer(layer.id, Number(e.target.value))}
+                    style={{
+                      flex: 1, background: 'transparent', color: 'var(--text-primary)',
+                      border: 'none', fontSize: '0.8rem', cursor: 'pointer',
+                    }}
+                  >
+                    {classList.map((cls, i) => (
+                      <option key={cls} value={i} style={{ background: 'var(--bg-secondary)' }}>{cls}</option>
+                    ))}
+                  </select>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                    {coverageLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); }}
+                    style={{
+                      background: 'none', border: 'none', color: 'var(--text-muted)',
+                      cursor: 'pointer', padding: '0 0.2rem', fontSize: '0.75rem',
+                    }}
+                  >
+                    &#x2715;
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={divider} />
+
       {/* Class selector — sets the class for the next new layer */}
-      <div style={{ marginBottom: '0.75rem' }}>
+      <div style={{ marginBottom: '0.75rem', maxHeight: 160, overflowY: 'auto', flexShrink: 0 }}>
         <h4 style={sectionTitle}>Class for new layer</h4>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
           {classList.map((cls, i) => (
             <button
               key={cls}
+              type="button"
               className="btn-secondary"
               onClick={() => onActiveClassChange(i)}
               style={{
@@ -218,83 +301,6 @@ export default function MaskToolPanel({
         >
           + Add
         </button>
-      </div>
-
-      <div style={divider} />
-
-      {/* Mask layers */}
-      <div style={{ flex: 1, overflowY: 'auto', marginBottom: '0.75rem' }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          marginBottom: '0.5rem',
-        }}>
-          <h4 style={{ ...sectionTitle, marginBottom: 0 }}>Mask layers ({layers.length})</h4>
-          <button
-            className="btn-secondary"
-            onClick={onAddLayer}
-            disabled={classList.length === 0}
-            style={{ fontSize: '0.7rem', padding: '0.2rem 0.45rem' }}
-          >
-            + Layer
-          </button>
-        </div>
-        {layers.length === 0 ? (
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-            Add a layer, then paint on the image
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-            {layers.map((layer) => {
-              const isActive = String(layer.id) === String(activeMaskId);
-              const pct = coverage(layer, imageWidth, imageHeight);
-              return (
-                <div
-                  key={layer.id}
-                  onClick={() => onSelectLayer(layer.id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '0.4rem',
-                    padding: '0.3rem 0.5rem', borderRadius: 4, fontSize: '0.8rem',
-                    cursor: 'pointer',
-                    background: isActive ? 'var(--bg-hover)' : 'transparent',
-                    border: isActive ? '1px solid var(--border-hover)' : '1px solid transparent',
-                  }}
-                >
-                  <span style={{
-                    width: 10, height: 10, borderRadius: 2, flexShrink: 0,
-                    background: getClassColor(layer.classIndex),
-                    outline: layer.isDraft ? '1px dashed var(--text-muted)' : undefined,
-                    outlineOffset: 1,
-                  }} />
-                  <select
-                    value={layer.classIndex}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => onRelabelLayer(layer.id, Number(e.target.value))}
-                    style={{
-                      flex: 1, background: 'transparent', color: 'var(--text-primary)',
-                      border: 'none', fontSize: '0.8rem', cursor: 'pointer',
-                    }}
-                  >
-                    {classList.map((cls, i) => (
-                      <option key={cls} value={i} style={{ background: 'var(--bg-secondary)' }}>{cls}</option>
-                    ))}
-                  </select>
-                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-                    {pct == null ? 'empty' : `${pct < 0.1 ? '<0.1' : pct.toFixed(1)}%`}
-                  </span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); }}
-                    style={{
-                      background: 'none', border: 'none', color: 'var(--text-muted)',
-                      cursor: 'pointer', padding: '0 0.2rem', fontSize: '0.75rem',
-                    }}
-                  >
-                    &#x2715;
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
 
       <div style={divider} />

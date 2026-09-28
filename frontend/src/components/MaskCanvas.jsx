@@ -38,6 +38,7 @@
  *   brightness, contrast: number — 1 = unchanged
  *   onMaskUpdated: (id, {size, counts}|null) => void — null when erased empty
  *   onMaskSelected: (id) => void
+ *   onNeedLayer: () => void — create a layer when the user paints with none active
  *   onHistoryChange: ({canUndo, canRedo}) => void
  *
  * Imperative handle: undo(), redo(), clear(), resetView(), zoomBy(factor),
@@ -243,6 +244,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   contrast = 1,
   onMaskUpdated,
   onMaskSelected,
+  onNeedLayer,
   onHistoryChange,
 }, ref) {
   const containerRef = useRef(null);
@@ -826,6 +828,32 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     return rect;
   }, [stampDisc]);
 
+  const commitInFlightPolygon = useCallback((erase = false) => {
+    const poly = polyRef.current;
+    if (poly.length === 0) return null;
+    polyRef.current = [];
+    const buf = bufRef.current;
+    if (poly.length < 3 || !buf || !activeMaskId) {
+      renderActive();
+      return null;
+    }
+    const journal = makeJournal(buf, dims.w, dims.h);
+    flushRect(fillPolygon(poly, erase, journal));
+    renderActive();
+    const entry = sealJournal(journal);
+    if (!entry) return null;
+    pushUndo(entry);
+    const mask = maskIsEmpty(buf)
+      ? null
+      : { size: [dims.h, dims.w], counts: encodeMask(buf, dims.w, dims.h) };
+    onMaskUpdatedRef.current?.(activeMaskId, mask);
+    return { id: activeMaskId, mask };
+  }, [dims, fillPolygon, flushRect, pushUndo, renderActive, activeMaskId]);
+
+  const commitPolygon = useCallback((erase = false) => {
+    commitInFlightPolygon(erase);
+  }, [commitInFlightPolygon]);
+
   useImperativeHandle(ref, () => ({
     undo() {
       const entry = undoRef.current.pop();
@@ -849,8 +877,6 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       const journal = makeJournal(buf, dims.w, dims.h);
       journal.touchRect(0, 0, dims.w - 1, dims.h - 1);
       buf.fill(0);
-      // One pass over the buffer, and sealJournal then keeps only the tiles
-      // that held foreground -- so the cost tracks the mask, not the image.
       const entry = sealJournal(journal);
       if (!entry) return;
       pushUndo(entry);
@@ -864,9 +890,12 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       renderActive();
       return true;
     },
-    /** Finalize any in-flight stroke; returns `{id, mask}` or null. */
     flushStroke() {
       return finishStroke();
+    },
+    flushPending() {
+      const stroke = finishStroke();
+      return commitInFlightPolygon(false) || stroke;
     },
     resetView() {
       setView({ zoom: 1, panX: 0, panY: 0 });
@@ -874,24 +903,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     zoomBy(factor) {
       setView((v) => ({ ...v, zoom: Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor)) }));
     },
-  }), [applyEntry, dims, emit, finishStroke, pushUndo, repaintMirror, renderActive, reportHistory]);
-
-  const commitPolygon = useCallback((erase = false) => {
-    const poly = polyRef.current;
-    polyRef.current = [];
-    const buf = bufRef.current;
-    if (poly.length < 3 || !buf) {
-      renderActive();
-      return;
-    }
-    const journal = makeJournal(buf, dims.w, dims.h);
-    flushRect(fillPolygon(poly, erase, journal));
-    renderActive();
-    const entry = sealJournal(journal);
-    if (!entry) return;
-    pushUndo(entry);
-    emit();
-  }, [dims, fillPolygon, flushRect, pushUndo, emit, renderActive]);
+  }), [applyEntry, commitInFlightPolygon, dims, emit, finishStroke, pushUndo, repaintMirror, renderActive, reportHistory]);
 
   // ---------- Pointer handling ----------
   const posOf = (e) => {
@@ -916,7 +928,8 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     }
     if (e.button !== 0) return;
     if (!activeMaskId || !bufRef.current) {
-      onMaskSelected?.(null);
+      if (onNeedLayer) onNeedLayer();
+      else onMaskSelected?.(null);
       return;
     }
     const { ix, iy } = toImage(cx, cy);
@@ -1095,7 +1108,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       )}
       {imgLoaded && !hasActive && (
         <div style={{ ...chip, bottom: 12, left: '50%', transform: 'translateX(-50%)' }}>
-          Add or select a mask layer to start painting
+          Click the image or + Layer to start painting
         </div>
       )}
       {imgLoaded && maskError && (

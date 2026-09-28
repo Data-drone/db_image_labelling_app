@@ -538,6 +538,61 @@ class TestMaskImport(unittest.TestCase):
                 r.json()["errors"][0]["reason"],
             )
 
+    def test_coco_compressed_rle_round_trips(self):
+        import json
+        with _client() as (c, tmp):
+            vol = make_image_volume(tmp)
+            pid = _create_project(c, vol)
+            mask = _rect_mask(16, 12, 4, 0, 12, 6)
+            labels = tmp / "annotations.json"
+            labels.write_text(json.dumps({
+                "images": [{"id": 1, "file_name": "a.png", "width": 16, "height": 12}],
+                "categories": [{"id": 1, "name": "defect"}],
+                "annotations": [{
+                    "id": 1, "image_id": 1, "category_id": 1,
+                    "bbox": [4, 0, 8, 6],
+                    "segmentation": {
+                        "size": [12, 16],
+                        "counts": masks.rle_to_string(mask["counts"]),
+                    },
+                }],
+            }))
+            r = c.post(
+                f"/api/projects/{pid}/import",
+                json={"volume_path": str(labels), "format": "coco"},
+                headers=BYPASS_HDR,
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            sid = _samples(c, pid)["a.png"]["id"]
+            got = c.get(f"/api/projects/{pid}/samples/{sid}").json()["annotations"]
+            self.assertEqual(got[0]["ann_type"], "mask")
+            self.assertEqual(got[0]["mask_json"], mask)
+            self.assertEqual(got[0]["bbox_json"], {
+                "x": 0.25, "y": 0.0, "w": 0.5, "h": 0.5,
+            })
+
+    def test_coco_invalid_segmentation_is_a_row_error(self):
+        import json
+        with _client() as (c, tmp):
+            vol = make_image_volume(tmp)
+            pid = _create_project(c, vol)
+            labels = tmp / "annotations.json"
+            labels.write_text(json.dumps({
+                "images": [{"id": 1, "file_name": "a.png", "width": 16, "height": 12}],
+                "categories": [{"id": 1, "name": "defect"}],
+                "annotations": [{
+                    "id": 1, "image_id": 1, "category_id": 1,
+                    "segmentation": {"size": [12, 16], "counts": [1, 2]},
+                }],
+            }))
+            r = c.post(
+                f"/api/projects/{pid}/import",
+                json={"volume_path": str(labels), "format": "coco"},
+                headers=BYPASS_HDR,
+            )
+            self.assertEqual(r.status_code, 422, r.text)
+            self.assertIn("segmentation", r.json()["errors"][0]["reason"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -195,6 +195,16 @@ export default function LabelingView() {
     setActionError('');
   }, [sample?.id]);
 
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (!masksDirty.current) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
+
   // Load sample when currentIndex changes
   const loadSampleAtIndex = useCallback(async (idx) => {
     if (idx < 0 || idx >= sampleList.length) return;
@@ -292,8 +302,14 @@ export default function LabelingView() {
   }, [historyOpen, sample, loadHistory]);
 
   // Navigation
+  const confirmLeaveUnsavedMasks = useCallback(() => {
+    if (!isSegmentation || !masksDirty.current) return true;
+    return window.confirm('This image has unsaved mask edits. Leave without saving?');
+  }, [isSegmentation]);
+
   const goTo = (idx) => {
     if (idx >= 0 && idx < sampleList.length && idx !== currentIndex) {
+      if (!confirmLeaveUnsavedMasks()) return;
       setCurrentIndex(idx);
     }
   };
@@ -708,7 +724,9 @@ export default function LabelingView() {
     // has not reached `maskLayers` yet (Enter mid-stroke used to save the
     // pre-stroke mask). Take the finalized snapshot and use it here directly:
     // the setState it triggers is not visible inside this handler.
-    const flushed = maskCanvasRef.current?.flushStroke?.() || null;
+    const flushed = maskCanvasRef.current?.flushPending?.()
+      || maskCanvasRef.current?.flushStroke?.()
+      || null;
     const layers = flushed
       ? maskLayers.map(l => (
           String(l.id) === String(flushed.id)
@@ -751,7 +769,7 @@ export default function LabelingView() {
     if (!project || !sample) return;
 
     const handler = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
       const isMod = e.ctrlKey || e.metaKey;
 
@@ -830,8 +848,11 @@ export default function LabelingView() {
           setFlashIndex(idx);
           flashTimeout.current = setTimeout(() => setFlashIndex(null), 250);
 
-          if (isDetection || isSegmentation) {
+          if (isDetection) {
             setActiveClassIndex(idx);
+          } else if (isSegmentation) {
+            setActiveClassIndex(idx);
+            if (activeMaskId) handleRelabelMaskLayer(activeMaskId, idx);
           } else {
             toggleLabel(project.class_list[idx]);
           }
@@ -866,6 +887,8 @@ export default function LabelingView() {
         }
         if (isDetection && selectedBoxId) {
           setSelectedBoxId(null);
+        } else if (isSegmentation && !confirmLeaveUnsavedMasks()) {
+          return;
         } else {
           navigate(`/projects/${projectId}`);
         }
@@ -875,7 +898,8 @@ export default function LabelingView() {
     return () => window.removeEventListener('keydown', handler);
   }, [project, sample, saving, projectId, navigate, isDetection, isSegmentation, selectedBoxId,
       boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
-      handleSaveClassification, handleSaveMasks, toggleLabel]);
+      handleSaveClassification, handleSaveMasks, toggleLabel, activeMaskId,
+      handleRelabelMaskLayer, confirmLeaveUnsavedMasks]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
@@ -1146,6 +1170,7 @@ export default function LabelingView() {
                 contrast={adjust.contrast}
                 onMaskUpdated={handleMaskUpdated}
                 onMaskSelected={setActiveMaskId}
+                onNeedLayer={handleAddMaskLayer}
                 onHistoryChange={setMaskHistory}
               />
             ) : (
@@ -1186,7 +1211,7 @@ export default function LabelingView() {
             padding: '1rem',
             display: 'flex',
             flexDirection: 'column',
-            overflow: 'hidden',
+            overflowY: 'auto',
           }}
         >
           {sample && (
@@ -1468,6 +1493,7 @@ export default function LabelingView() {
                   <KeyboardShortcutLegend
                     maxClassKey={Math.min(9, project.class_list.length)}
                     mode="segmentation"
+                    collapsible
                   />
                 </MaskToolPanel>
               ) : (
@@ -1780,9 +1806,9 @@ const kbdStyle = {
   textAlign: 'center',
 };
 
-function KeyboardShortcutLegend({ maxClassKey, mode = 'detection' }) {
+function KeyboardShortcutLegend({ maxClassKey, mode = 'detection', collapsible = false }) {
   const common = [
-    { keys: [`1-${maxClassKey}`], desc: 'Select class' },
+    { keys: [`1-${maxClassKey}`], desc: mode === 'segmentation' ? 'Class / relabel layer' : 'Select class' },
     { keys: ['Enter'], desc: 'Save & next' },
     { keys: ['N'], desc: 'Next unlabeled' },
     { keys: ['S'], desc: 'Skip' },
@@ -1810,19 +1836,21 @@ function KeyboardShortcutLegend({ maxClassKey, mode = 'detection' }) {
     ...common.slice(2),
   ];
 
-  return (
+  const body = (
     <div style={{
-      borderTop: '1px solid var(--border-color)',
-      paddingTop: '0.5rem',
+      borderTop: collapsible ? undefined : '1px solid var(--border-color)',
+      paddingTop: collapsible ? 0 : '0.5rem',
     }}>
-      <div style={{
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        color: 'var(--text-secondary)',
-        marginBottom: '0.35rem',
-      }}>
-        Shortcuts
-      </div>
+      {!collapsible && (
+        <div style={{
+          fontSize: '0.7rem',
+          fontWeight: 600,
+          color: 'var(--text-secondary)',
+          marginBottom: '0.35rem',
+        }}>
+          Shortcuts
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
         {shortcuts.map(({ keys, desc }) => (
           <div key={desc} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem' }}>
@@ -1834,5 +1862,25 @@ function KeyboardShortcutLegend({ maxClassKey, mode = 'detection' }) {
         ))}
       </div>
     </div>
+  );
+
+  if (!collapsible) return body;
+
+  return (
+    <details style={{
+      borderTop: '1px solid var(--border-color)',
+      paddingTop: '0.5rem',
+    }}>
+      <summary style={{
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        color: 'var(--text-secondary)',
+        cursor: 'pointer',
+        marginBottom: '0.35rem',
+      }}>
+        Shortcuts
+      </summary>
+      {body}
+    </details>
   );
 }
