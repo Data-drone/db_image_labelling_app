@@ -1,32 +1,17 @@
-# Env for a manually-created (non-bundle) Databricks App.
-# Bundle deploys use resources/cv_explorer_app.yml instead, which wires the
-# same variables to declared app resources.
-#
-# Currently targeted at e2-demo-tokyo for the segmentation dev deploy.
 command: ["python", "start.py"]
 env:
-  # Lakebase: e2-demo-tokyo has no cv-explorer Postgres instance, so this
-  # deployment runs on the SQLite fallback in the container's /tmp. That means
-  # the database is recreated on every app restart -- fine here because the
-  # demo project below is re-seeded from the UC Volume each time, and the
-  # images themselves live in UC, not in the database.
-  # To switch to Lakebase: create a database instance, set USE_LAKEBASE=true
-  # and LAKEBASE_PROJECT_ID to its project name.
-  - name: USE_LAKEBASE
-    value: 'false'
+  # Lakebase: connect via SDK to the dev project
   - name: LAKEBASE_AUTO_PROVISION
     value: 'false'
+  - name: USE_LAKEBASE
+    value: 'true'
   - name: LAKEBASE_PROJECT_ID
     value: 'cv-explorer-dev'
   # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
-    value: '/Volumes/brian_gen_ai/dev_brian_law_cv_manufacturing/labeling/demo_segmentation'
+    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
   - name: EXPORT_VOLUME_PATH
-    value: '/Volumes/brian_gen_ai/dev_brian_law_cv_manufacturing/exports'
-  # Seed a ready-to-draw project at startup so the app is not empty on arrival.
-  # Format: name|task_type|classes|volume path, ';' separated. See backend/demo_seed.py.
-  - name: SEED_DEMO_PROJECTS
-    value: 'Surface defects (segmentation demo)|segmentation|scratch,corrosion,pitting|/Volumes/brian_gen_ai/dev_brian_law_cv_manufacturing/labeling/demo_segmentation'
-  # No SAM 3.1 / segmentation serving endpoint exists in e2-demo-tokyo, so
-  # SERVING_ENDPOINT is unset and "Get Prediction" is unavailable here.
-  # Fine-tuning likewise has no job in this workspace.
+    value: '/Volumes/brian_gen_ai/cv_explorer/exports'
+  # Finetuning job id
+  - name: FINETUNE_DATABRICKS_JOB_ID
+    value: '143235656478173'
