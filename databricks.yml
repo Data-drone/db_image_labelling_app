@@ -25,12 +25,20 @@ variables:
     default: projects/cv-explorer/branches/production
   lakebase_postgres_database:
     default: projects/cv-explorer/branches/production/databases/cv-explorer-db
+  # SDK lookup if PG* is not injected. Must match the postgres resource above,
+  # not DATABRICKS_APP_NAME (cv-explorer-dev).
+  lakebase_project_id:
+    default: cv-explorer
   serving_endpoint_name:
     default: cv-sam31-cv_manufacturing
   finetune_job_id:
     default: "318435402424260"
   app_name:
     default: cv-explorer-dev
+  # SQL warehouse the app uses to SELECT image_path from UC tables. Empty skips
+  # table-backed project create until set (Apps UI or this variable).
+  sql_warehouse_id:
+    default: "1e90aa7a436a41d9"
 targets:
   dev:
     default: true
