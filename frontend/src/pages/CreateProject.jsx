@@ -38,6 +38,7 @@ export default function CreateProject() {
   const [classList, setClassList] = useState([]);
   const [classInput, setClassInput] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
+  const [workspaceEndpointDefault, setWorkspaceEndpointDefault] = useState('');
   const [samPrompt, setSamPrompt] = useState('');
 
   // Volume browser — if arriving from Browse Volumes, split the path into
@@ -88,15 +89,14 @@ export default function CreateProject() {
     }
   }, [volumeFromBrowser]);
 
-  // Pre-fill serving endpoint from app env
+  // Workspace default endpoint is available, but not applied unless the user opts in.
   useEffect(() => {
     let cancelled = false;
     fetchInferenceDefaults()
       .then((data) => {
         if (cancelled) return;
         const d = (data?.default_serving_endpoint || '').trim();
-        if (!d) return;
-        setServingEndpoint(d);
+        if (d) setWorkspaceEndpointDefault(d);
       })
       .catch(() => {});
     return () => {
@@ -250,11 +250,16 @@ export default function CreateProject() {
       if (servingEndpoint.trim()) {
         payload.serving_endpoint = servingEndpoint.trim();
       }
-      const epConfig = { adapter: 'sam31' };
-      if (samPrompt.trim()) {
+      const epConfig = {};
+      if (taskType !== 'classification') {
+        epConfig.adapter = 'sam31';
+      }
+      if (samPrompt.trim() && taskType !== 'classification') {
         epConfig.sam_text_prompt = samPrompt.trim();
       }
-      payload.endpoint_config = epConfig;
+      if (Object.keys(epConfig).length > 0) {
+        payload.endpoint_config = epConfig;
+      }
       const project = await createProject(payload);
       navigate(`/projects/${project.id}`);
     } catch (err) {
@@ -271,6 +276,7 @@ export default function CreateProject() {
       </h1>
       <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '2rem' }}>
         Set up a labeling project by choosing a source volume and defining classes.
+        Model-assisted pre-labeling is optional — you can label from scratch.
       </p>
 
       <form onSubmit={handleSubmit}>
@@ -323,6 +329,56 @@ export default function CreateProject() {
               >
                 {t}
               </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Classes — required for labeling, independent of any model */}
+        <div style={{ marginBottom: '1.25rem' }}>
+          <label style={labelStyle}>Classes * ({classList.length})</label>
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.5rem' }}>
+            Labels you will apply by hand. A model is not required.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <input
+              type="text"
+              value={classInput}
+              onChange={(e) => setClassInput(e.target.value)}
+              placeholder="Type a class name and press Enter"
+              style={{ ...inputStyle, flex: 1 }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addClass();
+                }
+              }}
+            />
+            <button
+              type="button"
+              onClick={addClass}
+              className="btn-secondary"
+              style={{ padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
+            >
+              Add
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+            {classList.map((cls, i) => (
+              <span
+                key={cls}
+                className="badge badge-blue"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.25rem 0.6rem' }}
+              >
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700 }}>{i + 1}</span>
+                {cls}
+                <button
+                  type="button"
+                  onClick={() => removeClass(cls)}
+                  style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.85rem', lineHeight: 1 }}
+                >
+                  &#x2715;
+                </button>
+              </span>
             ))}
           </div>
         </div>
@@ -518,8 +574,8 @@ export default function CreateProject() {
           )}
         </div>
 
-        {/* Pre-Label with SAM 3.1 */}
-        <div
+        {/* Optional model assist — not needed to create or label */}
+        <details
           style={{
             marginBottom: '1.5rem',
             padding: '1.25rem',
@@ -528,92 +584,83 @@ export default function CreateProject() {
             borderRadius: 12,
           }}
         >
-          <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.15rem' }}>
-            Pre-Label with SAM 3.1
-          </h2>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
-            Define classes and an optional text prompt for automatic pre-annotation using SAM 3.1
-            (boxes for detection, masks for segmentation when the endpoint returns them).
+          <summary
+            style={{
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ fontSize: '1.05rem', fontWeight: 700 }}>Model-assisted pre-labeling</span>
+            <span
+              className="badge"
+              style={{
+                fontSize: '0.7rem',
+                fontWeight: 600,
+                padding: '0.15rem 0.45rem',
+                background: 'var(--bg-input)',
+                color: 'var(--text-secondary)',
+                border: '1px solid var(--border-color)',
+              }}
+            >
+              Optional
+            </span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+              Expand to attach an endpoint
+            </span>
+          </summary>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0.75rem 0 1.25rem' }}>
+            Skip this to create a project and label images yourself. You can attach an endpoint later
+            on the project page and run pre-labeling there.
+            {taskType !== 'classification' && (
+              <> SAM 3.1 can draft boxes (detection) or masks (segmentation) when configured.</>
+            )}
           </p>
 
-          {/* Classes */}
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={labelStyle}>Classes * ({classList.length})</label>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <input
-                type="text"
-                value={classInput}
-                onChange={(e) => setClassInput(e.target.value)}
-                placeholder="Type a class name and press Enter"
-                style={{ ...inputStyle, flex: 1 }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addClass();
-                  }
-                }}
+          {taskType !== 'classification' && (
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={labelStyle}>SAM Text Prompt</label>
+              <textarea
+                value={samPrompt}
+                onChange={(e) => setSamPrompt(e.target.value)}
+                placeholder={classList.length > 0 ? `Default: "${classList.join('. ')}"` : 'e.g. "car. person. traffic sign"'}
+                rows={2}
+                style={{ ...inputStyle, resize: 'vertical' }}
               />
-              <button
-                type="button"
-                onClick={addClass}
-                className="btn-secondary"
-                style={{ padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
-              >
-                Add
-              </button>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                Text prompt sent to SAM 3.1. Leave blank to auto-generate from the class list (classes joined with ". ").
+              </div>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-              {classList.map((cls, i) => (
-                <span
-                  key={cls}
-                  className="badge badge-blue"
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.25rem 0.6rem' }}
-                >
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700 }}>{i + 1}</span>
-                  {cls}
-                  <button
-                    type="button"
-                    onClick={() => removeClass(cls)}
-                    style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.85rem', lineHeight: 1 }}
-                  >
-                    &#x2715;
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
+          )}
 
-          {/* SAM Text Prompt */}
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={labelStyle}>SAM Text Prompt</label>
-            <textarea
-              value={samPrompt}
-              onChange={(e) => setSamPrompt(e.target.value)}
-              placeholder={classList.length > 0 ? `Default: "${classList.join('. ')}"` : 'e.g. "car. person. traffic sign"'}
-              rows={2}
-              style={{ ...inputStyle, resize: 'vertical' }}
-            />
-            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-              Text prompt sent to SAM 3.1 for detection. Leave blank to auto-generate from the class list above (classes joined with ". ").
-            </div>
-          </div>
-
-          {/* Serving endpoint */}
           <div>
             <label style={labelStyle}>Model Serving Endpoint</label>
             <input
               type="text"
               value={servingEndpoint}
               onChange={(e) => setServingEndpoint(e.target.value)}
-              placeholder="e.g. sam31-endpoint"
+              placeholder="Leave blank to label without a model"
               style={inputStyle}
             />
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-              Databricks Model Serving endpoint running SAM 3.1. Must be added as an App resource with "Can query" permission.
-              {servingEndpoint && <span style={{ color: 'var(--status-success)', marginLeft: '0.5rem' }}>Auto-detected from environment</span>}
+              Optional. Databricks Model Serving endpoint
+              {taskType !== 'classification' ? ' running SAM 3.1' : ''}
+              . Add it as an App resource with &quot;Can query&quot; permission if you use it.
             </div>
+            {workspaceEndpointDefault && servingEndpoint !== workspaceEndpointDefault && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setServingEndpoint(workspaceEndpointDefault)}
+                style={{ marginTop: '0.5rem', fontSize: '0.75rem', padding: '0.3rem 0.65rem' }}
+              >
+                Use workspace default: {workspaceEndpointDefault}
+              </button>
+            )}
           </div>
-        </div>
+        </details>
 
         {/* Error */}
         {error && (

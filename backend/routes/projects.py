@@ -68,7 +68,9 @@ def create_project(
         )
 
     user_email = get_user_email(request)
-    serving_ep = payload.serving_endpoint or os.environ.get("SERVING_ENDPOINT") or None
+    # Do not silently attach SERVING_ENDPOINT from env. The create form treats
+    # model assist as optional; the UI can opt in via /inference-defaults.
+    serving_ep = (payload.serving_endpoint or "").strip() or None
     ep_config = dict(payload.endpoint_config or {})
     if "use_data_plane" not in ep_config:
         env_dp = os.environ.get("USE_SERVING_DATA_PLANE", "").strip().lower()
