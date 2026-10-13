@@ -17,19 +17,53 @@ class ProjectCreate(BaseModel):
     description: str = ""
     task_type: str  # 'classification', 'detection' or 'segmentation'
     class_list: list[str]
-    source_volume: str  # UC Volume path
+    source_volume: str = ""  # required when source_type='volume'
+    source_type: str = "volume"  # 'volume' or 'table'
+    source_table: Optional[str] = None
+    image_path_column: Optional[str] = None
+    source_filter: Optional[str] = None
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
+
+    @model_validator(mode="after")
+    def _require_source(self):
+        st = (self.source_type or "volume").strip().lower()
+        if st not in ("volume", "table"):
+            raise ValueError("source_type must be 'volume' or 'table'")
+        self.source_type = st
+        if st == "volume":
+            if not (self.source_volume or "").strip():
+                raise ValueError("source_volume is required when source_type is 'volume'")
+        else:
+            if not (self.source_table or "").strip():
+                raise ValueError("source_table is required when source_type is 'table'")
+            col = (self.image_path_column or "image_path").strip()
+            self.image_path_column = col or "image_path"
+        return self
 
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     source_volume: Optional[str] = None
+    source_type: Optional[str] = None
+    source_table: Optional[str] = None
+    image_path_column: Optional[str] = None
+    source_filter: Optional[str] = None
     class_list: Optional[list[str]] = None
     confirm_source_change: bool = False
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
+
+    @model_validator(mode="after")
+    def _source_type_ok(self):
+        if self.source_type is None:
+            return self
+        st = self.source_type.strip().lower()
+        if st not in ("volume", "table"):
+            raise ValueError("source_type must be 'volume' or 'table'")
+        self.source_type = st
+        return self
 
 
 class ProjectOut(BaseModel):
@@ -39,6 +73,10 @@ class ProjectOut(BaseModel):
     task_type: str
     class_list: list[str]
     source_volume: str
+    source_type: str = "volume"
+    source_table: Optional[str] = None
+    image_path_column: Optional[str] = None
+    source_filter: Optional[str] = None
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
     created_by: str
@@ -49,6 +87,16 @@ class ProjectOut(BaseModel):
     parent_project_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
+
+
+class SourceSyncOut(BaseModel):
+    added: int
+    skipped_existing: int = 0
+    sample_count: int
+    labeled_count: int = 0
+    source_type: str
+    source_table: Optional[str] = None
+    source_volume: str = ""
 
 
 class ProjectStats(BaseModel):

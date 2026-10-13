@@ -13,6 +13,8 @@ import {
   fetchCatalogs,
   fetchSchemas,
   fetchVolumes,
+  fetchTables,
+  fetchTablePreview,
   browseDirectory,
   browseThumbnailUrl,
 } from '../api/client';
@@ -26,9 +28,16 @@ export default function BrowseVolumes() {
   const [catalogs, setCatalogs] = useState([]);
   const [schemas, setSchemas] = useState([]);
   const [volumes, setVolumesList] = useState([]);
+  const [tablesList, setTablesList] = useState([]);
   const [catalog, setCatalog] = useState('');
   const [schema, setSchema] = useState('');
   const [volume, setVolume] = useState('');
+  const [tableName, setTableName] = useState('');
+  const [pathColumn, setPathColumn] = useState('image_path');
+  const [sourceFilter, setSourceFilter] = useState('');
+  const [tablePreview, setTablePreview] = useState(null);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [warehouseConfigured, setWarehouseConfigured] = useState(true);
   const [catalogsLoading, setCatalogsLoading] = useState(false);
 
   // Direct path input — default populated from DEMO_VOLUME_PATH env var
@@ -38,6 +47,7 @@ export default function BrowseVolumes() {
     fetchAppConfig()
       .then((cfg) => {
         if (cfg.demo_volume_path) setDirectPath(cfg.demo_volume_path);
+        setWarehouseConfigured(Boolean(cfg.sql_warehouse_configured));
       })
       .catch(() => {});
   }, []);
@@ -52,10 +62,11 @@ export default function BrowseVolumes() {
   const [loading, setLoading] = useState(false);
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
+  const [hasBrowsed, setHasBrowsed] = useState(false);
 
-  // Load catalogs when picker mode is activated
+  // Load catalogs when picker or table mode is activated
   useEffect(() => {
-    if (mode !== 'picker') return;
+    if (mode !== 'picker' && mode !== 'table') return;
     if (catalogs.length > 0) return;
     setCatalogsLoading(true);
     setError('');
@@ -74,23 +85,34 @@ export default function BrowseVolumes() {
   useEffect(() => {
     setSchema('');
     setVolume('');
+    setTableName('');
     setSchemas([]);
     setVolumesList([]);
+    setTablesList([]);
     if (!catalog) return;
     fetchSchemas(catalog)
       .then(setSchemas)
       .catch((e) => setError('Could not load schemas: ' + humanizeApiError(e)));
   }, [catalog]);
 
-  // Load volumes when schema changes
+  // Load volumes or tables when schema changes
   useEffect(() => {
     setVolume('');
+    setTableName('');
     setVolumesList([]);
+    setTablesList([]);
+    setTablePreview(null);
     if (!catalog || !schema) return;
-    fetchVolumes(catalog, schema)
-      .then(setVolumesList)
-      .catch((e) => setError('Could not load volumes: ' + humanizeApiError(e)));
-  }, [catalog, schema]);
+    if (mode === 'table') {
+      fetchTables(catalog, schema)
+        .then(setTablesList)
+        .catch((e) => setError('Could not load tables: ' + humanizeApiError(e)));
+    } else if (mode === 'picker') {
+      fetchVolumes(catalog, schema)
+        .then(setVolumesList)
+        .catch((e) => setError('Could not load volumes: ' + humanizeApiError(e)));
+    }
+  }, [catalog, schema, mode]);
 
   // Reset subpath when volume or mode changes
   useEffect(() => {
@@ -100,9 +122,50 @@ export default function BrowseVolumes() {
     setTotalFiles(0);
     setFilePage(0);
     setHasBrowsed(false);
-  }, [catalog, schema, volume, mode]);
+  }, [catalog, schema, volume, mode, tableName]);
 
-  // Compute current path based on mode
+  const tableFqn = (catalog && schema && tableName)
+    ? `${catalog}.${schema}.${tableName}`
+    : '';
+
+  useEffect(() => {
+    if (mode !== 'table' || !tableFqn) {
+      setTablePreview(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setTableLoading(true);
+      setError('');
+      fetchTablePreview(tableFqn, {
+        path_column: pathColumn || undefined,
+        source_filter: sourceFilter.trim() || undefined,
+        limit: 12,
+      })
+        .then((data) => {
+          if (cancelled) return;
+          setTablePreview(data);
+          const names = (data.columns || []).map((c) => c.name).filter(Boolean);
+          if (data.path_column && names.length && !names.includes(pathColumn)) {
+            setPathColumn(data.path_column);
+          }
+        })
+        .catch((e) => {
+          if (!cancelled) {
+            setTablePreview(null);
+            setError('Could not preview table: ' + humanizeApiError(e));
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setTableLoading(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mode, tableFqn, pathColumn, sourceFilter]);
+
   let basePath = '';
   if (mode === 'picker' && catalog && schema && volume) {
     basePath = `/Volumes/${catalog}/${schema}/${volume}`;
@@ -140,9 +203,8 @@ export default function BrowseVolumes() {
     }
   }, [currentPath]);
 
-  const [hasBrowsed, setHasBrowsed] = useState(false);
-
   useEffect(() => {
+    if (mode === 'table') return;
     if (mode === 'direct' && !hasBrowsed) return;
     loadDirectory(0);
   }, [currentPath, mode, hasBrowsed]);
@@ -181,41 +243,33 @@ export default function BrowseVolumes() {
         Browse Volumes
       </h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
-        Navigate Unity Catalog Volumes to find image folders and create datasets.
+        Navigate Unity Catalog Volumes or pick a Delta table of image paths, then create a labeling project.
       </p>
 
       {/* Mode toggle */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
-        <button
-          onClick={() => setMode('direct')}
-          style={{
-            padding: '0.5rem 1rem',
-            borderRadius: 8,
-            border: '1px solid var(--border-color)',
-            background: mode === 'direct' ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
-            color: mode === 'direct' ? 'var(--accent-blue-light)' : 'var(--text-secondary)',
-            fontWeight: mode === 'direct' ? 600 : 400,
-            cursor: 'pointer',
-            fontSize: '0.85rem',
-          }}
-        >
-          Direct Path
-        </button>
-        <button
-          onClick={() => setMode('picker')}
-          style={{
-            padding: '0.5rem 1rem',
-            borderRadius: 8,
-            border: '1px solid var(--border-color)',
-            background: mode === 'picker' ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
-            color: mode === 'picker' ? 'var(--accent-blue-light)' : 'var(--text-secondary)',
-            fontWeight: mode === 'picker' ? 600 : 400,
-            cursor: 'pointer',
-            fontSize: '0.85rem',
-          }}
-        >
-          Catalog Picker
-        </button>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+        {[
+          { id: 'direct', label: 'Direct Path' },
+          { id: 'picker', label: 'Catalog Picker' },
+          { id: 'table', label: 'Delta table' },
+        ].map((opt) => (
+          <button
+            key={opt.id}
+            onClick={() => setMode(opt.id)}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: 8,
+              border: '1px solid var(--border-color)',
+              background: mode === opt.id ? 'rgba(66, 153, 224, 0.15)' : 'var(--bg-card)',
+              color: mode === opt.id ? 'var(--accent-blue-light)' : 'var(--text-secondary)',
+              fontWeight: mode === opt.id ? 600 : 400,
+              cursor: 'pointer',
+              fontSize: '0.85rem',
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
       </div>
 
       {/* Direct path mode */}
@@ -286,6 +340,88 @@ export default function BrowseVolumes() {
         </div>
       )}
 
+      {/* Delta table picker */}
+      {mode === 'table' && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          {!warehouseConfigured && (
+            <div style={{
+              fontSize: '0.85rem',
+              color: '#e2a03f',
+              marginBottom: '0.75rem',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border-color)',
+              borderRadius: 8,
+              padding: '0.75rem 1rem',
+            }}>
+              Table preview needs a SQL warehouse on the app (<code>SQL_WAREHOUSE_ID</code>).
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Catalog</label>
+              {catalogsLoading ? (
+                <div style={{ ...inputStyle, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+                  Loading catalogs...
+                </div>
+              ) : (
+                <FilterableSelect
+                  options={catalogs}
+                  value={catalog}
+                  onChange={setCatalog}
+                  placeholder="Select catalog..."
+                />
+              )}
+            </div>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Schema</label>
+              <FilterableSelect
+                options={schemas}
+                value={schema}
+                onChange={setSchema}
+                placeholder="Select schema..."
+                disabled={!catalog}
+              />
+            </div>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Table</label>
+              <FilterableSelect
+                options={tablesList}
+                value={tableName}
+                onChange={setTableName}
+                placeholder="Select table..."
+                disabled={!catalog || !schema}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Path column</label>
+              <select
+                value={pathColumn}
+                onChange={(e) => setPathColumn(e.target.value)}
+                style={inputStyle}
+              >
+                {(tablePreview?.columns || []).length > 0
+                  ? tablePreview.columns.map((col) => (
+                    <option key={col.name} value={col.name}>{col.name}</option>
+                  ))
+                  : <option value={pathColumn}>{pathColumn}</option>}
+              </select>
+            </div>
+            <div style={{ flex: 2, minWidth: 220 }}>
+              <label style={labelStyle}>Optional SQL filter</label>
+              <input
+                type="text"
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                placeholder="e.g. split = 'train'"
+                style={inputStyle}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div style={{
           background: 'rgba(255, 50, 50, 0.1)',
@@ -300,10 +436,121 @@ export default function BrowseVolumes() {
         </div>
       )}
 
-      {loading && !paging && <Spinner label="Browsing volume..." />}
+      {mode !== 'table' && loading && !paging && <Spinner label="Browsing volume..." />}
+
+      {mode === 'table' && tableFqn && (
+        <div style={{ marginBottom: '2rem' }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
+            marginBottom: '0.75rem',
+            flexWrap: 'wrap',
+          }}>
+            <div>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>{tableFqn}</h3>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                {tableLoading
+                  ? 'Loading preview…'
+                  : tablePreview?.row_count != null
+                    ? `${tablePreview.row_count} rows · path column ${tablePreview.path_column || pathColumn}`
+                    : 'Preview columns and sample paths, then create a project.'}
+              </div>
+            </div>
+            <button
+              className="btn-primary"
+              disabled={!tableFqn || tableLoading}
+              onClick={() => {
+                const params = new URLSearchParams({
+                  source: 'table',
+                  table: tableFqn,
+                  path_column: pathColumn || tablePreview?.path_column || 'image_path',
+                });
+                if (sourceFilter.trim()) params.set('filter', sourceFilter.trim());
+                navigate(`/projects/new?${params.toString()}`);
+              }}
+              style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
+            >
+              Create Project
+              {tablePreview?.row_count != null ? ` (${tablePreview.row_count} rows)` : ''}
+            </button>
+          </div>
+
+          {tableLoading && <Spinner label="Previewing table..." />}
+
+          {!tableLoading && tablePreview && (
+            <>
+              {(tablePreview.columns || []).length > 0 && (
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  Columns: {tablePreview.columns.map((c) => c.name).join(', ')}
+                </p>
+              )}
+              {(tablePreview.sample_paths || []).length > 0 ? (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))',
+                  gap: '0.75rem',
+                }}>
+                  {tablePreview.sample_paths.map((filePath) => {
+                    const name = filePath.split('/').filter(Boolean).pop() || filePath;
+                    return (
+                      <div
+                        key={filePath}
+                        style={{
+                          background: 'var(--bg-card)',
+                          border: '1px solid var(--border-color)',
+                          borderRadius: 8,
+                          padding: '0.4rem',
+                          textAlign: 'center',
+                        }}
+                      >
+                        <img
+                          src={browseThumbnailUrl(filePath, 120)}
+                          alt={name}
+                          loading="lazy"
+                          style={{
+                            width: '100%',
+                            height: 80,
+                            objectFit: 'cover',
+                            borderRadius: 4,
+                            marginBottom: '0.3rem',
+                            background: 'var(--bg-hover)',
+                          }}
+                        />
+                        <div style={{
+                          fontSize: '0.65rem',
+                          color: 'var(--text-secondary)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          width: '100%',
+                        }}>
+                          {name}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{
+                  textAlign: 'center',
+                  padding: '2rem',
+                  color: 'var(--text-muted)',
+                  background: 'var(--bg-card)',
+                  borderRadius: 12,
+                  border: '1px solid var(--border-color)',
+                }}>
+                  No sample paths yet. Check the path column and SQL warehouse, then create a project to sync rows.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Browsing results */}
-      {currentPath && (folders.length > 0 || files.length > 0) && (
+      {mode !== 'table' && currentPath && (folders.length > 0 || files.length > 0) && (
         <>
           <div style={{
             fontSize: '0.8rem',
@@ -520,7 +767,7 @@ export default function BrowseVolumes() {
       )}
 
       {/* Empty state */}
-      {!loading && currentPath && folders.length === 0 && totalFiles === 0 && !error && (
+      {mode !== 'table' && !loading && currentPath && folders.length === 0 && totalFiles === 0 && !error && (
         <div style={{
           textAlign: 'center',
           padding: '3rem',
@@ -543,6 +790,19 @@ export default function BrowseVolumes() {
           border: '1px solid var(--border-color)',
         }}>
           Select a catalog, schema, and volume above to start browsing.
+        </div>
+      )}
+
+      {mode === 'table' && !tableFqn && !catalogsLoading && (
+        <div style={{
+          textAlign: 'center',
+          padding: '3rem',
+          color: 'var(--text-muted)',
+          background: 'var(--bg-card)',
+          borderRadius: 12,
+          border: '1px solid var(--border-color)',
+        }}>
+          Select a catalog, schema, and Delta table of image paths.
         </div>
       )}
     </div>

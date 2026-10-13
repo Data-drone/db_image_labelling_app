@@ -15,6 +15,7 @@ from ..deps import get_db, get_user_email
 from ..dataset_exports import default_export_volume, export_reference_dataset, validate_volume_path
 from ..models import LabelingProject, ProjectSample, Annotation
 from ..schemas import ExportRequest
+from ..uc_tables import attach_labeled_delta_table, normalize_image_path
 from ..volumes import read_image_bytes, _get_workspace_client
 
 log = logging.getLogger(__name__)
@@ -206,11 +207,14 @@ def export_project(
         "task_type": p.task_type,
         "class_list": p.class_list,
         "source_volume": p.source_volume,
+        "source_type": getattr(p, "source_type", None) or "volume",
+        "source_table": getattr(p, "source_table", None),
         "image_count": image_count,
         "annotation_count": annotation_count,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "exported_by": get_user_email(request),
         "format": "coco" if is_coco else "csv",
+        "snapshot_id": ts,
         "mask_count": mask_count,
         # The `masks/` PNGs are a convenience for MVTec-AD / anomalib style
         # pipelines: one single-channel 0/255 image per sample, the union of
@@ -221,7 +225,11 @@ def export_project(
         "mask_format": "binary_union_png_0_255" if mask_count else None,
         # UC Lineage: track which samples/annotations produced this export
         "lineage": {
+            "source_type": getattr(p, "source_type", None) or "volume",
             "source_volume_uc": p.source_volume,
+            "source_table_uc": getattr(p, "source_table", None),
+            "image_path_column": getattr(p, "image_path_column", None),
+            "source_filter": getattr(p, "source_filter", None),
             "export_volume_uc": export_path,
             "sample_ids": [s.id for s in samples],
             "sample_count": len(samples),
@@ -231,6 +239,23 @@ def export_project(
             ],
         },
     }
+    lineage_rows = []
+    for sample in samples:
+        lineage_rows.append({
+            "image_path": normalize_image_path(sample.filepath),
+            "annotations": [
+                {
+                    "label": annotation.label,
+                    "ann_type": annotation.ann_type,
+                    "bbox": annotation.bbox_json,
+                }
+                for annotation in ann_by_sample.get(sample.id, [])
+                if not annotation.is_draft
+            ],
+        })
+    labeled_table = attach_labeled_delta_table(
+        p, export_dir, lineage_rows, w, metadata,
+    )
     w.files.upload(
         f"{export_dir}/metadata.json",
         io.BytesIO(json.dumps(metadata, indent=2).encode("utf-8")),
@@ -243,6 +268,8 @@ def export_project(
         "images": image_count,
         "annotations": annotation_count,
         "masks": mask_count,
+        "labeled_table": labeled_table,
+        "labeled_table_error": metadata["lineage"].get("labeled_table_error"),
     }
 
 

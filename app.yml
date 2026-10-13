@@ -12,6 +12,10 @@ env:
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
   - name: EXPORT_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/exports'
+  # Optional SQL warehouse for Delta table image sources (Create Project).
+  # Leave empty until a warehouse id is bound in the Apps UI or bundle.
+  - name: SQL_WAREHOUSE_ID
+    value: ''
   # Finetuning job id
   - name: FINETUNE_DATABRICKS_JOB_ID
     value: '143235656478173'

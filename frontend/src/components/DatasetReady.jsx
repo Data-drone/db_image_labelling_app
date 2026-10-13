@@ -35,6 +35,16 @@ export default function DatasetReady({ dataset }) {
         </p>
       )}
       <code style={{ display: 'block', overflowWrap: 'anywhere' }}>{dataset.export_path}</code>
+      {dataset.labeled_table && (
+        <p style={{ color: 'var(--text-secondary)' }}>
+          Labeled Delta table: <code>{dataset.labeled_table}</code>
+        </p>
+      )}
+      {dataset.labeled_table_error && (
+        <p style={{ color: '#e2a03f' }}>
+          Labeled Delta table could not be created: {dataset.labeled_table_error}
+        </p>
+      )}
       {loadingCode && (
         <details style={{ marginTop: '0.75rem' }}>
           <summary style={{ cursor: 'pointer' }}>

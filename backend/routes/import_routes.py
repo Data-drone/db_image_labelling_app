@@ -161,6 +161,14 @@ def import_annotations(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
 
+    if payload.on_missing_sample == "create" and (
+        getattr(project, "source_type", None) or "volume"
+    ) == "table":
+        _bad_request(
+            "on_missing_sample=create is not supported for table-backed projects; "
+            "samples must already exist from the source table scan"
+        )
+
     # --- Adapter (Pydantic v2 Literal guarantees format is valid) -------
     adapter = get_adapter(payload.format)
 

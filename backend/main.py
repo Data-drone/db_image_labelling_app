@@ -174,6 +174,10 @@ def app_config():
         "finetune_default_lr": float(os.environ.get("FINETUNE_DEFAULT_LR", "0.0001")),
         "finetune_default_uc_model": os.environ.get("FINETUNE_UC_MODEL_NAME", ""),
         "db_backend": "lakebase" if is_lakebase() else "sqlite",
+        "sql_warehouse_configured": bool(
+            os.environ.get("SQL_WAREHOUSE_ID", "").strip()
+            or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
+        ),
     }
 
 
