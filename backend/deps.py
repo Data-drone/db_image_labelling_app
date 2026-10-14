@@ -29,10 +29,16 @@ def configure_db(engine, session_factory, use_lakebase: bool):
 
 
 def get_engine():
+    if _use_lakebase:
+        from .lakebase import get_engine as lakebase_get_engine
+        return lakebase_get_engine()
     return _engine
 
 
 def get_session_factory():
+    if _use_lakebase:
+        from .lakebase import get_session_factory as lakebase_get_session_factory
+        return lakebase_get_session_factory()
     return _session_factory
 
 

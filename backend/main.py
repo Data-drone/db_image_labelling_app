@@ -62,7 +62,18 @@ async def lifespan(app: FastAPI):
             log.info("Connected to Lakebase")
         except Exception as e:
             print(f"[STARTUP] Lakebase init failed: {e}", flush=True)
-            log.warning("Lakebase init failed (%s), falling back to SQLite", e)
+            from .lakebase import allow_sqlite_fallback
+            if not allow_sqlite_fallback():
+                log.exception("Lakebase init failed; refusing implicit SQLite fallback")
+                raise RuntimeError(
+                    "Lakebase initialization failed. Set USE_LAKEBASE=false for "
+                    "intentional SQLite use, or ALLOW_SQLITE_FALLBACK=true to "
+                    "explicitly permit fallback."
+                ) from e
+            log.warning(
+                "Lakebase init failed (%s); ALLOW_SQLITE_FALLBACK=true, using SQLite",
+                e,
+            )
             use_lakebase = False
 
     if not use_lakebase:
