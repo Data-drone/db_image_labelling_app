@@ -50,7 +50,13 @@ async def lifespan(app: FastAPI):
 
     if use_lakebase:
         try:
-            from .lakebase import init_lakebase, init_lakebase_from_app_resource, uses_app_resource_postgres
+            from .lakebase import (
+                init_lakebase,
+                init_lakebase_from_app_resource,
+                require_complete_app_postgres_env,
+                uses_app_resource_postgres,
+            )
+            require_complete_app_postgres_env()
             if uses_app_resource_postgres():
                 print("[STARTUP] Lakebase via App postgres resource (PG* env)...", flush=True)
                 engine = init_lakebase_from_app_resource()

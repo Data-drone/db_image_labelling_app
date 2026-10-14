@@ -8,9 +8,12 @@ from unittest.mock import MagicMock, patch
 
 from backend.lakebase import (
     allow_sqlite_fallback,
+    app_postgres_username,
     build_psycopg2_url,
     generate_connection_string,
+    init_lakebase_from_app_resource,
     postgres_database_name,
+    require_complete_app_postgres_env,
     uses_app_resource_postgres,
 )
 
@@ -71,6 +74,99 @@ class TestUsesAppResourcePostgres(unittest.TestCase):
             os.environ["LAKEBASE_ENDPOINT"] = "projects/p/branches/b/endpoints/primary"
             os.environ.pop("PGPASSWORD", None)
             self.assertTrue(uses_app_resource_postgres())
+        finally:
+            for key, value in prev.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_partial_pg_env_without_endpoint_is_error(self):
+        prev = {k: os.environ.get(k) for k in (
+            "PGHOST", "PGDATABASE", "PGUSER", "LAKEBASE_ENDPOINT",
+        )}
+        try:
+            self._clear()
+            os.environ["PGHOST"] = "h"
+            os.environ["PGDATABASE"] = "db"
+            os.environ["PGUSER"] = "u"
+            with self.assertRaises(RuntimeError) as ctx:
+                require_complete_app_postgres_env()
+            self.assertIn("LAKEBASE_ENDPOINT", str(ctx.exception))
+            self.assertIn("valueFrom", str(ctx.exception))
+        finally:
+            for key, value in prev.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_empty_env_allows_sdk_path(self):
+        prev = {k: os.environ.get(k) for k in (
+            "PGHOST", "PGDATABASE", "PGUSER", "LAKEBASE_ENDPOINT",
+        )}
+        try:
+            self._clear()
+            require_complete_app_postgres_env()
+        finally:
+            for key, value in prev.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+class TestAppPostgresUsername(unittest.TestCase):
+    def test_uses_injected_pguser(self):
+        prev = os.environ.get("PGUSER")
+        try:
+            os.environ["PGUSER"] = "app-sp-client-id"
+            self.assertEqual(app_postgres_username(), "app-sp-client-id")
+        finally:
+            if prev is None:
+                os.environ.pop("PGUSER", None)
+            else:
+                os.environ["PGUSER"] = prev
+
+
+class TestInitAppResourceUsesPguser(unittest.TestCase):
+    def test_oauth_password_with_pguser_role(self):
+        prev = {k: os.environ.get(k) for k in (
+            "PGHOST", "PGDATABASE", "PGUSER", "PGPORT", "LAKEBASE_ENDPOINT",
+        )}
+        endpoint = SimpleNamespace(
+            name="projects/p/branches/b/endpoints/primary",
+            status=SimpleNamespace(hosts=SimpleNamespace(host="sdk-host")),
+        )
+        w = MagicMock()
+        w.postgres.get_endpoint.return_value = endpoint
+        w.postgres.generate_database_credential.return_value = SimpleNamespace(
+            token="oauth-token",
+        )
+        try:
+            os.environ["PGHOST"] = "injected-host"
+            os.environ["PGDATABASE"] = "app-db"
+            os.environ["PGUSER"] = "injected-pguser"
+            os.environ["PGPORT"] = "5432"
+            os.environ["LAKEBASE_ENDPOINT"] = endpoint.name
+            with (
+                patch("backend.lakebase._get_workspace_client", return_value=w),
+                patch("backend.lakebase._build_engine") as build,
+                patch("backend.lakebase.sessionmaker"),
+                patch("backend.lakebase.threading.Thread"),
+            ):
+                fake_engine = MagicMock()
+                fake_engine.connect.return_value.__enter__.return_value = MagicMock()
+                build.return_value = fake_engine
+                init_lakebase_from_app_resource()
+                url = build.call_args[0][0]
+            self.assertIn("injected-pguser", url)
+            self.assertIn("injected-host", url)
+            self.assertIn("/app-db?", url)
+            self.assertIn("oauth-token", url)
+            w.postgres.generate_database_credential.assert_called_once_with(
+                endpoint=endpoint.name,
+            )
         finally:
             for key, value in prev.items():
                 if value is None:
@@ -152,6 +248,7 @@ class TestStartupRefusesSqliteFallback(unittest.TestCase):
             import backend.main as main_mod
             importlib.reload(main_mod)
             with (
+                patch("backend.lakebase.require_complete_app_postgres_env"),
                 patch("backend.lakebase.uses_app_resource_postgres", return_value=False),
                 patch("backend.lakebase.init_lakebase", side_effect=RuntimeError("no psycopg")),
             ):

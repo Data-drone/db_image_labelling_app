@@ -18,7 +18,7 @@ Browser (React SPA)
 - `backend/models.py` — SQLAlchemy models (`labeling_projects`, `project_samples`, `annotations`, `preannotate_runs`)
 - `backend/schemas.py` — Pydantic request/response schemas
 - `backend/deps.py` — shared dependencies (`get_db`, `get_user_email`)
-- `backend/lakebase.py` — Lakebase: SDK auto-provision or **App postgres resource** (`PG*` + `LAKEBASE_ENDPOINT`). Both use `postgresql+psycopg2` and refresh OAuth tokens. SQLite after a Lakebase failure requires `ALLOW_SQLITE_FALLBACK=true`.
+- `backend/lakebase.py` — Lakebase: SDK auto-provision or **App postgres resource** (`PG*` + `LAKEBASE_ENDPOINT` via `valueFrom: lakebase-db`). App-resource mode uses injected `PGUSER` plus a refreshing OAuth token. SQLite after a Lakebase failure requires `ALLOW_SQLITE_FALLBACK=true`. Partial `PG*` without the endpoint binding fails startup.
 - `backend/volumes.py` — UC Volume I/O (`read_image_bytes`, `scan_volume_for_samples`)
 - `backend/routes/` — one file per domain: `projects`, `labeling`, `inference`, `preannotate_runs`, `export`, `browse`, `admin`
 - `databricks.yml` + `resources/*.yml` — DAB bundle: app (`cv_explorer_app.yml` with UC/Lakebase/serving/job resources), pre-annotate job

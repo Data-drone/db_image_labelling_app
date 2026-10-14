@@ -204,10 +204,11 @@ def _build_engine(connection_url: str) -> Engine:
 
 
 def uses_app_resource_postgres() -> bool:
-    """True when Databricks Apps injected a Lakebase postgres resource.
+    """True when Databricks Apps injected a complete Lakebase postgres resource.
 
-    Platform sets PGHOST/PGDATABASE/PGUSER/LAKEBASE_ENDPOINT. It does not
-    inject a durable PGPASSWORD — auth is a one-hour OAuth token.
+    Platform sets PGHOST/PGDATABASE/PGUSER/PGSSLMODE when a postgres resource is
+    attached. LAKEBASE_ENDPOINT must be bound with valueFrom (it is not
+    auto-injected). Auth is a one-hour OAuth token, not PGPASSWORD.
     """
     return bool(
         os.environ.get("PGHOST", "").strip()
@@ -217,8 +218,40 @@ def uses_app_resource_postgres() -> bool:
     )
 
 
+def require_complete_app_postgres_env() -> None:
+    """Fail if PG* and LAKEBASE_ENDPOINT are only partially set.
+
+    A postgres App resource without ``LAKEBASE_ENDPOINT`` used to fall through
+    to SDK project lookup. Apps OAuth needs the endpoint path explicitly.
+    """
+    pg_present = [
+        key
+        for key in ("PGHOST", "PGDATABASE", "PGUSER")
+        if os.environ.get(key, "").strip()
+    ]
+    endpoint = os.environ.get("LAKEBASE_ENDPOINT", "").strip()
+    if uses_app_resource_postgres():
+        return
+    if not pg_present and not endpoint:
+        return
+    raise RuntimeError(
+        "Lakebase App postgres resource is incomplete. Bind "
+        "LAKEBASE_ENDPOINT with valueFrom: lakebase-db (platform injects "
+        f"PGHOST/PGDATABASE/PGUSER; have {pg_present or 'none'}, "
+        f"endpoint={'set' if endpoint else 'missing'})."
+    )
+
+
+def app_postgres_username() -> str:
+    """Postgres role injected for the app service principal (PGUSER)."""
+    user = os.environ.get("PGUSER", "").strip()
+    if not user:
+        raise RuntimeError("PGUSER is required for App postgres-resource Lakebase mode.")
+    return user
+
+
 def init_lakebase_from_app_resource() -> Engine:
-    """Connect from an App postgres resource using renewable OAuth credentials."""
+    """Connect from an App postgres resource using PGUSER + OAuth token."""
     global _engine, _session_factory, _token_refresh_thread, _current_connection_url
 
     if not uses_app_resource_postgres():
@@ -229,7 +262,7 @@ def init_lakebase_from_app_resource() -> Engine:
 
     endpoint_name = os.environ["LAKEBASE_ENDPOINT"].strip()
     endpoint = _get_workspace_client().postgres.get_endpoint(name=endpoint_name)
-    pg_username = _get_pg_username(endpoint)
+    pg_username = app_postgres_username()
     host = os.environ["PGHOST"].strip()
     port = os.environ.get("PGPORT") or "5432"
     database = postgres_database_name()
