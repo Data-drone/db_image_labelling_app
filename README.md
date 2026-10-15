@@ -1,19 +1,26 @@
 # CV Explorer — Image Labeling App
 
-A React + FastAPI image annotation tool for **Databricks Apps**. Supports classification and bounding-box detection labeling, with project versioning, dataset export, and a Databricks dark-themed UI.
+A React + FastAPI image annotation tool for **Databricks Apps**. Supports
+classification, bounding-box detection, and segmentation with project
+versioning, model-assisted labeling, similarity search, and dataset export.
 
-Built on **Lakebase** (managed PostgreSQL) for persistent storage with automatic Lakehouse Sync to Delta tables. Images are served from Unity Catalog Volumes.
+Metadata lives in **Lakebase** (managed PostgreSQL). Images remain in Unity
+Catalog Volumes; projects can discover them from a Volume or from `/Volumes/...`
+paths stored in a Delta table. Lakehouse Sync is compatible but must be
+configured separately in the workspace.
 
 ## Features
 
-- **Two labeling modes**: Classification (single-click) and Bounding Box Detection (draw + assign class)
-- **Project-based workflow**: create projects from UC Volumes with custom class lists
+- **Three labeling modes**: classification, bounding-box detection, and segmentation masks
+- **Volume or Delta-table sources**: scan a UC Volume or query an image-path column through a SQL warehouse
+- **Model-assisted labeling**: synchronous or serverless Job pre-annotation with draft review
+- **Similarity tools**: image embeddings, nearest neighbors, duplicate detection, clustering, and outlier queues
 - **Keyboard-driven labeling**: number keys for class selection with visual flash feedback, arrow keys for navigation
 - **Sample scrubber**: navigate forward/backward through images, revisit and re-label previous samples
 - **Gallery view**: thumbnail grid with status filters (all/unlabeled/labeled/skipped)
 - **Project versioning**: clone projects to create new versions for iterative labeling
 - **Training datasets**: lightweight Hugging Face classification snapshots referencing Volume images; optional CSV/image copies and detection COCO exports
-- **Lakebase integration**: auto-provisioned by default (opt out for DAB-managed deployments) with token refresh and Lakehouse Sync to Delta
+- **Lakebase integration**: App-resource OAuth with token refresh, dedicated schema isolation, and optional SDK auto-provisioning
 - **Multi-user support**: user identity via Databricks SSO, per-user labeling stats
 
 ## Demo
@@ -39,33 +46,46 @@ Draw bounding boxes on images and assign classes. Navigate between samples to re
 Browser  ──>  React SPA (Vite)  ──>  FastAPI backend  ──>  Lakebase (PostgreSQL)
                                           │
                                           ├──>  UC Volumes (images)
-                                          └──>  Databricks SDK (workspace client)
+                                            ├──>  Databricks SDK (serving, jobs, resources)
+                                            └──>  SQL Statement API (Delta sources)
 ```
 
-The FastAPI backend serves the React SPA as static files and provides the `/api/` endpoints. On startup it auto-provisions a Lakebase project (by default — see `LAKEBASE_AUTO_PROVISION`) with a background thread that refreshes database tokens every 20 minutes.
+The FastAPI backend serves the React SPA and `/api/` endpoints. Bundle
+deployments attach a Lakebase postgres App resource; SDK auto-provisioning
+remains available when no App resource is attached. Both modes refresh OAuth
+database credentials every 20 minutes.
 
 ## Pages
 
 | Page | Route | Description |
 |------|-------|-------------|
-| **Projects** | `/` | List all projects, create new ones |
-| **Create Project** | `/projects/new` | Pick UC Volume, set task type + class list |
+| **Browse** | `/` or `/browse` | Browse UC Volumes and preview Delta tables |
+| **Projects** | `/projects` | List projects and versions |
+| **Create Project** | `/projects/new` | Pick a Volume or Delta table, task type, and classes |
 | **Project Dashboard** | `/projects/:id` | Stats, gallery grid, export, start labeling |
-| **Labeling View** | `/projects/:id/label` | Annotate images — classify or draw bounding boxes |
-| **Browse Volumes** | `/browse` | Navigate Catalog > Schema > Volume to preview images |
-| **Admin** | `/admin` | Lakebase status, DB connection info |
+| **Labeling View** | `/projects/:id/label` | Classify, draw boxes, or paint segmentation masks |
+| **Admin** | `/admin` | Read status; authorized users may run guarded mutations |
 
 ## Quick Start
 
 ### Deploy to Databricks Apps
 
-**Recommended:** use the **Databricks Asset Bundle** in this repo (`databricks bundle deploy --target dev`). It deploys the pre-annotate **job** and a **bundle-defined app** (`resources/cv_explorer_app.yml`) with declarative **App resources** (Lakebase postgres, UC volume, model serving endpoint, job) so they show in the Apps UI and `app.yml` can use `valueFrom`.
+**Recommended:** use the Databricks Apps deployment pipeline in this repo
+(`databricks apps deploy --target dev`). It validates/uploads the bundle,
+updates the pre-annotation Job and App resources, and starts the App.
 
-1. Adjust **`databricks.yml` → `variables`** for your workspace (especially `demo_volume_full_name`, `lakebase_postgres_branch`, `lakebase_postgres_database`, `serving_endpoint_name`, `app_name`).
-2. `databricks bundle deploy --target dev` (with a configured CLI profile for that workspace).
-3. The app runs `app.yml` → `python start.py` → FastAPI + Uvicorn. With a Lakebase **postgres** App resource, the platform injects `PGHOST` / `PGUSER` / etc.; the app uses those instead of SDK auto-provision (`LAKEBASE_AUTO_PROVISION=false` in `app.yml`).
+1. Adjust the bundle variables for the target workspace, including both
+   Volumes, Lakebase branch/database/endpoint, serving endpoints, warehouse,
+   jobs, and App name.
+2. Run `databricks apps deploy --target dev --profile <profile>`.
+3. The App runs `python start.py`. The Lakebase postgres resource injects
+   `PGHOST`, `PGUSER`, and `PGDATABASE`; `LAKEBASE_ENDPOINT` is bound from the
+   same resource so the App can mint renewable OAuth credentials.
 
-Alternatively, create an app manually from Git and copy the `app.yml` pattern — you must still attach matching resources in the UI and use the same `valueFrom` keys.
+Alternatively, create an app manually from Git and use the root `app.yml`.
+Attach resources named `lakebase-db`, `demo-volume`, `export-volume`,
+`sql-warehouse`, `serving-endpoint`, `embedding-endpoint`,
+`app-preannotate-job`, and `app-finetune-job` before starting it.
 
 ### App icon (Apps overview thumbnail)
 
@@ -137,7 +157,7 @@ instead of choosing one.
 
 This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and API routes so large pre-label batches run on a cluster instead of inside the app HTTP worker.
 
-1. From the repo root: `databricks bundle deploy` (with a configured profile).
+1. From the repo root: `databricks apps deploy --target <target> --profile <profile>`.
 2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). Bundle job parameters inject the exact Lakebase project, endpoint, PostgreSQL database, and inference adapter before the worker imports the backend.
 
 The dashboard shows **Pre-label (job)** when the job id resolves. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
@@ -297,13 +317,17 @@ cv-explorer/
 
 ## Database Schema (Lakebase)
 
-Three tables, auto-created on startup with `REPLICA IDENTITY FULL` for Lakehouse Sync:
+Seven tables are auto-created on startup with `REPLICA IDENTITY FULL` for
+optional Lakehouse Sync:
 
-- **labeling_projects** — name, task_type (classification/detection), class_list (JSON), source_volume, version, parent_project_id
+- **labeling_projects** — task/source configuration, classes, version lineage, and serving settings
 - **project_samples** — filepath, filename, status (unlabeled/labeled/skipped), locked_by/locked_at
-- **annotations** — label, ann_type (classification/bbox), bbox_json (normalised 0-1 coords)
+- **annotations** — classification, bbox, or mask labels with draft/model provenance
+- **annotation_history** — prior annotation states
+- **preannotate_runs**, **embedding_runs**, **finetune_runs** — asynchronous workflow state
 
-Bounding boxes are stored as normalised `[0, 1]` coordinates: `{"x": float, "y": float, "w": float, "h": float}`.
+Bounding boxes use normalized `[0, 1]` coordinates. Segmentation masks use
+COCO RLE in `mask_json`.
 
 ## Dataset Export
 

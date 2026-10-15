@@ -2,7 +2,10 @@
 
 ## What This Is
 
-Image labelling app deployed as a **Databricks App**. FastAPI backend + React SPA frontend. Stores metadata in **Lakebase** (managed Postgres) with SQLite fallback. Images live on **UC Volumes** — the app reads bytes on demand, never stores blobs in the database.
+Image labelling app deployed as a **Databricks App**. FastAPI backend + React
+SPA frontend. Metadata lives in **Lakebase** (managed Postgres), with explicit
+SQLite for local development. Images remain on **UC Volumes**; Delta tables can
+supply Volume image paths.
 
 ## Architecture
 
@@ -10,7 +13,8 @@ Image labelling app deployed as a **Databricks App**. FastAPI backend + React SP
 Browser (React SPA)
   → FastAPI (/api/*)
     → SQLAlchemy (Lakebase or SQLite)
-    → Databricks SDK (UC Volumes for images, Lakebase for provisioning)
+    → Databricks SDK (UC Volumes, Lakebase, serving, Jobs)
+    → SQL Statement API (Delta-table image sources)
 ```
 
 - `start.py` — entry point, runs Uvicorn on `DATABRICKS_APP_PORT` (default 8000)
@@ -20,10 +24,10 @@ Browser (React SPA)
 - `backend/deps.py` — shared dependencies (`get_db`, `get_user_email`)
 - `backend/lakebase.py` — Lakebase: SDK auto-provision or **App postgres resource** (`PG*` + `LAKEBASE_ENDPOINT` via `valueFrom: lakebase-db`). App-resource mode uses injected `PGUSER` plus a refreshing OAuth token. SQLite after a Lakebase failure requires `ALLOW_SQLITE_FALLBACK=true`. Partial `PG*` without the endpoint binding fails startup.
 - `backend/volumes.py` — UC Volume I/O (`read_image_bytes`, `scan_volume_for_samples`)
-- `backend/routes/` — one file per domain: `projects`, `labeling`, `inference`, `preannotate_runs`, `export`, `browse`, `admin`
+- `backend/routes/` — domain routers for projects, labeling, inference/runs, export/import, browse, similarity, and admin
 - `databricks.yml` + `resources/*.yml` — DAB bundle: app (`cv_explorer_app.yml` with UC/Lakebase/serving/job resources), pre-annotate job
 - `scripts/preannotate_job.py` — cluster entrypoint for that job (`argv[1]` = `preannotate_runs.id`)
-- `frontend/src/App.jsx` — React Router with routes: `/`, `/projects/new`, `/projects/:id`, `/projects/:id/label`, `/browse`, `/admin`
+- `frontend/src/App.jsx` — `/` redirects to `/browse`; projects live under `/projects`
 - `frontend/src/api/client.js` — all API calls (single source of truth for endpoints)
 
 ## Databricks Apps Constraints
@@ -53,7 +57,7 @@ The app **must** listen on `DATABRICKS_APP_PORT`. The runtime also auto-sets `UV
 - **User identity** comes from reverse-proxy headers: `X-Forwarded-Email`, `X-Forwarded-User`. See `deps.get_user_email()`. These headers do NOT exist in local dev — the app falls back to `"anonymous"`.
 - Project browsing and annotation are available to anyone with App access.
   Destructive Admin mutations require the caller's email in `ADMIN_EMAILS`;
-  an empty allowlist disables those operations.
+  the non-email `__disabled__` default disables those operations.
 - `ADMIN_EMAILS` authorizes who may invoke those routes; the underlying
   Lakebase, UC, serving, and Job calls still run as the App service principal
   and remain limited by its declared App-resource permissions.
@@ -63,6 +67,10 @@ The app **must** listen on `DATABRICKS_APP_PORT`. The runtime also auto-sets `UV
 Prefer **declarative resources** in `resources/cv_explorer_app.yml` (bundle deploy) so bindings show in the Apps UI. `app.yml` uses `valueFrom: <resource-name>` matching each resource’s `name` field.
 
 Without a bundle, resources can be added in the Apps UI instead; keep the same `valueFrom` keys in `app.yml`.
+
+Deploy with `databricks apps deploy --target <target> --profile <profile>` so
+the bundle is applied and the App is restarted; `bundle deploy` alone only
+updates bundle resources/files.
 
 **Lakebase:** either attach a **postgres** database App resource (platform injects `PG*`; app uses `init_lakebase_from_app_resource`) or omit it and use SDK auto-provision in `lakebase.py` (`LAKEBASE_AUTO_PROVISION=true`, no `PGHOST`).
 
@@ -99,7 +107,8 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
 
 ## Key Patterns
 
-- **Images are never uploaded** — projects point at an existing UC Volume path. `scan_volume_for_samples` lists one directory level and creates `ProjectSample` rows.
+- **Images are references** — projects scan one level of a UC Volume or query
+  a Delta-table image-path column. Project creation does not upload blobs.
 - **Image serving** goes through the backend: `/api/projects/{id}/samples/{id}/image` reads bytes via SDK and streams them. Thumbnails are resized with Pillow.
 - **Lakebase tokens expire** — a background thread in `lakebase.py` refreshes every 20 minutes with exponential backoff on failure. App-resource mode uses the same loop; `deps.get_engine()` / `get_session_factory()` delegate to `lakebase` so callers see the refreshed engine.
 - **Lakebase schema isolation is explicit** — bundle deployments set
@@ -107,7 +116,9 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
   non-public schema sets the connection search path. Existing public tables
   move only during a deployment with
   `LAKEBASE_MIGRATE_PUBLIC=true`, transactionally with row-count checks.
-- **Annotation model**: classification = one `Annotation` row per sample; detection = multiple rows with `bbox_json`. The `annotate-batch` endpoint replaces all annotations for a sample (delete + insert).
+- **Annotation model**: classification uses one row per sample; detection uses
+  normalized `bbox_json`; segmentation uses COCO RLE `mask_json`. The
+  `annotate-batch` endpoint replaces a sample's annotations.
 - **Project cloning** copies sample rows (same file paths) with empty annotations and bumps the version number.
 
 ## Common Pitfalls
@@ -116,7 +127,8 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
 - **Volume scanning is not recursive**: Only top-level files in the volume path are found. Nested directories are ignored.
 - **Local dev without Databricks**: Set `USE_LAKEBASE=false` to fall back to SQLite. Image paths must be local (e.g., `/tmp/images/`). User identity will be `"anonymous"`. A failed Lakebase init no longer silently uses SQLite unless `ALLOW_SQLITE_FALLBACK=true`.
 - **CORS**: Defaults to `*` if `CORS_ORIGINS` env var is not set.
-- **Lakebase Postgres username**: Derived from the JWT `sub` claim of the generated credential, not from listing roles. See `_get_pg_username` in `lakebase.py`.
+- **Lakebase Postgres username**: App-resource mode uses injected `PGUSER`;
+  SDK/job mode derives the role from the credential JWT `sub`.
 
 ## Existing Docs
 
