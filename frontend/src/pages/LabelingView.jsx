@@ -18,6 +18,12 @@ import {
   stripServerFields, preserveExcept, maskIsUsable, maskLayerPayload, statusFromSaved,
 } from '../utils/annotationPayload';
 import {
+  buildConsensusAnnotations,
+  buildConsensusBboxAnnotations,
+  buildConsensusMaskAnnotations,
+  consensusProgressPercent,
+} from '../utils/consensus';
+import {
   fetchProject,
   fetchProjectStats,
   fetchSamples,
@@ -33,6 +39,12 @@ import {
   clearDraftsSample,
   fetchDiversityQueue,
   fetchActiveLearningQueue,
+  claimNextConsensusTask,
+  claimConsensusSample,
+  heartbeatConsensusTask,
+  releaseConsensusTask,
+  submitConsensusTask,
+  fetchConsensusProgress,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 
@@ -44,6 +56,10 @@ export default function LabelingView() {
   const [project, setProject] = useState(null);
   const [stats, setStats] = useState(null);
   const [sample, setSample] = useState(null);
+  const [consensusTask, setConsensusTask] = useState(null);
+  const [consensusProgress, setConsensusProgress] = useState(null);
+  const [consensusDone, setConsensusDone] = useState(false);
+  const consensusTaskRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -109,6 +125,7 @@ export default function LabelingView() {
 
   const isDetection = project?.task_type === 'detection';
   const isSegmentation = project?.task_type === 'segmentation';
+  const isConsensus = Boolean(project?.consensus_enabled);
   const total = sampleList.length;
   const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
@@ -137,10 +154,73 @@ export default function LabelingView() {
   const queueMode = searchParams.get('mode');
   const sampleParam = searchParams.get('sample');
 
+  const loadConsensusTask = useCallback(async ({ requestedSampleId = null } = {}) => {
+    setLoading(true);
+    setImageLoaded(false);
+    setPredictions(null);
+    setActionError('');
+    try {
+      const task = requestedSampleId
+        ? await claimConsensusSample(projectId, requestedSampleId)
+        : await claimNextConsensusTask(projectId);
+      consensusTaskRef.current = task;
+      setConsensusTask(task);
+      setConsensusDone(!task);
+      if (task) {
+        setSample(task.sample);
+        sampleAnnotations.current = task.sample.annotations || [];
+        setSelectedLabels(new Set());
+        setBoxes([]);
+        setMaskLayers([]);
+        setSampleList([{ id: task.sample_id, status: 'in_progress' }]);
+        setCurrentIndex(0);
+      } else {
+        setSample(null);
+        setSampleList([]);
+        setCurrentIndex(-1);
+      }
+      const progress = await fetchConsensusProgress(projectId);
+      setConsensusProgress(progress);
+    } catch (err) {
+      setActionError(humanizeApiError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!project?.consensus_enabled) return;
+    const requested = sampleParam ? Number.parseInt(sampleParam, 10) : null;
+    loadConsensusTask({
+      requestedSampleId: Number.isFinite(requested) ? requested : null,
+    });
+  }, [project?.consensus_enabled, sampleParam, loadConsensusTask]);
+
+  useEffect(() => {
+    if (!isConsensus || !consensusTask) return undefined;
+    const timer = window.setInterval(() => {
+      heartbeatConsensusTask(
+        projectId, consensusTask.id, consensusTask.lock_token,
+      ).catch((err) => setActionError(humanizeApiError(err)));
+    }, 2 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [isConsensus, consensusTask, projectId]);
+
+  useEffect(() => () => {
+    const task = consensusTaskRef.current;
+    if (!task) return;
+    fetch(`/api/projects/${projectId}/consensus/tasks/${task.id}/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lock_token: task.lock_token }),
+      keepalive: true,
+    }).catch(() => {});
+  }, [projectId]);
+
   // Load full sample list (IDs + statuses) on mount
   // In diversity/active_learning mode, load samples ordered by score
   useEffect(() => {
-    if (!project) return;
+    if (!project || project.consensus_enabled) return;
     const mode = queueMode;
     const fallbackToDefault = () => {
       fetchSamples(projectId, { page: 0, page_size: 10000 })
@@ -172,6 +252,7 @@ export default function LabelingView() {
   // Once sample list is loaded, navigate to initial sample (once only)
   const initialNavDone = useRef(false);
   useEffect(() => {
+    if (isConsensus) return;
     if (sampleList.length === 0 || initialNavDone.current) return;
     initialNavDone.current = true;
 
@@ -191,7 +272,7 @@ export default function LabelingView() {
     } else {
       setCurrentIndex(0);
     }
-  }, [sampleList, sampleParam]);
+  }, [sampleList, sampleParam, isConsensus]);
 
   useEffect(() => {
     setActionError('');
@@ -209,6 +290,7 @@ export default function LabelingView() {
 
   // Load sample when currentIndex changes
   const loadSampleAtIndex = useCallback(async (idx) => {
+    if (isConsensus) return;
     if (idx < 0 || idx >= sampleList.length) return;
     setLoading(true);
     setImageLoaded(false);
@@ -268,17 +350,22 @@ export default function LabelingView() {
     } finally {
       setLoading(false);
     }
-  }, [sampleList, projectId, project]);
+  }, [sampleList, projectId, project, isConsensus]);
 
   useEffect(() => {
+    if (isConsensus) return;
     if (currentIndex >= 0 && sampleList.length > 0) {
       loadSampleAtIndex(currentIndex);
     }
-  }, [currentIndex, loadSampleAtIndex, sampleList.length]);
+  }, [currentIndex, loadSampleAtIndex, sampleList.length, isConsensus]);
 
   // Load history when sample changes or panel is opened
   const loadHistory = useCallback(async () => {
     if (!sample) return;
+    if (isConsensus) {
+      setHistory([]);
+      return;
+    }
     const requestedId = sample.id;
     setHistoryLoading(true);
     try {
@@ -295,7 +382,7 @@ export default function LabelingView() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [projectId, sample]);
+  }, [projectId, sample, isConsensus]);
 
   useEffect(() => {
     if (historyOpen && sample) {
@@ -310,16 +397,18 @@ export default function LabelingView() {
   }, [isSegmentation]);
 
   const goTo = useCallback((idx) => {
+    if (isConsensus) return;
     if (idx >= 0 && idx < sampleList.length && idx !== currentIndex) {
       if (!confirmLeaveUnsavedMasks()) return;
       setCurrentIndex(idx);
     }
-  }, [sampleList.length, currentIndex, confirmLeaveUnsavedMasks]);
+  }, [sampleList.length, currentIndex, confirmLeaveUnsavedMasks, isConsensus]);
 
   const goPrev = useCallback(() => goTo(currentIndex - 1), [goTo, currentIndex]);
   const goNext = useCallback(() => goTo(currentIndex + 1), [goTo, currentIndex]);
 
   const goNextUnlabeled = useCallback(() => {
+    if (isConsensus) return;
     // Find next unlabeled or pre_labeled from current position (wrapping)
     for (let i = 1; i <= sampleList.length; i++) {
       const idx = (currentIndex + i) % sampleList.length;
@@ -328,7 +417,7 @@ export default function LabelingView() {
         return;
       }
     }
-  }, [sampleList, currentIndex, goTo]);
+  }, [sampleList, currentIndex, goTo, isConsensus]);
 
   // After annotating, update local sample list status and advance.
   // Uses functional updaters so rapid clicks always see latest state.
@@ -371,12 +460,30 @@ export default function LabelingView() {
     });
   }, []);
 
+  const submitConsensusVote = useCallback(async (annotations, allowEmpty = false) => {
+    if (!consensusTask) throw new Error('No active consensus task.');
+    await submitConsensusTask(
+      projectId,
+      consensusTask.id,
+      consensusTask.lock_token,
+      annotations,
+      allowEmpty,
+    );
+    consensusTaskRef.current = null;
+    setConsensusTask(null);
+    await loadConsensusTask();
+  }, [consensusTask, projectId, loadConsensusTask]);
+
   // Multi-label classification: save all selected labels and advance
   const handleSaveClassification = useCallback(async () => {
     if (!sample || saving || selectedLabels.size === 0) return;
     setSaving(true);
     setActionError('');
     try {
+      if (isConsensus) {
+        await submitConsensusVote(buildConsensusAnnotations(selectedLabels));
+        return;
+      }
       const annotations = [
         ...preserveExcept(sampleAnnotations.current, 'classification'),
         ...[...selectedLabels].map(label => ({
@@ -393,7 +500,10 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  }, [sample, saving, selectedLabels, projectId, markCurrentAndAdvance]);
+  }, [
+    sample, saving, selectedLabels, projectId, markCurrentAndAdvance,
+    isConsensus, submitConsensusVote,
+  ]);
 
   // Skip
   const handleSkip = useCallback(async () => {
@@ -401,6 +511,15 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
+      if (isConsensus && consensusTask) {
+        await releaseConsensusTask(
+          projectId, consensusTask.id, consensusTask.lock_token,
+        );
+        consensusTaskRef.current = null;
+        setConsensusTask(null);
+        navigate(`/projects/${projectId}`);
+        return;
+      }
       await skipSample(projectId, sample.id);
       const curIdx = currentIndexRef.current;
       setSampleList(prev => prev.map((s, i) =>
@@ -414,7 +533,10 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  }, [sample, saving, projectId, loadStats, sampleList.length]);
+  }, [
+    sample, saving, projectId, loadStats, sampleList.length,
+    isConsensus, consensusTask, navigate,
+  ]);
 
   const handleAcceptDraftsOnly = useCallback(async () => {
     if (!sample || saving || currentIndex < 0) return;
@@ -547,6 +669,15 @@ export default function LabelingView() {
       handleSaveMasks();
       return;
     }
+    if (isConsensus) {
+      setSelectedLabels(new Set(
+        predictions
+          .filter((prediction) => prediction.ann_type === 'classification')
+          .map((prediction) => prediction.label),
+      ));
+      setPredictions(null);
+      return;
+    }
     setSaving(true);
     setActionError('');
     try {
@@ -645,10 +776,15 @@ export default function LabelingView() {
 
   // Detection: Save & Next
   const handleSaveBoxes = useCallback(async () => {
-    if (!sample || saving || boxes.length === 0) return;
+    if (!sample || saving || (!isConsensus && boxes.length === 0)) return;
     setSaving(true);
     setActionError('');
     try {
+      if (isConsensus) {
+        const vote = buildConsensusBboxAnnotations(boxes);
+        await submitConsensusVote(vote, vote.length === 0);
+        return;
+      }
       const annotations = [
         ...preserveExcept(sampleAnnotations.current, 'bbox'),
         ...boxes.map(b => ({
@@ -666,7 +802,10 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  }, [sample, saving, boxes, projectId, markCurrentAndAdvance]);
+  }, [
+    sample, saving, boxes, projectId, markCurrentAndAdvance,
+    isConsensus, submitConsensusVote,
+  ]);
 
   // ---------- Segmentation: mask layer CRUD ----------
   const handleAddMaskLayer = useCallback(() => {
@@ -742,7 +881,7 @@ export default function LabelingView() {
       ...layers.map(maskLayerPayload).filter(Boolean),
     ];
     const edited = masksDirty.current || Boolean(flushed);
-    if (annotations.length === 0 && !edited) {
+    if (annotations.length === 0 && !edited && !isConsensus) {
       setActionError('Nothing to save on this image — paint a mask first.');
       return;
     }
@@ -750,6 +889,14 @@ export default function LabelingView() {
     setSaving(true);
     setActionError('');
     try {
+      if (isConsensus) {
+        const vote = buildConsensusMaskAnnotations(
+          layers.map(maskLayerPayload).filter(Boolean),
+        );
+        await submitConsensusVote(vote, vote.length === 0);
+        masksDirty.current = false;
+        return;
+      }
       // An empty replacement is a real edit here ("I erased them all"), so it
       // has to be declared rather than guessed at by the server.
       const saved = await annotateSampleBatch(
@@ -764,7 +911,23 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  }, [sample, saving, maskLayers, projectId, markCurrentAndAdvance]);
+  }, [
+    sample, saving, maskLayers, projectId, markCurrentAndAdvance,
+    isConsensus, submitConsensusVote,
+  ]);
+
+  const leaveLabeling = useCallback(async () => {
+    const task = consensusTaskRef.current;
+    consensusTaskRef.current = null;
+    if (task) {
+      try {
+        await releaseConsensusTask(projectId, task.id, task.lock_token);
+      } catch {
+        // Stale locks recover server-side; leaving the page must not trap the user.
+      }
+    }
+    navigate(`/projects/${projectId}`);
+  }, [navigate, projectId]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -892,7 +1055,7 @@ export default function LabelingView() {
         } else if (isSegmentation && !confirmLeaveUnsavedMasks()) {
           return;
         } else {
-          navigate(`/projects/${projectId}`);
+          leaveLabeling();
         }
       }
     };
@@ -902,10 +1065,17 @@ export default function LabelingView() {
       boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
       handleSaveClassification, handleSaveMasks, toggleLabel, activeMaskId,
       handleRelabelMaskLayer, confirmLeaveUnsavedMasks, goNext, goNextUnlabeled, goPrev,
-      handleSaveBoxes, handleSkip]);
+      handleSaveBoxes, handleSkip, leaveLabeling]);
 
-  const labeled = stats?.labeled || 0;
-  const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;
+  const labeled = isConsensus
+    ? (consensusProgress?.submitted_tasks || 0)
+    : (stats?.labeled || 0);
+  const progressTotal = isConsensus
+    ? (consensusProgress?.total_tasks || 0)
+    : total;
+  const progressPct = isConsensus
+    ? consensusProgressPercent(consensusProgress)
+    : (progressTotal > 0 ? Math.round((labeled / progressTotal) * 100) : 0);
   const currentStatus = currentIndex >= 0 && currentIndex < sampleList.length
     ? sampleList[currentIndex].status : '';
 
@@ -964,7 +1134,7 @@ export default function LabelingView() {
         }}
       >
         <button
-          onClick={() => navigate(`/projects/${projectId}`)}
+          onClick={leaveLabeling}
           style={{
             background: 'none',
             border: 'none',
@@ -983,6 +1153,9 @@ export default function LabelingView() {
         <span className={`badge ${isDetection || isSegmentation ? 'badge-yellow' : 'badge-blue'}`}>
           {project.task_type}
         </span>
+        {isConsensus && (
+          <span className="badge badge-purple">blind consensus</span>
+        )}
 
         {(searchParams.get('mode') === 'diversity' || searchParams.get('mode') === 'active_learning') && (
           <span style={{
@@ -1030,7 +1203,7 @@ export default function LabelingView() {
         <div style={{ flex: 1 }} />
 
         {/* Sample scrubber */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+        {!isConsensus && <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <button
             onClick={goPrev}
             disabled={currentIndex <= 0}
@@ -1066,10 +1239,10 @@ export default function LabelingView() {
           >
             &#x25B6;
           </button>
-        </div>
+        </div>}
 
         {/* Status badge */}
-        {currentStatus && (
+        {!isConsensus && currentStatus && (
           <span className={`badge ${
             currentStatus === 'labeled' ? 'badge-green'
             : currentStatus === 'pre_labeled' ? 'badge-purple'
@@ -1098,7 +1271,7 @@ export default function LabelingView() {
             draft
           </span>
         )}
-        {currentStatus === 'labeled' && (
+        {!isConsensus && currentStatus === 'labeled' && (
           <span style={{
             fontSize: '0.7rem',
             color: '#f59e0b',
@@ -1114,7 +1287,8 @@ export default function LabelingView() {
 
         {/* Progress */}
         <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-          <strong style={{ color: 'var(--accent-blue)' }}>{labeled}</strong> labeled
+          <strong style={{ color: 'var(--accent-blue)' }}>{labeled}</strong>{' '}
+          {isConsensus ? `of ${progressTotal} votes submitted` : 'labeled'}
         </span>
         <div style={{ width: 100 }}>
           <div className="progress-bar">
@@ -1198,7 +1372,11 @@ export default function LabelingView() {
               </>
             )
           ) : (
-            <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No samples</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center' }}>
+              {isConsensus && consensusDone
+                ? 'No private tasks are available. Your submitted votes are saved.'
+                : 'No samples'}
+            </div>
           )}
         </div>
 
@@ -1435,10 +1613,14 @@ export default function LabelingView() {
                   <button
                     className="btn-primary"
                     onClick={handleSaveBoxes}
-                    disabled={saving || boxes.length === 0}
+                    disabled={saving || (!isConsensus && boxes.length === 0)}
                     style={{ width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem' }}
                   >
-                    {saving ? 'Saving...' : `Save & Next (${boxes.length})`}
+                    {saving
+                      ? 'Saving...'
+                      : isConsensus && boxes.length === 0
+                        ? 'Submit no objects'
+                        : `Save & Next (${boxes.length})`}
                   </button>
 
                   <button
@@ -1600,7 +1782,7 @@ export default function LabelingView() {
                   </div>
 
                   {/* Add class input */}
-                  <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.5rem' }}>
+                  {!isConsensus && <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.5rem' }}>
                     <input
                       type="text"
                       value={newClassName}
@@ -1626,11 +1808,11 @@ export default function LabelingView() {
                     >
                       + Add
                     </button>
-                  </div>
+                  </div>}
 
                   <div style={{ borderTop: '1px solid var(--border-color)', margin: '0.75rem 0 0.75rem' }} />
 
-                  {hasDraftAnnotations && (
+                  {!isConsensus && hasDraftAnnotations && (
                     <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.5rem' }}>
                       <button
                         type="button"
@@ -1674,7 +1856,9 @@ export default function LabelingView() {
                   </button>
 
                   {/* Get Prediction button */}
-                  {endpointReady && !predictions && (currentStatus === 'unlabeled' || currentStatus === 'pre_labeled') && (
+                  {endpointReady && !predictions && (
+                    isConsensus || currentStatus === 'unlabeled' || currentStatus === 'pre_labeled'
+                  ) && (
                     <button
                       className="btn-secondary"
                       onClick={handlePredict}
@@ -1694,17 +1878,17 @@ export default function LabelingView() {
                     disabled={saving}
                     style={{ width: '100%', fontSize: '0.85rem', marginBottom: '0.75rem' }}
                   >
-                    Skip (S)
+                    {isConsensus ? 'Release task & exit (S)' : 'Skip (S)'}
                   </button>
 
                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                    [1-{Math.min(9, project.class_list.length)}] toggle &middot; [Enter] save &middot; [S] skip &middot; [&larr;&rarr;] nav &middot; [Esc] back
+                    [1-{Math.min(9, project.class_list.length)}] toggle &middot; [Enter] save &middot; [S] {isConsensus ? 'release' : 'skip'} &middot; {!isConsensus && <>&larr;&rarr; nav &middot; </>}[Esc] back
                   </div>
                 </>
               )}
 
               {/* History panel */}
-              <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '0.75rem', paddingTop: '0.5rem' }}>
+              {!isConsensus && <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '0.75rem', paddingTop: '0.5rem' }}>
                 <button
                   onClick={() => setHistoryOpen(prev => !prev)}
                   style={{
@@ -1785,7 +1969,7 @@ export default function LabelingView() {
                     )}
                   </div>
                 )}
-              </div>
+              </div>}
             </>
           )}
         </div>

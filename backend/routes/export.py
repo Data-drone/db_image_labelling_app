@@ -2,6 +2,7 @@
 Dataset export route.
 """
 
+import csv
 import io
 import json
 import logging
@@ -12,8 +13,13 @@ from sqlalchemy.orm import Session
 
 from .. import image_meta, masks as mask_utils
 from ..deps import get_db, get_user_email
-from ..dataset_exports import default_export_volume, export_reference_dataset, validate_volume_path
-from ..models import LabelingProject, ProjectSample, Annotation
+from ..dataset_exports import (
+    consensus_metadata_by_sample,
+    default_export_volume,
+    export_reference_dataset,
+    validate_volume_path,
+)
+from ..models import Annotation, ConsensusCase, LabelingProject, ProjectSample
 from ..schemas import ExportRequest
 from ..uc_tables import attach_labeled_delta_table, normalize_image_path
 from ..volumes import read_image_bytes, _get_workspace_client
@@ -61,11 +67,18 @@ def export_project(
                    f"Please create it first: CREATE VOLUME {catalog_name}.{schema_name}.{volume_name}",
         )
 
-    samples = (
+    samples_query = (
         db.query(ProjectSample)
         .filter_by(project_id=project_id, status="labeled")
-        .all()
     )
+    if p.consensus_enabled:
+        samples_query = samples_query.join(
+            ConsensusCase, ConsensusCase.sample_id == ProjectSample.id,
+        ).filter(
+            ConsensusCase.project_id == project_id,
+            ConsensusCase.state == "resolved",
+        )
+    samples = samples_query.all()
     log.info("Found %d labeled samples for project %d", len(samples), project_id)
     if not samples:
         raise HTTPException(status_code=400, detail="No labeled samples to export.")
@@ -75,6 +88,7 @@ def export_project(
     ann_by_sample = {}
     for a in annotations:
         ann_by_sample.setdefault(a.sample_id, []).append(a)
+    resolution_meta = consensus_metadata_by_sample(db, p)
 
     safe_name = p.name.replace(" ", "_").replace("/", "_")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -183,9 +197,16 @@ def export_project(
                     )
                     mask_count += 1
         else:
-            label = sample_anns[0].label if sample_anns else "unknown"
-            csv_rows.append(f"{sample.filename},{label}")
-            annotation_count += 1
+            labels = sorted({annotation.label for annotation in sample_anns})
+            meta = resolution_meta.get(sample.id, {})
+            csv_rows.append([
+                sample.filename,
+                "|".join(labels) if labels else "unknown",
+                meta.get("agreement_score"),
+                meta.get("vote_count"),
+                meta.get("resolution_method"),
+            ])
+            annotation_count += len(labels)
 
     if image_count == 0:
         detail = "No images could be exported."
@@ -197,8 +218,30 @@ def export_project(
         coco_bytes = json.dumps(coco, indent=2).encode("utf-8")
         w.files.upload(f"{export_dir}/annotations.json", io.BytesIO(coco_bytes), overwrite=True)
     else:
-        csv_content = "filename,label\n" + "\n".join(csv_rows) + "\n"
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        if p.consensus_enabled:
+            writer.writerow([
+                "filename", "labels", "agreement_score",
+                "vote_count", "resolution_method",
+            ])
+            writer.writerows(csv_rows)
+        else:
+            writer.writerow(["filename", "label"])
+            writer.writerows([row[:2] for row in csv_rows])
+        csv_content = csv_buffer.getvalue()
         w.files.upload(f"{export_dir}/labels.csv", io.BytesIO(csv_content.encode("utf-8")), overwrite=True)
+    if resolution_meta:
+        consensus_rows = "".join(
+            json.dumps({"sample_id": sample_id, **values}) + "\n"
+            for sample_id, values in sorted(resolution_meta.items())
+            if sample_id in {sample.id for sample in samples}
+        )
+        w.files.upload(
+            f"{export_dir}/consensus.jsonl",
+            io.BytesIO(consensus_rows.encode("utf-8")),
+            overwrite=True,
+        )
 
     metadata = {
         "project_id": p.id,
@@ -216,6 +259,7 @@ def export_project(
         "format": "coco" if is_coco else "csv",
         "snapshot_id": ts,
         "mask_count": mask_count,
+        "consensus_enabled": bool(getattr(p, "consensus_enabled", False)),
         # The `masks/` PNGs are a convenience for MVTec-AD / anomalib style
         # pipelines: one single-channel 0/255 image per sample, the union of
         # that sample's masks. Class and instance information is deliberately
@@ -252,6 +296,7 @@ def export_project(
                 for annotation in ann_by_sample.get(sample.id, [])
                 if not annotation.is_draft
             ],
+            **(resolution_meta.get(sample.id, {}) if p.consensus_enabled else {}),
         })
     labeled_table = attach_labeled_delta_table(
         p, export_dir, lineage_rows, w, metadata,

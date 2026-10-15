@@ -34,6 +34,7 @@ export default function BBoxCanvas({
   onBoxDeleted,
   brightness = 1,
   contrast = 1,
+  readOnly = false,
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -125,9 +126,9 @@ export default function BBoxCanvas({
       const { cx: bx, cy: by } = toCanvas(box.x, box.y);
       const bw = box.w * imageRect.w;
       const bh = box.h * imageRect.h;
-      const color = getClassColor(box.classIndex);
+      const color = box.color || getClassColor(box.classIndex);
       const isSelected = box.id === selectedBoxId;
-      const isDraft = Boolean(box.isDraft);
+      const isDraft = Boolean(box.isDraft || box.dashed);
 
       // Fill
       ctx.fillStyle = color + (isSelected ? '40' : '26');
@@ -141,7 +142,7 @@ export default function BBoxCanvas({
       if (isDraft) ctx.setLineDash([]);
 
       // Label above box
-      const label = classList[box.classIndex] || box.label;
+      const label = box.displayLabel || classList[box.classIndex] || box.label;
       ctx.font = '11px Inter, sans-serif';
       const tm = ctx.measureText(label);
       const lh = 16;
@@ -152,7 +153,7 @@ export default function BBoxCanvas({
       ctx.fillText(label, bx + 4, ly + 12);
 
       // Resize handles (selected only)
-      if (isSelected) {
+      if (isSelected && !readOnly) {
         const handles = getHandlePositions(bx, by, bw, bh);
         ctx.fillStyle = '#fff';
         ctx.strokeStyle = color;
@@ -180,7 +181,7 @@ export default function BBoxCanvas({
       ctx.setLineDash([]);
     }
   }, [boxes, selectedBoxId, imgLoaded, canvasSize, imageRect, toCanvas, activeClassIndex,
-      classList, drawPreview, brightness, contrast]);
+      classList, drawPreview, brightness, contrast, readOnly]);
 
   // ---------- Mouse interaction ----------
   const getMousePos = (e) => {
@@ -220,6 +221,10 @@ export default function BBoxCanvas({
   const handleMouseDown = (e) => {
     if (e.button !== 0) return;
     const pos = getMousePos(e);
+    if (readOnly) {
+      onBoxSelected(hitTestBox(pos.cx, pos.cy)?.id || null);
+      return;
+    }
 
     // Check handles first
     const handleIdx = hitTestHandles(pos.cx, pos.cy);
@@ -259,6 +264,7 @@ export default function BBoxCanvas({
   };
 
   const handleMouseMove = (e) => {
+    if (readOnly) return;
     const drag = dragRef.current;
     if (!drag) return;
     const pos = getMousePos(e);
@@ -283,6 +289,7 @@ export default function BBoxCanvas({
   };
 
   const handleMouseUp = () => {
+    if (readOnly) return;
     const drag = dragRef.current;
     if (drag && drag.type === 'draw' && drawPreview) {
       const w = Math.abs(drawPreview.cx - drawPreview.startCx);
@@ -307,19 +314,19 @@ export default function BBoxCanvas({
   useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBoxId) {
+      if (!readOnly && (e.key === 'Delete' || e.key === 'Backspace') && selectedBoxId) {
         e.preventDefault();
         onBoxDeleted(selectedBoxId);
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedBoxId, onBoxDeleted]);
+  }, [selectedBoxId, onBoxDeleted, readOnly]);
 
   return (
     <div
       ref={containerRef}
-      style={{ width: '100%', height: '100%', position: 'relative', cursor: 'crosshair' }}
+      style={{ width: '100%', height: '100%', position: 'relative', cursor: readOnly ? 'default' : 'crosshair' }}
     >
       {!imgLoaded && (
         <div style={{

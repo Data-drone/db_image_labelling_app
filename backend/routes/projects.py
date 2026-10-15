@@ -12,7 +12,13 @@ from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
-from ..models import LabelingProject, ProjectSample, Annotation
+from ..models import (
+    Annotation,
+    ConsensusCase,
+    LabelingProject,
+    LabelingTask,
+    ProjectSample,
+)
 from ..schemas import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats,
     ClassCount, DailyVelocity, DetailedProjectStats, SourceSyncOut,
@@ -67,8 +73,19 @@ def _table_source_changed(p: LabelingProject, payload) -> bool:
     return False
 
 
-def _project_out(p, total=None, labeled=None):
+def _project_out(p, total=None, labeled=None, user_email=None):
     """Build a ProjectOut from a LabelingProject model instance."""
+    normalized_user = (user_email or "").strip().lower()
+    reviewers = {
+        str(email).strip().lower()
+        for email in (getattr(p, "consensus_reviewer_emails", None) or [])
+    }
+    if normalized_user and normalized_user == (p.created_by or "").strip().lower():
+        consensus_role = "owner"
+    elif normalized_user and normalized_user in reviewers:
+        consensus_role = "reviewer"
+    else:
+        consensus_role = "labeller"
     return ProjectOut(
         id=p.id,
         name=p.name,
@@ -82,6 +99,18 @@ def _project_out(p, total=None, labeled=None):
         source_filter=getattr(p, "source_filter", None),
         serving_endpoint=p.serving_endpoint,
         endpoint_config=p.endpoint_config,
+        consensus_enabled=bool(getattr(p, "consensus_enabled", False)),
+        consensus_panel_size=getattr(p, "consensus_panel_size", 3) or 3,
+        consensus_coverage_percent=getattr(p, "consensus_coverage_percent", 100),
+        consensus_quorum=getattr(p, "consensus_quorum", 2) or 2,
+        consensus_iou_threshold=getattr(p, "consensus_iou_threshold", 0.5),
+        consensus_agreement_threshold=getattr(
+            p, "consensus_agreement_threshold", 0.5,
+        ),
+        consensus_reviewer_emails=list(
+            getattr(p, "consensus_reviewer_emails", None) or []
+        ),
+        consensus_role=consensus_role,
         created_by=p.created_by,
         created_at=p.created_at,
         sample_count=total if total is not None else 0,
@@ -137,6 +166,13 @@ def create_project(
         source_filter=(payload.source_filter or "").strip() or None,
         serving_endpoint=serving_ep,
         endpoint_config=ep_config or None,
+        consensus_enabled=payload.consensus_enabled,
+        consensus_panel_size=payload.consensus_panel_size,
+        consensus_coverage_percent=payload.consensus_coverage_percent,
+        consensus_quorum=payload.consensus_quorum,
+        consensus_iou_threshold=payload.consensus_iou_threshold,
+        consensus_agreement_threshold=payload.consensus_agreement_threshold,
+        consensus_reviewer_emails=payload.consensus_reviewer_emails,
         created_by=user_email,
     )
     db.add(project)
@@ -150,6 +186,10 @@ def create_project(
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if project.consensus_enabled:
+        from ..consensus import ensure_consensus_cases
+        ensure_consensus_cases(db, project)
 
     if _env_truthy("PRE_ANNOTATE_ON_IMPORT"):
         from ..inference import check_endpoint_health, resolve_endpoint
@@ -178,30 +218,30 @@ def create_project(
     db.commit()
     db.refresh(project)
 
-    return _project_out(project, scan_result.added, 0)
+    return _project_out(project, scan_result.added, 0, user_email)
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)):
+def list_projects(request: Request, db: Session = Depends(get_db)):
     """List all projects with sample counts."""
     projects = db.query(LabelingProject).order_by(LabelingProject.created_at.desc()).all()
     result = []
     for p in projects:
         total = db.query(ProjectSample).filter_by(project_id=p.id).count()
         labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-        result.append(_project_out(p, total, labeled))
+        result.append(_project_out(p, total, labeled, get_user_email(request)))
     return result
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
-def get_project(project_id: int, db: Session = Depends(get_db)):
+def get_project(project_id: int, request: Request, db: Session = Depends(get_db)):
     """Get a single project."""
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-    return _project_out(p, total, labeled)
+    return _project_out(p, total, labeled, get_user_email(request))
 
 
 @router.post("/{project_id}/sync-source", response_model=SourceSyncOut)
@@ -222,6 +262,9 @@ def sync_project_source(project_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if p.consensus_enabled:
+        from ..consensus import ensure_consensus_cases
+        ensure_consensus_cases(db, p)
     db.commit()
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
@@ -237,7 +280,12 @@ def sync_project_source(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{project_id}/classes")
-def add_project_class(project_id: int, body: dict, db: Session = Depends(get_db)):
+def add_project_class(
+    project_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Add a new class to a project's class_list."""
     class_name = (body.get("class_name") or "").strip()
     if not class_name:
@@ -245,6 +293,9 @@ def add_project_class(project_id: int, body: dict, db: Session = Depends(get_db)
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
+    if p.consensus_enabled:
+        from ..consensus import require_project_owner
+        require_project_owner(p, get_user_email(request))
     current = list(p.class_list or [])
     if class_name in current:
         raise HTTPException(status_code=409, detail=f"Class '{class_name}' already exists.")
@@ -259,12 +310,72 @@ def add_project_class(project_id: int, body: dict, db: Session = Depends(get_db)
 def update_project(
     project_id: int,
     payload: ProjectUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """Update editable fields on a project."""
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
+
+    consensus_fields = (
+        "consensus_enabled",
+        "consensus_panel_size",
+        "consensus_coverage_percent",
+        "consensus_quorum",
+        "consensus_iou_threshold",
+        "consensus_agreement_threshold",
+        "consensus_reviewer_emails",
+    )
+    consensus_changed = any(
+        getattr(payload, field) is not None
+        and getattr(payload, field) != getattr(p, field)
+        for field in consensus_fields
+    )
+    structural_consensus_changed = any(
+        getattr(payload, field) is not None
+        and getattr(payload, field) != getattr(p, field)
+        for field in (
+            "consensus_enabled",
+            "consensus_panel_size",
+            "consensus_coverage_percent",
+            "consensus_quorum",
+            "consensus_iou_threshold",
+            "consensus_agreement_threshold",
+        )
+    )
+    if consensus_changed:
+        from ..consensus import require_project_owner
+        require_project_owner(p, get_user_email(request))
+
+        panel = payload.consensus_panel_size or p.consensus_panel_size
+        quorum = payload.consensus_quorum or p.consensus_quorum
+        if quorum > panel:
+            raise HTTPException(
+                status_code=422,
+                detail="consensus_quorum cannot exceed consensus_panel_size.",
+            )
+        active_tasks = (
+            db.query(LabelingTask)
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.assigned_to.isnot(None),
+            )
+            .count()
+        )
+        if structural_consensus_changed and active_tasks and not payload.reset_consensus_unstarted:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Consensus work has started. Set reset_consensus_unstarted=true "
+                    "to apply settings only to work that has not started."
+                ),
+            )
+        if payload.consensus_enabled is False and active_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail="Consensus cannot be disabled after labeling work has started.",
+            )
 
     volume_changed = (
         payload.source_volume is not None
@@ -280,6 +391,9 @@ def update_project(
                 detail="Changing the image source will delete all samples and annotations. "
                        "Set confirm_source_change=true to proceed.",
             )
+        for case in db.query(ConsensusCase).filter_by(project_id=project_id).all():
+            db.delete(case)
+        db.flush()
         db.query(Annotation).filter_by(project_id=project_id).delete()
         db.query(ProjectSample).filter_by(project_id=project_id).delete()
         if payload.source_type is not None:
@@ -300,6 +414,9 @@ def update_project(
         except ValueError as e:
             db.rollback()
             raise HTTPException(status_code=400, detail=str(e)) from e
+        if p.consensus_enabled:
+            from ..consensus import ensure_consensus_cases
+            ensure_consensus_cases(db, p)
 
     if payload.name is not None:
         existing = db.query(LabelingProject).filter(
@@ -314,6 +431,18 @@ def update_project(
         p.description = payload.description
 
     if payload.class_list is not None:
+        if p.consensus_enabled:
+            from ..consensus import require_project_owner
+            require_project_owner(p, get_user_email(request))
+            if (
+                db.query(LabelingTask)
+                .filter_by(project_id=project_id, status="submitted")
+                .count()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Classes cannot change after consensus votes have been submitted.",
+                )
         p.class_list = payload.class_list
 
     if payload.serving_endpoint is not None:
@@ -322,12 +451,32 @@ def update_project(
     if payload.endpoint_config is not None:
         p.endpoint_config = payload.endpoint_config or None
 
+    was_consensus_enabled = p.consensus_enabled
+    for field in consensus_fields:
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(p, field, value)
+    db.flush()
+
+    if consensus_changed:
+        from ..consensus import (
+            delete_unstarted_cases,
+            ensure_consensus_cases,
+        )
+        if not p.consensus_enabled:
+            delete_unstarted_cases(db, p.id)
+        elif not was_consensus_enabled:
+            ensure_consensus_cases(db, p)
+        elif structural_consensus_changed:
+            delete_unstarted_cases(db, p.id)
+            ensure_consensus_cases(db, p)
+
     db.commit()
     db.refresh(p)
 
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-    return _project_out(p, total, labeled)
+    return _project_out(p, total, labeled, get_user_email(request))
 
 
 @router.delete("/{project_id}")
@@ -382,6 +531,17 @@ def clone_project(
         source_filter=getattr(parent, "source_filter", None),
         serving_endpoint=parent.serving_endpoint,
         endpoint_config=parent.endpoint_config,
+        consensus_enabled=bool(getattr(parent, "consensus_enabled", False)),
+        consensus_panel_size=getattr(parent, "consensus_panel_size", 3) or 3,
+        consensus_coverage_percent=getattr(parent, "consensus_coverage_percent", 100),
+        consensus_quorum=getattr(parent, "consensus_quorum", 2) or 2,
+        consensus_iou_threshold=getattr(parent, "consensus_iou_threshold", 0.5),
+        consensus_agreement_threshold=getattr(
+            parent, "consensus_agreement_threshold", 0.5,
+        ),
+        consensus_reviewer_emails=list(
+            getattr(parent, "consensus_reviewer_emails", None) or []
+        ),
         created_by=user_email,
         version=new_version,
         parent_project_id=root_id,
@@ -399,10 +559,14 @@ def clone_project(
         ))
         sample_count += 1
 
+    if new_project.consensus_enabled:
+        from ..consensus import ensure_consensus_cases
+        ensure_consensus_cases(db, new_project)
+
     db.commit()
     db.refresh(new_project)
 
-    return _project_out(new_project, sample_count, 0)
+    return _project_out(new_project, sample_count, 0, user_email)
 
 
 @router.get("/{project_id}/stats", response_model=ProjectStats)
@@ -418,13 +582,24 @@ def project_stats(project_id: int, db: Session = Depends(get_db)):
     pre_labeled = db.query(ProjectSample).filter_by(project_id=project_id, status="pre_labeled").count()
     unlabeled = total - labeled - skipped - pre_labeled
 
-    user_rows = (
-        db.query(Annotation.created_by, func.count(Annotation.id))
-        .filter(Annotation.project_id == project_id)
-        .filter(Annotation.is_draft.is_(False))
-        .group_by(Annotation.created_by)
-        .all()
-    )
+    if p.consensus_enabled:
+        user_rows = (
+            db.query(LabelingTask.assigned_to, func.count(LabelingTask.id))
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.status == "submitted",
+            )
+            .group_by(LabelingTask.assigned_to)
+            .all()
+        )
+    else:
+        user_rows = (
+            db.query(Annotation.created_by, func.count(Annotation.id))
+            .filter(Annotation.project_id == project_id)
+            .filter(Annotation.is_draft.is_(False))
+            .group_by(Annotation.created_by)
+            .all()
+        )
     skip_rows = (
         db.query(ProjectSample.locked_by, func.count(ProjectSample.id))
         .filter(
@@ -489,33 +664,60 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
 
     # Daily velocity — last 30 days, counting distinct samples per day
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    vel_rows = (
-        db.query(
-            func.date(Annotation.created_at).label("day"),
-            func.count(distinct(Annotation.sample_id)).label("cnt"),
+    if p.consensus_enabled:
+        vel_rows = (
+            db.query(
+                func.date(LabelingTask.submitted_at).label("day"),
+                func.count(LabelingTask.id).label("cnt"),
+            )
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.status == "submitted",
+                LabelingTask.submitted_at >= cutoff,
+            )
+            .group_by(func.date(LabelingTask.submitted_at))
+            .order_by(func.date(LabelingTask.submitted_at))
+            .all()
         )
-        .filter(
-            Annotation.project_id == project_id,
-            Annotation.created_at >= cutoff,
-            Annotation.is_draft.is_(False),
+    else:
+        vel_rows = (
+            db.query(
+                func.date(Annotation.created_at).label("day"),
+                func.count(distinct(Annotation.sample_id)).label("cnt"),
+            )
+            .filter(
+                Annotation.project_id == project_id,
+                Annotation.created_at >= cutoff,
+                Annotation.is_draft.is_(False),
+            )
+            .group_by(func.date(Annotation.created_at))
+            .order_by(func.date(Annotation.created_at))
+            .all()
         )
-        .group_by(func.date(Annotation.created_at))
-        .order_by(func.date(Annotation.created_at))
-        .all()
-    )
     daily_velocity = [
         DailyVelocity(date=str(row.day), count=row.cnt)
         for row in vel_rows
     ]
 
     # Per-user breakdown (reuse logic from basic stats)
-    user_rows = (
-        db.query(Annotation.created_by, func.count(Annotation.id))
-        .filter(Annotation.project_id == project_id)
-        .filter(Annotation.is_draft.is_(False))
-        .group_by(Annotation.created_by)
-        .all()
-    )
+    if p.consensus_enabled:
+        user_rows = (
+            db.query(LabelingTask.assigned_to, func.count(LabelingTask.id))
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.status == "submitted",
+            )
+            .group_by(LabelingTask.assigned_to)
+            .all()
+        )
+    else:
+        user_rows = (
+            db.query(Annotation.created_by, func.count(Annotation.id))
+            .filter(Annotation.project_id == project_id)
+            .filter(Annotation.is_draft.is_(False))
+            .group_by(Annotation.created_by)
+            .all()
+        )
     skip_rows = (
         db.query(ProjectSample.locked_by, func.count(ProjectSample.id))
         .filter(
@@ -537,22 +739,40 @@ def project_stats_detailed(project_id: int, db: Session = Depends(get_db)):
 
     # Average daily rate (last 7 days) — count distinct samples, not annotation rows
     week_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    week_count = (
-        db.query(func.count(distinct(Annotation.sample_id)))
-        .filter(
-            Annotation.project_id == project_id,
-            Annotation.created_at >= week_cutoff,
-            Annotation.is_draft.is_(False),
+    if p.consensus_enabled:
+        week_count = (
+            db.query(func.count(LabelingTask.id))
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.status == "submitted",
+                LabelingTask.submitted_at >= week_cutoff,
+            )
+            .scalar()
+        ) or 0
+        first_ann = (
+            db.query(func.min(LabelingTask.submitted_at))
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.status == "submitted",
+            )
+            .scalar()
         )
-        .scalar()
-    ) or 0
-
-    first_ann = (
-        db.query(func.min(Annotation.created_at))
-        .filter(Annotation.project_id == project_id)
-        .filter(Annotation.is_draft.is_(False))
-        .scalar()
-    )
+    else:
+        week_count = (
+            db.query(func.count(distinct(Annotation.sample_id)))
+            .filter(
+                Annotation.project_id == project_id,
+                Annotation.created_at >= week_cutoff,
+                Annotation.is_draft.is_(False),
+            )
+            .scalar()
+        ) or 0
+        first_ann = (
+            db.query(func.min(Annotation.created_at))
+            .filter(Annotation.project_id == project_id)
+            .filter(Annotation.is_draft.is_(False))
+            .scalar()
+        )
     days_active = 7
     if first_ann is not None:
         days_active = max(1, min(7, (date.today() - first_ann.date()).days))

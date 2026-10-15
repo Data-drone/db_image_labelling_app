@@ -44,6 +44,13 @@ export default function CreateProject() {
   const [taskType, setTaskType] = useState('detection');
   const [classList, setClassList] = useState([]);
   const [classInput, setClassInput] = useState('');
+  const [consensusEnabled, setConsensusEnabled] = useState(false);
+  const [consensusPanelSize, setConsensusPanelSize] = useState(3);
+  const [consensusCoverage, setConsensusCoverage] = useState(100);
+  const [consensusQuorum, setConsensusQuorum] = useState(2);
+  const [consensusIouThreshold, setConsensusIouThreshold] = useState(0.5);
+  const [consensusAgreementThreshold, setConsensusAgreementThreshold] = useState(0.5);
+  const [consensusReviewers, setConsensusReviewers] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
   const [workspaceEndpointDefault, setWorkspaceEndpointDefault] = useState('');
   const [samPrompt, setSamPrompt] = useState('');
@@ -322,8 +329,26 @@ export default function CreateProject() {
       }
     }
     if (classList.length === 0) parts.push('add at least one class (type a label and click Add or press Enter)');
+    if (consensusEnabled) {
+      const panel = Number(consensusPanelSize);
+      const quorum = Number(consensusQuorum);
+      const coverage = Number(consensusCoverage);
+      if (!Number.isInteger(panel) || panel < 1 || panel > 15) parts.push('use a panel size from 1 to 15');
+      if (!Number.isInteger(quorum) || quorum < 1 || quorum > panel) parts.push('use a quorum between 1 and the panel size');
+      if (!Number.isFinite(coverage) || coverage < 0 || coverage > 100) parts.push('use consensus coverage from 0 to 100');
+      if (taskType !== 'classification') {
+        const iou = Number(consensusIouThreshold);
+        const agreement = Number(consensusAgreementThreshold);
+        if (!Number.isFinite(iou) || iou < 0 || iou > 1) parts.push('use an IoU threshold from 0 to 1');
+        if (!Number.isFinite(agreement) || agreement < 0 || agreement > 1) parts.push('use an agreement threshold from 0 to 1');
+      }
+    }
     return parts;
-  }, [name, sourceKind, warehouseConfigured, tableFqn, sourceVolume, classList.length]);
+  }, [
+    name, sourceKind, warehouseConfigured, tableFqn, sourceVolume, classList.length,
+    taskType, consensusEnabled, consensusPanelSize, consensusQuorum, consensusCoverage,
+    consensusIouThreshold, consensusAgreementThreshold,
+  ]);
 
   const canSubmit = submitBlockers.length === 0;
 
@@ -342,6 +367,18 @@ export default function CreateProject() {
         task_type: taskType,
         class_list: classList,
       };
+      if (consensusEnabled) {
+        payload.consensus_enabled = true;
+        payload.consensus_panel_size = Number(consensusPanelSize);
+        payload.consensus_coverage_percent = Number(consensusCoverage);
+        payload.consensus_quorum = Number(consensusQuorum);
+        payload.consensus_iou_threshold = Number(consensusIouThreshold);
+        payload.consensus_agreement_threshold = Number(consensusAgreementThreshold);
+        payload.consensus_reviewer_emails = consensusReviewers
+          .split(',')
+          .map((email) => email.trim().toLowerCase())
+          .filter(Boolean);
+      }
       if (sourceKind === 'table') {
         payload.source_type = 'table';
         payload.source_table = tableFqn;
@@ -485,6 +522,90 @@ export default function CreateProject() {
               </span>
             ))}
           </div>
+        </div>
+
+        <div className="card" style={{ marginBottom: '1.25rem', padding: '1rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
+              <input
+                type="checkbox"
+                checked={consensusEnabled}
+                onChange={(e) => setConsensusEnabled(e.target.checked)}
+              />
+              Enable blind multi-labeller consensus
+            </label>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0.4rem 0 0' }}>
+              Each selected image is labelled independently; matching results are resolved by quorum.
+            </p>
+            {consensusEnabled && (
+              <div style={{ marginTop: '0.75rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                  <label style={labelStyle}>
+                    Panel size
+                    <input
+                      type="number" min="1" max="15"
+                      value={consensusPanelSize}
+                      onChange={(e) => setConsensusPanelSize(e.target.value)}
+                      style={{ ...inputStyle, marginTop: '0.25rem' }}
+                    />
+                  </label>
+                  <label style={labelStyle}>
+                    Quorum
+                    <input
+                      type="number" min="1" max={consensusPanelSize}
+                      value={consensusQuorum}
+                      onChange={(e) => setConsensusQuorum(e.target.value)}
+                      style={{ ...inputStyle, marginTop: '0.25rem' }}
+                    />
+                  </label>
+                  <label style={labelStyle}>
+                    Coverage %
+                    <input
+                      type="number" min="0" max="100"
+                      value={consensusCoverage}
+                      onChange={(e) => setConsensusCoverage(e.target.value)}
+                      style={{ ...inputStyle, marginTop: '0.25rem' }}
+                    />
+                  </label>
+                </div>
+                {taskType !== 'classification' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <label style={labelStyle}>
+                      IoU threshold
+                      <input
+                        type="number" min="0" max="1" step="0.05"
+                        value={consensusIouThreshold}
+                        onChange={(e) => setConsensusIouThreshold(e.target.value)}
+                        style={{ ...inputStyle, marginTop: '0.25rem' }}
+                      />
+                    </label>
+                    <label style={labelStyle}>
+                      Agreement threshold
+                      <input
+                        type="number" min="0" max="1" step="0.05"
+                        value={consensusAgreementThreshold}
+                        onChange={(e) => setConsensusAgreementThreshold(e.target.value)}
+                        style={{ ...inputStyle, marginTop: '0.25rem' }}
+                      />
+                    </label>
+                  </div>
+                )}
+                {Number(consensusPanelSize) % 2 === 0 && (
+                  <div style={{ fontSize: '0.72rem', color: '#f59e0b', marginBottom: '0.5rem' }}>
+                    Odd panel sizes reduce tied votes.
+                  </div>
+                )}
+                <label style={labelStyle}>
+                  Reviewer emails (comma-separated)
+                  <input
+                    type="text"
+                    value={consensusReviewers}
+                    onChange={(e) => setConsensusReviewers(e.target.value)}
+                    placeholder="reviewer@example.com"
+                    style={{ ...inputStyle, marginTop: '0.25rem' }}
+                  />
+                </label>
+              </div>
+            )}
         </div>
 
         {/* Image source */}

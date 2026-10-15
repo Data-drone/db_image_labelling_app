@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import image_meta, masks
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
-from ..models import ProjectSample, Annotation, AnnotationHistory
+from ..models import LabelingProject, ProjectSample, Annotation, AnnotationHistory
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
     SampleOut, SamplePage,
@@ -29,6 +29,19 @@ router = APIRouter(prefix="/api/projects/{project_id}", tags=["labeling"])
 
 
 _MODEL_PROVENANCE = re.compile(r"^model:[A-Za-z0-9][A-Za-z0-9._:/ -]{0,180}$")
+
+
+def _reject_consensus_write(db: Session, project_id: int) -> None:
+    enabled = (
+        db.query(LabelingProject.consensus_enabled)
+        .filter(LabelingProject.id == project_id)
+        .scalar()
+    )
+    if enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the private consensus task workflow for this project.",
+        )
 
 
 def _resolve_created_by(ann, user_email: str) -> str:
@@ -135,6 +148,7 @@ def annotate_sample(
     For classification, replaces the existing annotation (if any) so
     re-labeling works naturally.  History is recorded for every change.
     """
+    _reject_consensus_write(db, project_id)
     sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
@@ -217,6 +231,7 @@ def annotate_sample_batch(
     db: Session = Depends(get_db),
 ):
     """Save multiple annotations for a sample in one transaction."""
+    _reject_consensus_write(db, project_id)
     sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
@@ -455,6 +470,7 @@ def skip_sample(
     db: Session = Depends(get_db),
 ):
     """Skip a sample."""
+    _reject_consensus_write(db, project_id)
     sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")

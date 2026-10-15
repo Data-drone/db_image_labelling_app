@@ -16,6 +16,7 @@ import {
   propagateLabels, detectNearDuplicates,
   fetchDiversityQueue, fetchActiveLearningQueue, fetchOutliers,
   fetchClusterMap,
+  fetchConsensusMetrics,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
@@ -44,6 +45,7 @@ export default function ProjectDashboard() {
   const [saving, setSaving] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [newClass, setNewClass] = useState('');
+  const [consensusMetrics, setConsensusMetrics] = useState(null);
 
   // Export state
   const [showExport, setShowExport] = useState(false);
@@ -218,6 +220,16 @@ export default function ProjectDashboard() {
       .then(setEndpointStatus)
       .catch(() => setEndpointStatus({ status: 'error', error: 'Could not check endpoint' }));
   }, [project, projectId]);
+
+  useEffect(() => {
+    if (!project?.consensus_enabled) {
+      setConsensusMetrics(null);
+      return;
+    }
+    fetchConsensusMetrics(projectId)
+      .then(setConsensusMetrics)
+      .catch(() => setConsensusMetrics(null));
+  }, [project?.consensus_enabled, projectId]);
 
   useEffect(() => {
     if (!project || activeAsyncRunId) return;
@@ -758,6 +770,13 @@ export default function ProjectDashboard() {
       source_filter: project.source_filter || '',
       class_list: [...project.class_list],
       serving_endpoint: project.serving_endpoint || '',
+      consensus_enabled: Boolean(project.consensus_enabled),
+      consensus_panel_size: project.consensus_panel_size || 3,
+      consensus_coverage_percent: project.consensus_coverage_percent ?? 100,
+      consensus_quorum: project.consensus_quorum || 2,
+      consensus_iou_threshold: project.consensus_iou_threshold ?? 0.5,
+      consensus_agreement_threshold: project.consensus_agreement_threshold ?? 0.5,
+      consensus_reviewer_emails: (project.consensus_reviewer_emails || []).join(', '),
     });
     setNewClass('');
     setEditing(true);
@@ -776,6 +795,39 @@ export default function ProjectDashboard() {
       if (editForm.description !== (project.description || '')) patch.description = editForm.description;
       if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
       if ((editForm.serving_endpoint || '') !== (project.serving_endpoint || '')) patch.serving_endpoint = editForm.serving_endpoint;
+      const reviewerEmails = (editForm.consensus_reviewer_emails || '')
+        .split(',')
+        .map((email) => email.trim().toLowerCase())
+        .filter(Boolean);
+      const structuralConsensusChanged = (
+        Boolean(editForm.consensus_enabled) !== Boolean(project.consensus_enabled)
+        || Number(editForm.consensus_panel_size) !== Number(project.consensus_panel_size || 3)
+        || Number(editForm.consensus_coverage_percent) !== Number(project.consensus_coverage_percent ?? 100)
+        || Number(editForm.consensus_quorum) !== Number(project.consensus_quorum || 2)
+        || Number(editForm.consensus_iou_threshold) !== Number(project.consensus_iou_threshold ?? 0.5)
+        || Number(editForm.consensus_agreement_threshold) !== Number(project.consensus_agreement_threshold ?? 0.5)
+      );
+      if (structuralConsensusChanged) {
+        if (!window.confirm(
+          'Consensus settings affect unstarted work. Existing assigned or submitted votes will be preserved. Continue?'
+        )) {
+          setSaving(false);
+          return;
+        }
+        patch.consensus_enabled = Boolean(editForm.consensus_enabled);
+        patch.consensus_panel_size = Number(editForm.consensus_panel_size);
+        patch.consensus_coverage_percent = Number(editForm.consensus_coverage_percent);
+        patch.consensus_quorum = Number(editForm.consensus_quorum);
+        patch.consensus_iou_threshold = Number(editForm.consensus_iou_threshold);
+        patch.consensus_agreement_threshold = Number(editForm.consensus_agreement_threshold);
+        patch.reset_consensus_unstarted = true;
+      }
+      if (
+        JSON.stringify([...reviewerEmails].sort())
+        !== JSON.stringify([...(project.consensus_reviewer_emails || [])].sort())
+      ) {
+        patch.consensus_reviewer_emails = reviewerEmails;
+      }
 
       const sourceChanged = editForm.source_volume !== project.source_volume
         || (editForm.source_type || 'volume') !== (project.source_type || 'volume')
@@ -944,7 +996,7 @@ export default function ProjectDashboard() {
             )}
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            {stats?.embedded > 0 && (
+            {!project.consensus_enabled && stats?.embedded > 0 && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
                 <button
                   className="btn-secondary"
@@ -989,6 +1041,16 @@ export default function ProjectDashboard() {
                   <option value="diversity">Diversity Only</option>
                 </select>
               </div>
+            )}
+            {project.consensus_enabled && ['owner', 'reviewer'].includes(project.consensus_role) && (
+              <button
+                className="btn-secondary"
+                onClick={() => navigate(`/projects/${projectId}/review`)}
+                style={{ padding: '0.6rem 1rem' }}
+              >
+                Review disagreements
+                {consensusMetrics?.review_items ? ` (${consensusMetrics.review_items})` : ''}
+              </button>
             )}
             <button
               className="btn-primary"
@@ -1040,6 +1102,69 @@ export default function ProjectDashboard() {
       {diversityError && (
         <div style={{ marginBottom: '1rem', padding: '0.5rem 0.75rem', borderRadius: 6, background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', fontSize: '0.8rem', color: '#a855f7' }}>
           {diversityError}
+        </div>
+      )}
+
+      {project.consensus_enabled && consensusMetrics && (
+        <div className="card" style={{ marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1rem' }}>Consensus quality</h3>
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>
+                {project.task_type === 'classification'
+                  ? 'Exact-match agreement across blind classification votes'
+                  : 'IoU and quorum agreement across blind spatial votes'}
+              </div>
+            </div>
+            <span className="badge badge-blue">{project.consensus_role}</span>
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+            gap: '0.6rem', marginBottom: consensusMetrics.per_user?.length ? '1rem' : 0,
+          }}>
+            {[
+              ['Resolved', consensusMetrics.resolved_items],
+              ['Needs review', consensusMetrics.review_items],
+              ['Votes submitted', `${consensusMetrics.submitted_tasks}/${consensusMetrics.total_tasks}`],
+              ['Auto resolved', consensusMetrics.auto_resolved],
+              ['Manual', consensusMetrics.manually_resolved],
+              ['Mean agreement', `${Math.round((consensusMetrics.mean_agreement_score || 0) * 100)}%`],
+            ].map(([label, value]) => (
+              <div key={label} style={{
+                padding: '0.65rem', borderRadius: 6, background: 'var(--bg-secondary)',
+                border: '1px solid var(--border-color)',
+              }}>
+                <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{value}</div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          {consensusMetrics.per_user?.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-color)' }}>
+                    <th style={thStyle}>Labeller</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Submitted</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Agreement</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Disagreements</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Avg minutes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {consensusMetrics.per_user.map((row) => (
+                    <tr key={row.user} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                      <td style={tdStyle}>{row.user}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{row.submitted}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{Math.round(row.agreement_rate * 100)}%</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{row.disagreed}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{row.avg_minutes}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -2573,7 +2698,7 @@ export default function ProjectDashboard() {
               <h3 style={{ fontWeight: 600, fontSize: '1rem', margin: 0 }}>
                 Project Info
               </h3>
-              {!editing ? (
+              {!editing && (!project.consensus_enabled || project.consensus_role === 'owner') ? (
                 <button
                   className="btn-secondary"
                   onClick={startEditing}
@@ -2581,7 +2706,7 @@ export default function ProjectDashboard() {
                 >
                   Edit
                 </button>
-              ) : (
+              ) : editing ? (
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
                     className="btn-secondary"
@@ -2600,7 +2725,7 @@ export default function ProjectDashboard() {
                     {saving ? 'Saving...' : 'Save'}
                   </button>
                 </div>
-              )}
+              ) : null}
             </div>
 
             {!editing ? (
@@ -2627,6 +2752,20 @@ export default function ProjectDashboard() {
                 <span style={{ color: project.serving_endpoint ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                   {project.serving_endpoint || '(none)'}
                 </span>
+                <span style={{ color: 'var(--text-muted)' }}>Consensus</span>
+                <span>
+                  {project.consensus_enabled
+                    ? `${project.consensus_panel_size} votes on ${project.consensus_coverage_percent}% of items; quorum ${project.consensus_quorum}${project.task_type === 'classification' ? '' : `; IoU ${project.consensus_iou_threshold}`}`
+                    : 'Disabled'}
+                </span>
+                {project.consensus_enabled && (
+                  <>
+                    <span style={{ color: 'var(--text-muted)' }}>Reviewers</span>
+                    <span>
+                      {(project.consensus_reviewer_emails || []).join(', ') || 'Project owner only'}
+                    </span>
+                  </>
+                )}
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>
                 <span>
                   v{project.version || 1}
@@ -2779,6 +2918,97 @@ export default function ProjectDashboard() {
                     Databricks Model Serving endpoint for pre-annotation. Leave blank to disable.
                   </div>
                 </div>
+                {project.consensus_role === 'owner' && (
+                  <>
+                    <span style={{ color: 'var(--text-muted)', paddingTop: '0.4rem' }}>Consensus</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <label style={{ display: 'flex', gap: '0.45rem', alignItems: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(editForm.consensus_enabled)}
+                          onChange={(e) => setEditForm({ ...editForm, consensus_enabled: e.target.checked })}
+                        />
+                        Enable blind {project.task_type} consensus
+                      </label>
+                      {editForm.consensus_enabled && (
+                        <>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                            <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              Panel size
+                              <input
+                                type="number" min="1" max="15"
+                                value={editForm.consensus_panel_size}
+                                onChange={(e) => setEditForm({ ...editForm, consensus_panel_size: e.target.value })}
+                                className="input"
+                                style={{ width: '100%', marginTop: '0.2rem' }}
+                              />
+                            </label>
+                            <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              Quorum
+                              <input
+                                type="number" min="1" max={editForm.consensus_panel_size || 15}
+                                value={editForm.consensus_quorum}
+                                onChange={(e) => setEditForm({ ...editForm, consensus_quorum: e.target.value })}
+                                className="input"
+                                style={{ width: '100%', marginTop: '0.2rem' }}
+                              />
+                            </label>
+                            <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              Coverage %
+                              <input
+                                type="number" min="0" max="100"
+                                value={editForm.consensus_coverage_percent}
+                                onChange={(e) => setEditForm({ ...editForm, consensus_coverage_percent: e.target.value })}
+                                className="input"
+                                style={{ width: '100%', marginTop: '0.2rem' }}
+                              />
+                            </label>
+                          </div>
+                          {project.task_type !== 'classification' && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem' }}>
+                              <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                IoU threshold
+                                <input
+                                  type="number" min="0" max="1" step="0.05"
+                                  value={editForm.consensus_iou_threshold}
+                                  onChange={(e) => setEditForm({ ...editForm, consensus_iou_threshold: e.target.value })}
+                                  className="input"
+                                  style={{ width: '100%', marginTop: '0.2rem' }}
+                                />
+                              </label>
+                              <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                Agreement threshold
+                                <input
+                                  type="number" min="0" max="1" step="0.05"
+                                  value={editForm.consensus_agreement_threshold}
+                                  onChange={(e) => setEditForm({ ...editForm, consensus_agreement_threshold: e.target.value })}
+                                  className="input"
+                                  style={{ width: '100%', marginTop: '0.2rem' }}
+                                />
+                              </label>
+                            </div>
+                          )}
+                          {Number(editForm.consensus_panel_size) % 2 === 0 && (
+                            <div style={{ fontSize: '0.72rem', color: '#f59e0b' }}>
+                              Odd panel sizes reduce tied votes.
+                            </div>
+                          )}
+                          <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            Reviewer emails (comma-separated)
+                            <input
+                              type="text"
+                              value={editForm.consensus_reviewer_emails}
+                              onChange={(e) => setEditForm({ ...editForm, consensus_reviewer_emails: e.target.value })}
+                              className="input"
+                              placeholder="reviewer@example.com"
+                              style={{ width: '100%', marginTop: '0.2rem' }}
+                            />
+                          </label>
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
                 <span style={{ color: 'var(--text-muted)' }}>Version</span>
                 <span style={{ color: 'var(--text-muted)' }}>v{project.version || 1} (not editable)</span>
               </div>

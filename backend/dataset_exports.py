@@ -13,7 +13,12 @@ from fastapi import HTTPException
 from sqlalchemy import and_
 
 from . import masks as mask_utils
-from .models import Annotation, ProjectSample
+from .models import (
+    Annotation,
+    ConsensusCase,
+    ConsensusResolution,
+    ProjectSample,
+)
 from .uc_tables import attach_labeled_delta_table, normalize_image_path
 
 log = logging.getLogger(__name__)
@@ -72,12 +77,15 @@ def _is_source_image_path(path, source_volume, source_type="volume"):
 def huggingface_loading_code(export_path):
     return f'''import json
 from pathlib import Path
-from datasets import ClassLabel, Image, load_dataset
+from datasets import ClassLabel, Image, Sequence, load_dataset
 
 export_dir = Path({export_path!r})
 classes = json.loads((export_dir / "classes.json").read_text())
 dataset = load_dataset("json", data_files=str(export_dir / "train.jsonl"), split="train")
-dataset = dataset.cast_column("label", ClassLabel(names=classes["names"]))
+if "labels" in dataset.column_names:
+    dataset = dataset.cast_column("labels", Sequence(ClassLabel(names=classes["names"])))
+else:
+    dataset = dataset.cast_column("label", ClassLabel(names=classes["names"]))
 dataset = dataset.cast_column("image", Image())
 '''
 
@@ -188,6 +196,44 @@ def _publish_artifacts(workspace, export_dir, artifacts):
         raise HTTPException(502, "Could not finish writing the dataset. Check export Volume permissions and retry.") from exc
 
 
+def consensus_metadata_by_sample(db, project):
+    """Resolved consensus metadata keyed by sample id."""
+    if not getattr(project, "consensus_enabled", False):
+        return {}
+    rows = (
+        db.query(
+            ConsensusCase.sample_id,
+            ConsensusResolution.agreement_score,
+            ConsensusResolution.vote_count,
+            ConsensusResolution.method,
+            ConsensusResolution.resolver,
+            ConsensusResolution.match_report,
+        )
+        .join(
+            ConsensusResolution,
+            ConsensusResolution.id == ConsensusCase.active_resolution_id,
+        )
+        .filter(
+            ConsensusCase.project_id == project.id,
+            ConsensusCase.state == "resolved",
+        )
+        .all()
+    )
+    return {
+        row.sample_id: {
+            "agreement_score": row.agreement_score,
+            "vote_count": row.vote_count,
+            "resolution_method": row.method,
+            "resolver": row.resolver,
+            "object_consensus": list((row.match_report or {}).get("clusters", [])),
+            "conflicts": list((row.match_report or {}).get("conflicts", [])),
+            "iou_threshold": (row.match_report or {}).get("iou_threshold"),
+            "agreement_threshold": (row.match_report or {}).get("agreement_threshold"),
+        }
+        for row in rows
+    }
+
+
 def _export_classification_reference(project, export_path, exported_by, db, workspace, classes):
     label_to_id = {label: index for index, label in enumerate(classes)}
     rows = (
@@ -212,33 +258,52 @@ def _export_classification_reference(project, export_path, exported_by, db, work
     invalid = set()
     annotation_ids = []
     for row in rows:
-        if row.id in records or row.annotation_id is None or row.ann_type != "classification" or row.label not in label_to_id:
+        if row.annotation_id is None or row.ann_type != "classification" or row.label not in label_to_id:
             invalid.add(row.id)
         if not _is_source_image_path(
             row.filepath, project.source_volume,
             getattr(project, "source_type", None) or "volume",
         ):
             invalid.add(row.id)
-        records[row.id] = {
+        record = records.setdefault(row.id, {
             "sample_id": row.id,
             "image": row.filepath,
-            "label": label_to_id.get(row.label),
-        }
+            "labels": [],
+        })
+        if row.label in label_to_id:
+            label_id = label_to_id[row.label]
+            if label_id in record["labels"]:
+                invalid.add(row.id)
+            record["labels"].append(label_id)
         if row.annotation_id is not None:
             annotation_ids.append(row.annotation_id)
+    resolution_meta = consensus_metadata_by_sample(db, project)
+    for sample_id, record in records.items():
+        record["labels"] = sorted(set(record["labels"]))
+        if not record["labels"]:
+            invalid.add(sample_id)
+        if len(record["labels"]) == 1:
+            record["label"] = record["labels"][0]
+            record.pop("labels")
+        if getattr(project, "consensus_enabled", False):
+            if sample_id not in resolution_meta:
+                invalid.add(sample_id)
+            else:
+                record.update(resolution_meta[sample_id])
     if invalid:
         raise HTTPException(422, {
             "message": f"Cannot prepare dataset: {len(invalid)} labeled samples need attention. "
-                       "Each needs one confirmed classification label from the project classes "
+                       "Each needs confirmed classification labels from the project classes "
                        "and a UC Volume image path. "
                        f"Sample IDs: {', '.join(map(str, sorted(invalid)[:10]))}.",
             "invalid_sample_count": len(invalid),
         })
 
     export_dir, metadata = _snapshot_context(
-        project, export_path, exported_by, len(records), len(records),
+        project, export_path, exported_by, len(records), len(annotation_ids),
         list(records), annotation_ids, CLASSIFICATION_REFERENCE_FORMAT,
     )
+    metadata["consensus_enabled"] = bool(getattr(project, "consensus_enabled", False))
     _publish_artifacts(workspace, export_dir, [
         ("train.jsonl", "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records.values())),
         ("classes.json", json.dumps({"names": classes, "label2id": label_to_id}, ensure_ascii=False, indent=2)),
@@ -248,9 +313,14 @@ def _export_classification_reference(project, export_path, exported_by, db, work
         {
             "image_path": normalize_image_path(record["image"]),
             "annotations": [{
-                "label": classes[record["label"]],
+                "label": classes[label_id],
                 "ann_type": "classification",
-            }],
+            } for label_id in (record.get("labels") or [record.get("label")])],
+            **({
+                "agreement_score": record.get("agreement_score"),
+                "vote_count": record.get("vote_count"),
+                "resolution_method": record.get("resolution_method"),
+            } if getattr(project, "consensus_enabled", False) else {}),
         }
         for record in records.values()
     ]
@@ -268,7 +338,7 @@ def _export_classification_reference(project, export_path, exported_by, db, work
         "export_path": export_dir,
         "format": CLASSIFICATION_REFERENCE_FORMAT,
         "images": len(records),
-        "annotations": len(records),
+        "annotations": len(annotation_ids),
         "exported_at": metadata["exported_at"],
         "version": metadata["version"],
         "snapshot_id": metadata["snapshot_id"],
@@ -284,7 +354,7 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
     # training adapters reserve 0 for background even though pycocotools can
     # index arbitrary integers.
     class_to_id = {label: index for index, label in enumerate(classes, start=1)}
-    rows = (
+    rows_query = (
         db.query(
             ProjectSample.id,
             ProjectSample.filepath,
@@ -300,9 +370,16 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
             Annotation.is_draft.is_(False),
         ))
         .filter(ProjectSample.project_id == project.id, ProjectSample.status == "labeled")
-        .order_by(ProjectSample.id, Annotation.id)
-        .all()
     )
+    if getattr(project, "consensus_enabled", False):
+        rows_query = rows_query.join(
+            ConsensusCase,
+            ConsensusCase.sample_id == ProjectSample.id,
+        ).filter(
+            ConsensusCase.project_id == project.id,
+            ConsensusCase.state == "resolved",
+        )
+    rows = rows_query.order_by(ProjectSample.id, Annotation.id).all()
     if not rows:
         raise HTTPException(400, "No labeled samples to prepare. Confirm boxes first.")
 
@@ -378,10 +455,21 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
     )
     metadata["bbox_format"] = "relative_xywh"
     metadata["requires_dimension_materialization"] = True
-    _publish_artifacts(workspace, export_dir, [
+    metadata["consensus_enabled"] = bool(getattr(project, "consensus_enabled", False))
+    resolution_meta = consensus_metadata_by_sample(db, project)
+    artifacts = [
         ("annotations.json", json.dumps(coco, ensure_ascii=False, separators=(",", ":"), allow_nan=False)),
         ("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2)),
-    ])
+    ]
+    if resolution_meta:
+        artifacts.append((
+            "consensus.jsonl",
+            "".join(
+                json.dumps({"sample_id": sample_id, **values}, ensure_ascii=False) + "\n"
+                for sample_id, values in sorted(resolution_meta.items())
+            ),
+        ))
+    _publish_artifacts(workspace, export_dir, artifacts)
     categories = {item["id"]: item["name"] for item in coco["categories"]}
     lineage_by_image = {
         image["id"]: {
@@ -396,6 +484,9 @@ def _export_detection_reference(project, export_path, exported_by, db, workspace
             "ann_type": "mask" if "segmentation" in annotation else "bbox",
             "bbox": annotation.get("bbox_normalized"),
         })
+    if getattr(project, "consensus_enabled", False):
+        for sample_id, row in lineage_by_image.items():
+            row.update(resolution_meta.get(sample_id, {}))
     labeled_table = attach_labeled_delta_table(
         project, export_dir, list(lineage_by_image.values()), workspace, metadata,
     )

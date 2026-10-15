@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0-beta.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "test:payload": "node test/annotationPayload.test.mjs",
     "test:gallery": "node --test test/galleryState.test.mjs",
-    "test": "npm run test:rle && npm run test:payload && npm run test:gallery"
+    "test:consensus": "node --test test/consensus.test.mjs",
+    "test": "npm run test:rle && npm run test:payload && npm run test:gallery && npm run test:consensus"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.0",

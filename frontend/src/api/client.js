@@ -63,6 +63,47 @@ export const fetchNextSample = (projectId) =>
   api.get(`/projects/${projectId}/next`).then(r => r.data);
 
 // ---------------------------------------------------------------------------
+// Blind classification consensus
+// ---------------------------------------------------------------------------
+export const claimNextConsensusTask = (projectId) =>
+  api.post(`/projects/${projectId}/consensus/tasks/next`).then(r => r.data);
+
+export const claimConsensusSample = (projectId, sampleId) =>
+  api.post(`/projects/${projectId}/consensus/samples/${sampleId}/claim`).then(r => r.data);
+
+export const heartbeatConsensusTask = (projectId, taskId, lockToken) =>
+  api.post(`/projects/${projectId}/consensus/tasks/${taskId}/heartbeat`, {
+    lock_token: lockToken,
+  }).then(r => r.data);
+
+export const releaseConsensusTask = (projectId, taskId, lockToken) =>
+  api.post(`/projects/${projectId}/consensus/tasks/${taskId}/release`, {
+    lock_token: lockToken,
+  }).then(r => r.data);
+
+export const submitConsensusTask = (projectId, taskId, lockToken, annotations, allowEmpty = false) =>
+  api.post(`/projects/${projectId}/consensus/tasks/${taskId}/submit`, {
+    lock_token: lockToken,
+    annotations,
+    allow_empty: allowEmpty,
+  }).then(r => r.data);
+
+export const fetchConsensusProgress = (projectId) =>
+  api.get(`/projects/${projectId}/consensus/progress`).then(r => r.data);
+
+export const fetchConsensusReviewQueue = (projectId, params = {}) =>
+  api.get(`/projects/${projectId}/consensus/review`, { params }).then(r => r.data);
+
+export const fetchConsensusReviewCase = (projectId, caseId) =>
+  api.get(`/projects/${projectId}/consensus/review/${caseId}`).then(r => r.data);
+
+export const resolveConsensusReview = (projectId, caseId, data) =>
+  api.post(`/projects/${projectId}/consensus/review/${caseId}`, data).then(r => r.data);
+
+export const fetchConsensusMetrics = (projectId) =>
+  api.get(`/projects/${projectId}/consensus/metrics`).then(r => r.data);
+
+// ---------------------------------------------------------------------------
 // Annotations / Labeling
 // ---------------------------------------------------------------------------
 export const annotateSample = (projectId, sampleId, data) =>

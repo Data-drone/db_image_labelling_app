@@ -246,6 +246,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   onMaskSelected,
   onNeedLayer,
   onHistoryChange,
+  readOnly = false,
 }, ref) {
   const containerRef = useRef(null);
   const imageCanvasRef = useRef(null);   // photo, CSS-filtered
@@ -277,7 +278,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   const panRef = useRef(null);
 
   const activeMask = masks.find((m) => String(m.id) === String(activeMaskId)) || null;
-  const activeColor = getClassColor(activeMask ? activeMask.classIndex : activeClassIndex);
+  const activeColor = activeMask?.color || getClassColor(activeMask ? activeMask.classIndex : activeClassIndex);
 
   // Mirrored so the commit path can run from an effect without re-creating
   // itself (and the stroke handlers) every time the parent re-renders.
@@ -678,7 +679,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
           // provisional, matching the dashed borders BBoxCanvas uses.
           canvas = overlayCanvasFor(
             decodeMask(read.counts, dims.w, dims.h), dims.w, dims.h,
-            getClassColor(m.classIndex), m.isDraft ? 70 : 110,
+            m.color || getClassColor(m.classIndex), m.isDraft ? 70 : 110,
           );
         }
       }
@@ -926,6 +927,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       e.preventDefault();
       return;
     }
+    if (readOnly) return;
     if (e.button !== 0) return;
     if (!activeMaskId || !bufRef.current) {
       if (onNeedLayer) onNeedLayer();
@@ -1083,7 +1085,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
         onPointerCancel={endStroke}
         onPointerLeave={handlePointerLeave}
         onDoubleClick={(e) => {
-          if (tool !== 'polygon') return;
+          if (readOnly || tool !== 'polygon') return;
           e.preventDefault();
           // The two pointerdowns behind a double click already pushed two
           // vertices in the same spot; drop the duplicate before closing.
