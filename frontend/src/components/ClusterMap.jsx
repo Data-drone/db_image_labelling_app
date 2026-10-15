@@ -49,10 +49,18 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
   // Zoom/pan state: view transform
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
-  const isPanning = useRef(false);
+  const [viewPoints, setViewPoints] = useState(points);
+  const [isPanning, setIsPanning] = useState(false);
+  const isPanningRef = useRef(false);
   const panStart = useRef({ x: 0, y: 0 });
   const panOffsetStart = useRef({ x: 0, y: 0 });
   const didPan = useRef(false);
+
+  if (points !== viewPoints) {
+    setViewPoints(points);
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+  }
 
   const labelColorMap = useMemo(() => buildLabelColorMap(points), [points]);
   const allLabels = useMemo(() => Object.keys(labelColorMap).sort(), [labelColorMap]);
@@ -71,12 +79,6 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
     obs.observe(container);
     return () => obs.disconnect();
   }, []);
-
-  // Reset zoom/pan when points change
-  useEffect(() => {
-    setZoom(1);
-    setPanOffset({ x: 0, y: 0 });
-  }, [points]);
 
   const getColor = useCallback((point) => {
     if (colorBy === 'label') {
@@ -173,7 +175,8 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
 
   const handleMouseDown = useCallback((e) => {
     if (e.button !== 0) return;
-    isPanning.current = true;
+    isPanningRef.current = true;
+    setIsPanning(true);
     didPan.current = false;
     panStart.current = { x: e.clientX, y: e.clientY };
     panOffsetStart.current = { ...panOffset };
@@ -183,7 +186,7 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    if (isPanning.current) {
+    if (isPanningRef.current) {
       const dx = e.clientX - panStart.current.x;
       const dy = e.clientY - panStart.current.y;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
@@ -223,7 +226,8 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
   }, [points, scaleX, scaleY, zoom]);
 
   const handleMouseUp = useCallback(() => {
-    isPanning.current = false;
+    isPanningRef.current = false;
+    setIsPanning(false);
   }, []);
 
   const handleClick = useCallback(() => {
@@ -323,10 +327,14 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={() => { setHovered(null); isPanning.current = false; }}
+          onMouseLeave={() => {
+            setHovered(null);
+            isPanningRef.current = false;
+            setIsPanning(false);
+          }}
           onClick={handleClick}
           style={{
-            cursor: isPanning.current ? 'grabbing' : hovered ? 'pointer' : 'grab',
+            cursor: isPanning ? 'grabbing' : hovered ? 'pointer' : 'grab',
             display: 'block',
           }}
         />
@@ -344,7 +352,7 @@ export default function ClusterMap({ projectId, points, onForceRefresh, refreshi
         )}
 
         {/* Tooltip */}
-        {hovered && !isPanning.current && (
+        {hovered && !isPanning && (
           <div style={{
             position: 'fixed',
             left: tooltipPos.x + 12,

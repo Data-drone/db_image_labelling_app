@@ -17,18 +17,10 @@
  */
 
 import { useRef, useState, useEffect, useCallback } from 'react';
-
-const CLASS_COLORS = [
-  '#4299e0', '#e05252', '#52e088', '#e0c452',
-  '#b452e0', '#52d4e0', '#e08a52', '#e052b4',
-];
+import { getClassColor } from '../utils/classColors';
 
 const HANDLE_SIZE = 8;
 const MIN_BOX_PX = 5;
-
-export function getClassColor(classIndex) {
-  return CLASS_COLORS[(classIndex >= 0 ? classIndex : 0) % CLASS_COLORS.length];
-}
 
 export default function BBoxCanvas({
   imageSrc,
@@ -45,8 +37,9 @@ export default function BBoxCanvas({
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
-  const imgRef = useRef(new Image());
-  const [imgLoaded, setImgLoaded] = useState(false);
+  const imgRef = useRef(null);
+  const [loadedSrc, setLoadedSrc] = useState(null);
+  const imgLoaded = loadedSrc === imageSrc;
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
   const [imageRect, setImageRect] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const [drawPreview, setDrawPreview] = useState(null); // {startCx, startCy, cx, cy}
@@ -54,14 +47,21 @@ export default function BBoxCanvas({
   // Drag state (not in React state — updated on every mousemove)
   const dragRef = useRef(null);
 
-  // Load image
+  // Load image. Whether the current src is ready is derived from loadedSrc so
+  // changing imageSrc does not need a synchronous setState in this effect.
   useEffect(() => {
-    setImgLoaded(false);
-    const img = imgRef.current;
+    const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => setImgLoaded(true);
+    img.onload = () => {
+      imgRef.current = img;
+      setLoadedSrc(imageSrc);
+    };
     img.onerror = () => console.error('BBoxCanvas: failed to load image');
     img.src = imageSrc;
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
   }, [imageSrc]);
 
   // Resize observer
@@ -107,7 +107,7 @@ export default function BBoxCanvas({
   // ---------- Rendering ----------
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !imgLoaded) return;
+    if (!canvas || !imgLoaded || !imgRef.current) return;
     const ctx = canvas.getContext('2d');
     canvas.width = canvasSize.w;
     canvas.height = canvasSize.h;

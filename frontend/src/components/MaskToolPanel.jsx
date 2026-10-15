@@ -7,7 +7,7 @@
  * page unreadable. Styling deliberately mirrors the detection branch.
  */
 
-import { getClassColor } from './BBoxCanvas';
+import { getClassColor } from '../utils/classColors';
 import ImageAdjust from './ImageAdjust';
 import { maskArea, readMask } from '../utils/rle';
 
