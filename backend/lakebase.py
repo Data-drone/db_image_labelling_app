@@ -81,10 +81,27 @@ def ensure_lakebase_project():
     return project
 
 
-def get_endpoint(project):
-    """Find the read-write endpoint for the project via branches."""
+def get_endpoint(project, endpoint_name: str = None):
+    """Return a configured endpoint or discover the project's read-write one."""
     from databricks.sdk.service.postgres import EndpointType
     w = _get_workspace_client()
+
+    configured_name = (
+        endpoint_name or os.environ.get("LAKEBASE_ENDPOINT", "")
+    ).strip()
+    if configured_name:
+        expected_prefix = f"{project.name}/branches/"
+        if not configured_name.startswith(expected_prefix):
+            raise RuntimeError(
+                f"Configured Lakebase endpoint '{configured_name}' does not "
+                f"belong to project '{project.name}'."
+            )
+        return w.postgres.get_endpoint(name=configured_name)
+
+    if not LAKEBASE_AUTO_PROVISION:
+        raise RuntimeError(
+            "LAKEBASE_ENDPOINT is required when LAKEBASE_AUTO_PROVISION=false."
+        )
 
     branches = list(w.postgres.list_branches(parent=project.name))
     if not branches:

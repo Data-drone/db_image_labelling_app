@@ -129,7 +129,7 @@ See the [Databricks Apps → Lakebase resources documentation](https://docs.data
 This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and API routes so large pre-label batches run on a cluster instead of inside the app HTTP worker.
 
 1. From the repo root: `databricks bundle deploy` (with a configured profile).
-2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). The job cluster still needs Lakebase SDK env (`LAKEBASE_AUTO_PROVISION=false`, `LAKEBASE_PROJECT_ID`) set in `resources/preannotate_job.job.yml`.
+2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). Bundle job parameters inject the exact Lakebase project, endpoint, PostgreSQL database, and inference adapter before the worker imports the backend.
 
 The dashboard shows **Pre-label (job)** when the job id resolves. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
 
