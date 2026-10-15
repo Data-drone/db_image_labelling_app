@@ -39,6 +39,8 @@ resources:
             value_from: app-finetune-job
           - name: SQL_WAREHOUSE_ID
             value_from: sql-warehouse
+          - name: ADMIN_EMAILS
+            value: ${var.admin_emails}
       resources:
         - name: lakebase-db
           postgres:

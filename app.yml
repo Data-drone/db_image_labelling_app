@@ -23,3 +23,6 @@ env:
   # Finetuning job id
   - name: FINETUNE_DATABRICKS_JOB_ID
     value: '143235656478173'
+  # Comma-separated Databricks IdP emails. Empty disables Admin mutations.
+  - name: ADMIN_EMAILS
+    value: ''
