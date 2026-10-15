@@ -1085,15 +1085,17 @@ export default function ProjectDashboard() {
 
               {endpointStatus?.status === 'ready' && eligibleCount > 0 ? (
                 <>
-                  <input
-                    type="text"
-                    value={preAnnotatePrompt}
-                    onChange={(e) => setPreAnnotatePrompt(e.target.value)}
-                    placeholder={project.class_list?.join('. ') || 'Detection prompt…'}
-                    className="input"
-                    style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', width: '100%', marginBottom: '0.5rem' }}
-                    title="Text prompt sent to the model. Leave blank to use class list."
-                  />
+                  <div style={{ minHeight: '2.125rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      value={preAnnotatePrompt}
+                      onChange={(e) => setPreAnnotatePrompt(e.target.value)}
+                      placeholder={project.class_list?.join('. ') || 'Detection prompt…'}
+                      className="input"
+                      style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', width: '100%' }}
+                      title="Text prompt sent to the model. Leave blank to use class list."
+                    />
+                  </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <button
                       className="btn-primary"
@@ -1189,11 +1191,13 @@ export default function ProjectDashboard() {
 
               {stats.total > 0 ? (
                 <>
-                  {stats.embedded > 0 && stats.total > 0 && (
-                    <div className="progress-bar" style={{ height: 4, marginBottom: '0.5rem' }}>
-                      <div className="progress-fill" style={{ width: `${(stats.embedded / stats.total) * 100}%`, background: '#60a5fa' }} />
-                    </div>
-                  )}
+                  <div style={{ minHeight: '2.125rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center' }}>
+                    {stats.embedded > 0 && stats.total > 0 && (
+                      <div className="progress-bar" style={{ height: 4, width: '100%' }}>
+                        <div className="progress-fill" style={{ width: `${(stats.embedded / stats.total) * 100}%`, background: '#60a5fa' }} />
+                      </div>
+                    )}
+                  </div>
                   <button
                     className="btn-primary"
                     onClick={handleGenerateEmbeddings}
