@@ -33,6 +33,10 @@ def sqlite_app(tmp_dir: Path):
     try:
         import backend.main as main_mod  # noqa: WPS433
         importlib.reload(main_mod)
+        # Local import paths are available only inside this in-process test
+        # application. A caller-supplied HTTP header cannot enable them in a
+        # deployed app.
+        main_mod.app.state._allow_local_import_paths_for_tests = True
         yield main_mod
     finally:
         if prev_use_lakebase is None:

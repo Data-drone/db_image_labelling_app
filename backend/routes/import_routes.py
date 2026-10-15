@@ -61,9 +61,8 @@ def _validate_volume_path(path: str, allow_local: bool) -> None:
     Default policy: must be a canonical ``/Volumes/...`` path with no
     ``..`` segments, no empty segments, and no backslashes.
 
-    The test-only ``X-Test-Allow-Local-Path`` header sets
-    ``allow_local=True`` so the pytest suite can exercise the endpoint
-    against a local-filesystem stand-in. Production never sets it.
+    The test harness can opt into local paths through private application
+    state. The request header alone never enables local filesystem access.
     """
     if not isinstance(path, str) or not path:
         _bad_request("volume_path is required")
@@ -153,7 +152,12 @@ def import_annotations(
     db: Session = Depends(get_db),
 ):
     # --- Path validation (Critical #2) ----------------------------------
-    allow_local = request.headers.get("X-Test-Allow-Local-Path") == "1"
+    test_mode = bool(
+        getattr(request.app.state, "_allow_local_import_paths_for_tests", False)
+    )
+    allow_local = (
+        test_mode and request.headers.get("X-Test-Allow-Local-Path") == "1"
+    )
     _validate_volume_path(payload.volume_path, allow_local=allow_local)
 
     # --- Project ---
