@@ -51,7 +51,9 @@ The app **must** listen on `DATABRICKS_APP_PORT`. The runtime also auto-sets `UV
 
 - The app's **service principal** credentials are injected as `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`. The `WorkspaceClient()` picks these up automatically — never hardcode tokens.
 - **User identity** comes from reverse-proxy headers: `X-Forwarded-Email`, `X-Forwarded-User`. See `deps.get_user_email()`. These headers do NOT exist in local dev — the app falls back to `"anonymous"`.
-- There are **no in-app roles or permissions** — anyone with access to the Databricks App can do everything.
+- Project browsing and annotation are available to anyone with App access.
+  Destructive Admin mutations require the caller's email in `ADMIN_EMAILS`;
+  an empty allowlist disables those operations.
 
 ### Resources (UC Volumes, Lakebase)
 

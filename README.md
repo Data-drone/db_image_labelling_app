@@ -100,6 +100,7 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
 | `LAKEBASE_ENDPOINT` | _(from `valueFrom: lakebase-db`)_ | Postgres endpoint resource path. **Not auto-injected** — must be bound in the bundle / `app.yml`. |
 | `PGHOST`, `PGUSER`, `PGDATABASE`, `PGPORT`, `PGSSLMODE` | _(platform)_ | Injected when a Lakebase **postgres** resource is attached. Password is an OAuth token, not `PGPASSWORD`. |
+| `ADMIN_EMAILS` | _(empty)_ | Comma-separated Databricks user emails allowed to provision, reconnect, reset, or test Admin resources. Empty disables all Admin mutations. |
 
 ## Using with Databricks Asset Bundles
 
