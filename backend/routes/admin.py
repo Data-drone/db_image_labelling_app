@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from sqlalchemy.orm import sessionmaker
 
-from ..deps import get_engine, get_session_factory, get_user_email
+from ..deps import get_engine, get_session_factory
 from ..models import Base, LabelingProject, ProjectSample, Annotation, init_db
 from ..volumes import _get_workspace_client
 
@@ -28,15 +28,21 @@ def _admin_emails() -> set[str]:
 
 def _is_admin(request: Request) -> bool:
     allowed = _admin_emails()
-    return bool(allowed) and get_user_email(request).strip().lower() in allowed
+    email = request.headers.get("X-Forwarded-Email", "").strip().lower()
+    return bool(allowed) and bool(email) and email in allowed
 
 
 def _require_admin(request: Request) -> str:
-    email = get_user_email(request).strip().lower()
+    email = request.headers.get("X-Forwarded-Email", "").strip().lower()
     if not _admin_emails():
         raise HTTPException(
             status_code=403,
             detail="Admin mutations are disabled. Configure ADMIN_EMAILS to enable them.",
+        )
+    if not email:
+        raise HTTPException(
+            status_code=403,
+            detail="Databricks Apps user email is required for Admin access.",
         )
     if not _is_admin(request):
         raise HTTPException(status_code=403, detail="Admin access required.")

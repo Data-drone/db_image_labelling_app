@@ -54,6 +54,9 @@ The app **must** listen on `DATABRICKS_APP_PORT`. The runtime also auto-sets `UV
 - Project browsing and annotation are available to anyone with App access.
   Destructive Admin mutations require the caller's email in `ADMIN_EMAILS`;
   an empty allowlist disables those operations.
+- `ADMIN_EMAILS` authorizes who may invoke those routes; the underlying
+  Lakebase, UC, serving, and Job calls still run as the App service principal
+  and remain limited by its declared App-resource permissions.
 
 ### Resources (UC Volumes, Lakebase)
 

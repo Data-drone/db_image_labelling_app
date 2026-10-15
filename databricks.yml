@@ -35,6 +35,10 @@ variables:
     default: "318435402424260"
   app_name:
     default: cv-explorer-dev
+  # Comma-separated Databricks IdP emails allowed to invoke destructive Admin
+  # operations. Empty is fail-closed.
+  admin_emails:
+    default: ""
   # SQL warehouse the app uses to SELECT image_path from UC tables. Empty skips
   # table-backed project create until set (Apps UI or this variable).
   sql_warehouse_id:

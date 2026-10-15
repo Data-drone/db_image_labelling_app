@@ -47,6 +47,16 @@ class TestAdminAuthorization(unittest.TestCase):
                         self.assertEqual(response.status_code, 403)
                         self.assertIn("admin access", response.json()["detail"].lower())
 
+    def test_user_identifier_is_not_accepted_as_email(self):
+        with patch.dict("os.environ", {"ADMIN_EMAILS": "admin@databricks.com"}):
+            with self._client() as (client, _main, _tmp):
+                response = client.post(
+                    "/api/admin/reset-database",
+                    headers={"X-Forwarded-User": "admin@databricks.com"},
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertIn("email is required", response.json()["detail"].lower())
+
     def test_status_reports_case_insensitive_admin_match(self):
         with patch.dict(
             "os.environ",
