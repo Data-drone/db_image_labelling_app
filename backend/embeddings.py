@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_ENDPOINT = "cv-dinov3-cv_manufacturing"
 PREFETCH_WORKERS = 8
 
 
@@ -25,7 +24,7 @@ def resolve_embedding_endpoint(project: Any) -> Optional[str]:
     name = cfg.get("embedding_endpoint")
     if name:
         return name
-    return os.environ.get("EMBEDDING_ENDPOINT", DEFAULT_EMBEDDING_ENDPOINT)
+    return os.environ.get("EMBEDDING_ENDPOINT") or None
 
 
 def _uses_pgvector(db: Session) -> bool:
