@@ -5,9 +5,9 @@ Uses SQLite backend and local-filesystem stand-ins for UC Volumes.
 Uses stdlib ``unittest`` (pytest not guaranteed in the container).
 
 The endpoint normally requires ``volume_path`` to start with ``/Volumes/``.
-Tests use the test-only ``X-Test-Allow-Local-Path: 1`` header to exercise
-the happy path against a local ``tmp_path`` directory. Production never
-sets that header.
+Tests use private application state plus ``X-Test-Allow-Local-Path: 1`` to
+exercise the happy path against a local ``tmp_path`` directory. The header
+alone cannot enable local filesystem access.
 """
 import json
 import tempfile
@@ -97,6 +97,20 @@ class TestImportPathValidation(unittest.TestCase):
                 "volume" in detail or "path" in detail,
                 f"unexpected detail: {r.json()['detail']}",
             )
+
+    def test_header_alone_cannot_enable_local_paths(self):
+        with _client() as (c, tmp):
+            vol = make_sample_volume(tmp)
+            pid = _create_project(c, vol)
+            labels = tmp / "labels.jsonl"
+            _write_jsonl(labels, [])
+            c.app.state._allow_local_import_paths_for_tests = False
+            r = c.post(
+                f"/api/projects/{pid}/import",
+                json={"volume_path": str(labels), "format": "jsonl"},
+                headers=BYPASS_HDR,
+            )
+            self.assertEqual(r.status_code, 400)
 
     def test_rejects_path_traversal(self):
         with _client() as (c, tmp):
