@@ -20,9 +20,11 @@ env:
   # Leave empty until a warehouse id is bound in the Apps UI or bundle.
   - name: SQL_WAREHOUSE_ID
     value: ''
+  - name: EMBEDDING_ENDPOINT
+    valueFrom: embedding-endpoint
   # Finetuning job id
   - name: FINETUNE_DATABRICKS_JOB_ID
     value: '143235656478173'
-  # Comma-separated Databricks IdP emails. Empty disables Admin mutations.
+  # Comma-separated Databricks IdP emails. Sentinel disables Admin mutations.
   - name: ADMIN_EMAILS
-    value: ''
+    value: '__disabled__'

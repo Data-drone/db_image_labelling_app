@@ -95,12 +95,13 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `DATABRICKS_APP_PORT` | `8000` | Port for the FastAPI server |
 | `DEMO_VOLUME_PATH` | _(from `valueFrom: demo-volume`)_ | UC volume path injected from the **demo-volume** App resource (`app.yml`). |
 | `SERVING_ENDPOINT` | _(from `valueFrom: serving-endpoint`)_ | Serving endpoint name from the **serving-endpoint** resource. |
+| `EMBEDDING_ENDPOINT` | _(from `valueFrom: embedding-endpoint`)_ | Image embedding endpoint from the **embedding-endpoint** resource. There is no workspace-specific code fallback. |
 | `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
 | `LAKEBASE_AUTO_PROVISION` | `false` (bundle app) | With a **postgres** App resource, use `false` and connect via injected `PG*` variables (no SDK project creation on app startup). |
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
 | `LAKEBASE_ENDPOINT` | _(from `valueFrom: lakebase-db`)_ | Postgres endpoint resource path. **Not auto-injected** — must be bound in the bundle / `app.yml`. |
 | `PGHOST`, `PGUSER`, `PGDATABASE`, `PGPORT`, `PGSSLMODE` | _(platform)_ | Injected when a Lakebase **postgres** resource is attached. Password is an OAuth token, not `PGPASSWORD`. |
-| `ADMIN_EMAILS` | _(empty)_ | Comma-separated Databricks IdP emails allowed to provision, reconnect, reset, or test Admin resources. The Apps proxy supplies `X-Forwarded-Email`; the operations still execute with the App service principal and its declared resource permissions. Empty disables all Admin mutations. |
+| `ADMIN_EMAILS` | `__disabled__` (bundle) | Comma-separated Databricks IdP emails allowed to provision, reconnect, reset, or test Admin resources. The Apps proxy supplies `X-Forwarded-Email`; the operations still execute with the App service principal and its declared resource permissions. The non-email default disables all Admin mutations. |
 
 ## Using with Databricks Asset Bundles
 

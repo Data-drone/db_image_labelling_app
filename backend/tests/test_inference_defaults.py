@@ -4,7 +4,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from backend.embeddings import resolve_embedding_endpoint
 from backend.tests.conftest import test_client
 
 
@@ -32,3 +35,27 @@ class TestInferenceDefaults(unittest.TestCase):
                 os.environ.pop("SERVING_ENDPOINT", None)
             else:
                 os.environ["SERVING_ENDPOINT"] = prev
+
+    def test_embedding_endpoint_has_no_workspace_specific_fallback(self):
+        project = SimpleNamespace(endpoint_config={})
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(resolve_embedding_endpoint(project))
+            os.environ["EMBEDDING_ENDPOINT"] = "bound-embedding-endpoint"
+            self.assertEqual(
+                resolve_embedding_endpoint(project),
+                "bound-embedding-endpoint",
+            )
+
+    def test_project_embedding_endpoint_overrides_app_binding(self):
+        project = SimpleNamespace(
+            endpoint_config={"embedding_endpoint": "project-endpoint"}
+        )
+        with patch.dict(
+            os.environ,
+            {"EMBEDDING_ENDPOINT": "bound-embedding-endpoint"},
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_embedding_endpoint(project),
+                "project-endpoint",
+            )
