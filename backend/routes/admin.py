@@ -5,11 +5,11 @@ Admin routes — database status, Lakebase provisioning.
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from sqlalchemy.orm import sessionmaker
 
-from ..deps import get_engine, get_session_factory
+from ..deps import get_engine, get_session_factory, get_user_email
 from ..models import Base, LabelingProject, ProjectSample, Annotation, init_db
 from ..volumes import _get_workspace_client
 
@@ -18,8 +18,33 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def _admin_emails() -> set[str]:
+    return {
+        email.strip().lower()
+        for email in os.environ.get("ADMIN_EMAILS", "").split(",")
+        if email.strip()
+    }
+
+
+def _is_admin(request: Request) -> bool:
+    allowed = _admin_emails()
+    return bool(allowed) and get_user_email(request).strip().lower() in allowed
+
+
+def _require_admin(request: Request) -> str:
+    email = get_user_email(request).strip().lower()
+    if not _admin_emails():
+        raise HTTPException(
+            status_code=403,
+            detail="Admin mutations are disabled. Configure ADMIN_EMAILS to enable them.",
+        )
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return email
+
+
 @router.get("/db-status")
-def admin_db_status():
+def admin_db_status(request: Request):
     """Return current database backend info."""
     engine = get_engine()
     engine_url = str(engine.url) if engine else "none"
@@ -35,6 +60,7 @@ def admin_db_status():
     result = {
         "backend": "sqlite" if is_sqlite else ("lakebase" if is_lakebase else "postgresql"),
         "connected": engine is not None,
+        "admin_mutations_enabled": _is_admin(request),
     }
 
     if is_sqlite:
@@ -103,8 +129,9 @@ def admin_lakebase_project_detail(project_id: str):
 
 
 @router.post("/provision-lakebase")
-def admin_provision_lakebase(body: dict):
+def admin_provision_lakebase(body: dict, request: Request):
     """Provision a new Lakebase project or connect to an existing one."""
+    _require_admin(request)
     project_id = (body.get("project_id") or "cv-explorer").strip()
     display_name = (body.get("display_name") or "CV Explorer").strip()
 
@@ -138,8 +165,9 @@ def admin_provision_lakebase(body: dict):
 
 
 @router.post("/reset-database")
-def admin_reset_database():
+def admin_reset_database(request: Request):
     """Drop all tables and recreate them (destructive — dev/test only)."""
+    _require_admin(request)
     engine = get_engine()
     if engine is None:
         raise HTTPException(status_code=500, detail="No database engine available")
@@ -151,8 +179,9 @@ def admin_reset_database():
 
 
 @router.post("/connect-lakebase")
-def admin_connect_lakebase(body: dict):
+def admin_connect_lakebase(body: dict, request: Request):
     """Switch the app's database backend to an existing Lakebase project."""
+    _require_admin(request)
     from ..deps import configure_db
 
     project_id = (body.get("project_id") or "").strip()
@@ -213,8 +242,9 @@ def admin_connect_lakebase(body: dict):
 
 
 @router.get("/test-serving")
-def admin_test_serving():
+def admin_test_serving(request: Request):
     """Quick check: send first sample through the model and return the raw response."""
+    _require_admin(request)
     from ..inference import resolve_use_data_plane, predict_sample
     from ..deps import get_db
     import traceback

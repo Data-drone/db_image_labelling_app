@@ -77,6 +77,7 @@ export default function AdminPage() {
   };
 
   if (loading) return <Spinner label="Loading admin status..." />;
+  const canMutate = dbStatus?.admin_mutations_enabled === true;
 
   return (
     <div style={{ maxWidth: 800, margin: '0 auto' }}>
@@ -175,14 +176,16 @@ export default function AdminPage() {
                               {proj.owner && ` · ${proj.owner}`}
                             </div>
                           </div>
-                          <button
-                            className="btn-primary"
-                            onClick={() => handleConnect(projId)}
-                            disabled={connecting === projId}
-                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
-                          >
-                            {connecting === projId ? 'Connecting...' : 'Connect'}
-                          </button>
+                          {canMutate && (
+                            <button
+                              className="btn-primary"
+                              onClick={() => handleConnect(projId)}
+                              disabled={connecting === projId}
+                              style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                            >
+                              {connecting === projId ? 'Connecting...' : 'Connect'}
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -198,6 +201,8 @@ export default function AdminPage() {
               <div style={{ ...infoBox, marginBottom: '1rem' }}>{connectMsg}</div>
             )}
 
+            {canMutate ? (
+              <>
             {/* Provision new */}
             <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-secondary)' }}>
               Create New Lakebase Project
@@ -236,6 +241,13 @@ export default function AdminPage() {
             </div>
             {provisionMsg && (
               <div style={infoBox}>{provisionMsg}</div>
+            )}
+              </>
+            ) : (
+              <div style={infoBox}>
+                Database mutation controls are disabled. Add your Databricks email to{' '}
+                <code style={codeStyle}>ADMIN_EMAILS</code> to enable them.
+              </div>
             )}
           </>
         )}
@@ -327,14 +339,6 @@ const projectRow = {
   background: 'var(--bg-secondary)',
   borderRadius: 8,
   border: '1px solid var(--border-color)',
-};
-
-const badgeStyle = {
-  padding: '0.2rem 0.6rem',
-  borderRadius: 9999,
-  fontSize: '0.7rem',
-  fontWeight: 600,
-  whiteSpace: 'nowrap',
 };
 
 const warningBox = {
