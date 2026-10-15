@@ -11,43 +11,48 @@ configured separately in the workspace.
 
 ## Features
 
-- **Three labeling modes**: classification, bounding-box detection, and segmentation masks
+- **Three labeling modes**: multi-label classification, bounding-box detection, and segmentation masks with brush, eraser, polygon, undo/redo, zoom/pan, and image adjustments
 - **Volume or Delta-table sources**: scan a UC Volume or query an image-path column through a SQL warehouse
-- **Model-assisted labeling**: synchronous or serverless Job pre-annotation with draft review
-- **Similarity tools**: image embeddings, nearest neighbors, duplicate detection, clustering, and outlier queues
-- **Keyboard-driven labeling**: number keys for class selection with visual flash feedback, arrow keys for navigation
+- **Model-assisted labeling**: synchronous or serverless Job pre-annotation, draft review, bulk draft actions, and label propagation
+- **Similarity and prioritization**: DINO embeddings, nearest neighbors, duplicate detection, cluster maps, outliers, diversity sampling, and active-learning queues
+- **Keyboard-driven workflow**: class hotkeys, navigation, and canvas shortcuts
 - **Sample scrubber**: navigate forward/backward through images, revisit and re-label previous samples
-- **Gallery view**: thumbnail grid with status filters (all/unlabeled/labeled/skipped)
+- **Gallery and progress dashboard**: paginated thumbnails, status/class/filename/labeller filters, per-class and per-user counts, velocity, and completion estimates
+- **Import and audit history**: JSONL/COCO import, correction history, and COCO segmentation/RLE support
 - **Project versioning**: clone projects to create new versions for iterative labeling
-- **Training datasets**: lightweight Hugging Face classification snapshots referencing Volume images; optional CSV/image copies and detection COCO exports
+- **Training workflows**: lightweight classification/detection snapshots, portable copied exports, dataset history, labeled Delta publication for table-backed projects, and Databricks finetuning Job handoff
 - **Lakebase integration**: App-resource OAuth with token refresh, dedicated schema isolation, and optional SDK auto-provisioning
-- **Multi-user support**: user identity via Databricks SSO, per-user labeling stats
+- **Databricks-native resources**: UC Volumes, Lakebase, Model Serving, SQL warehouses, and Jobs declared as App resources
 
-## Demo
+## Current limitations
 
-### Project Creation
-Browse UC Volumes, select a task type, define your class list, and create a labeling project.
+- UC Volume scans inspect only the selected directory; use a Delta-table image source for nested layouts.
+- Collaborative locking is only partially implemented: the backend has lock fields and a `/next` endpoint, but the current scrubber does not acquire or renew locks.
+- There is no project-level RBAC, assignment workflow, or consensus/reviewer queue. `ADMIN_EMAILS` protects destructive Admin mutations only.
+- Import is API-only and supports JSONL and COCO; Pascal VOC, YOLO, and CSV import are not implemented.
+- YOLO export, video extraction, keypoints, comments/flags, and completion webhooks remain planned.
 
-![Project Creation](docs/media/project-creation.gif)
+See the [roadmap](docs/plans/2026-04-27-roadmap.md) for shipped, partial, and planned status.
 
-### Classification Labeling
-Single-click labeling with keyboard shortcuts — press a number key to assign a class and auto-advance.
+## Core workflows
 
-![Classification Labeling](docs/media/classification-labeling.gif)
-
-### Detection Labeling
-Draw bounding boxes on images and assign classes. Navigate between samples to review and re-label.
-
-![Detection Labeling](docs/media/detection-labeling.gif)
+- **Create a project:** choose a UC Volume or Delta-table source, labeling
+  mode, and class list.
+- **Label samples:** select one or more classification labels, draw detection
+  boxes, or paint segmentation masks while navigating with the scrubber.
+- **Review and prioritize:** inspect correction history, model drafts,
+  similarity results, outliers, duplicates, and Smart Queue suggestions.
+- **Prepare training data:** create a reference snapshot or copied export,
+  inspect dataset history, and optionally launch the configured finetuning Job.
 
 ## Architecture
 
 ```
-Browser  ──>  React SPA (Vite)  ──>  FastAPI backend  ──>  Lakebase (PostgreSQL)
-                                          │
-                                          ├──>  UC Volumes (images)
-                                            ├──>  Databricks SDK (serving, jobs, resources)
-                                            └──>  SQL Statement API (Delta sources)
+Browser ──> React SPA (Vite) ──> FastAPI (/api/*)
+                                      ├──> Lakebase (metadata and workflow state)
+                                      ├──> UC Volumes (source images and exports)
+                                      ├──> Databricks SDK (Apps, Jobs, serving, files)
+                                      └──> SQL Statement API (Delta sources/outputs)
 ```
 
 The FastAPI backend serves the React SPA and `/api/` endpoints. Bundle
@@ -62,7 +67,7 @@ database credentials every 20 minutes.
 | **Browse** | `/` or `/browse` | Browse UC Volumes and preview Delta tables |
 | **Projects** | `/projects` | List projects and versions |
 | **Create Project** | `/projects/new` | Pick a Volume or Delta table, task type, and classes |
-| **Project Dashboard** | `/projects/:id` | Stats, gallery grid, export, start labeling |
+| **Project Dashboard** | `/projects/:id` | Progress, AI tools, gallery, datasets, export, and training handoff |
 | **Labeling View** | `/projects/:id/label` | Classify, draw boxes, or paint segmentation masks |
 | **Admin** | `/admin` | Read status; authorized users may run guarded mutations |
 
@@ -72,7 +77,7 @@ database credentials every 20 minutes.
 
 **Recommended:** use the Databricks Apps deployment pipeline in this repo
 (`databricks apps deploy --target dev`). It validates/uploads the bundle,
-updates the pre-annotation Job and App resources, and starts the App.
+updates the App and its Job resources, and starts the App.
 
 1. Adjust the bundle variables for the target workspace, including both
    Volumes, Lakebase branch/database/endpoint, serving endpoints, warehouse,
@@ -117,6 +122,9 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `SERVING_ENDPOINT` | _(from `valueFrom: serving-endpoint`)_ | Serving endpoint name from the **serving-endpoint** resource. |
 | `EMBEDDING_ENDPOINT` | _(from `valueFrom: embedding-endpoint`)_ | Image embedding endpoint from the **embedding-endpoint** resource. There is no workspace-specific code fallback. |
 | `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
+| `FINETUNE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-finetune-job`)_ | Numeric job id used by the Datasets & training workflow. |
+| `EXPORT_VOLUME_PATH` | _(from `valueFrom: export-volume`)_ | Default UC Volume destination for dataset snapshots and copied exports. |
+| `SQL_WAREHOUSE_ID` | _(from `valueFrom: sql-warehouse`)_ | Warehouse used for Delta-table source discovery and labeled Delta publication. |
 | `LAKEBASE_AUTO_PROVISION` | `false` (bundle app) | With a **postgres** App resource, use `false` and connect via injected `PG*` variables (no SDK project creation on app startup). |
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
 | `LAKEBASE_ENDPOINT` | _(from `valueFrom: lakebase-db`)_ | Postgres endpoint resource path. **Not auto-injected** — must be bound in the bundle / `app.yml`. |
@@ -125,26 +133,23 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `PGHOST`, `PGUSER`, `PGDATABASE`, `PGPORT`, `PGSSLMODE` | _(platform)_ | Injected when a Lakebase **postgres** resource is attached. Password is an OAuth token, not `PGPASSWORD`. |
 | `ADMIN_EMAILS` | `__disabled__` (bundle) | Comma-separated Databricks IdP emails allowed to provision, reconnect, reset, or test Admin resources. The Apps proxy supplies `X-Forwarded-Email`; the operations still execute with the App service principal and its declared resource permissions. The non-email default disables all Admin mutations. |
 
-## Using with Databricks Asset Bundles
+## Lakebase deployment modes
 
-When deploying this app as part of a larger Databricks Asset Bundle (DAB), the bundle typically owns the Lakebase project lifecycle (create / grant roles / enable Lakehouse Sync / destroy). To prevent the app from trying to create a duplicate project at startup, set:
+The bundle declares a **postgres App resource** named `lakebase-db`. Databricks
+Apps injects `PG*` connection values, and `LAKEBASE_ENDPOINT` is bound from the
+same resource so the app can refresh its OAuth database token. In this mode,
+keep `LAKEBASE_AUTO_PROVISION=false`; `LAKEBASE_PROJECT_ID` is used by the
+separate pre-annotation Job rather than by the App connection itself.
 
-```yaml
-# app.yml
-env:
-  - name: LAKEBASE_AUTO_PROVISION
-    value: "false"
-  - name: LAKEBASE_PROJECT_ID
-    value: "<project-id-created-by-your-bundle>"
-```
+SDK auto-provisioning remains available for deployments without an attached
+postgres resource: omit `PGHOST`, set `USE_LAKEBASE=true` and
+`LAKEBASE_AUTO_PROVISION=true`, and configure `LAKEBASE_PROJECT_ID`. A partial
+`PG*` configuration or a postgres binding without `LAKEBASE_ENDPOINT` fails
+startup. SQLite is explicit local-development behavior (`USE_LAKEBASE=false`);
+fallback after a Lakebase initialization failure additionally requires
+`ALLOW_SQLITE_FALLBACK=true`.
 
-With `LAKEBASE_AUTO_PROVISION=false`, the app:
-
-1. Looks up the Lakebase project named by `LAKEBASE_PROJECT_ID`
-2. Connects if it exists
-3. Exits with a clear error if it does not (instead of creating one)
-
-See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
+See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for resource ownership and permissions.
 
 To move an existing deployment from `public` to a dedicated schema, deploy
 once with `LAKEBASE_SCHEMA=<schema>` and `LAKEBASE_MIGRATE_PUBLIC=true`.
@@ -204,8 +209,9 @@ Bbox coordinates are normalized (0-1). Filenames are matched against
 
 **COCO** — standard COCO JSON. The adapter converts pixel bboxes
 `[x, y, w, h]` to normalized coordinates using the image `width` /
-`height` from the `images[]` section. `iscrowd` and `segmentation` are
-ignored.
+`height` from the `images[]` section. Polygon, compressed-RLE, and
+uncompressed-RLE segmentation payloads become mask annotations; when both a
+bbox and segmentation are present, the mask wins. `iscrowd` is ignored.
 
 ### Flags
 
@@ -278,38 +284,39 @@ print(r.json())
 ```
 cv-explorer/
 ├── app.yml                         # Databricks App manifest (Git deploy expects app.yml)
+├── databricks.yml                  # Asset Bundle entry point
 ├── start.py                        # Uvicorn entrypoint
 ├── requirements.txt                # Python dependencies
 ├── backend/
-│   ├── main.py                     # FastAPI app entry point + startup
-│   ├── models.py                   # SQLAlchemy models (Project, Sample, Annotation)
+│   ├── main.py                     # App assembly, lifespan, routers, SPA serving
+│   ├── models.py                   # SQLAlchemy models and additive initialization
 │   ├── schemas.py                  # Pydantic request/response schemas
-│   ├── deps.py                     # Shared dependencies (DB session, workspace client)
-│   ├── lakebase.py                 # Lakebase auto-provisioning + token refresh
-│   ├── volumes.py                  # UC Volume helper functions
-│   └── routes/
-│       ├── projects.py             # Project CRUD endpoints
-│       ├── labeling.py             # Annotation + sample endpoints
-│       ├── export.py               # Dataset export to UC Volumes
-│       ├── browse.py               # Volume browsing endpoints
-│       └── admin.py                # Admin + Lakebase status endpoints
+│   ├── lakebase.py                 # App-resource/SDK Lakebase + token refresh
+│   ├── volumes.py / uc_tables.py   # UC Volume and Delta-table sources
+│   ├── dataset_exports.py          # Reference dataset snapshots and lineage
+│   ├── import_adapters/            # JSONL and COCO normalization
+│   └── routes/                     # Projects, labeling, import/export,
+│                                   # inference, similarity, runs, browse, admin
 ├── frontend/
 │   ├── src/
 │   │   ├── api/client.js           # Axios API client
 │   │   ├── components/
-│   │   │   ├── BBoxCanvas.jsx      # Canvas for drawing bounding boxes
-│   │   │   ├── AnnotationCanvas.jsx# Display-only annotation overlay
-│   │   │   ├── Layout.jsx          # App shell with sidebar navigation
-│   │   │   ├── FilterableSelect.jsx# Searchable dropdown component
-│   │   │   └── Spinner.jsx         # Loading indicator
+│   │   │   ├── BBoxCanvas.jsx      # Detection canvas
+│   │   │   ├── MaskCanvas.jsx      # Segmentation canvas
+│   │   │   ├── ClusterMap.jsx      # Embedding projection
+│   │   │   ├── DatasetReady.jsx    # Dataset handoff
+│   │   │   └── FinetuneTab.jsx     # Dataset and training runs
 │   │   └── pages/
 │   │       ├── ProjectsPage.jsx    # Project listing
 │   │       ├── CreateProject.jsx   # New project form
-│   │       ├── ProjectDashboard.jsx# Stats, gallery, export
+│   │       ├── ProjectDashboard.jsx# Stats, AI tools, gallery, export
 │   │       ├── LabelingView.jsx    # Annotation interface
 │   │       ├── BrowseVolumes.jsx   # UC Volume browser
 │   │       └── AdminPage.jsx       # Lakebase admin panel
+│   ├── test/                        # Node utility tests
 │   └── vite.config.js              # Vite config with /api proxy
+├── resources/                      # App and Job bundle resources
+├── scripts/                        # Job entrypoints and utility scripts
 └── docs/
     ├── phase1-design.md            # Phase 1 architecture design
     └── plans/                      # Implementation plans and design docs
@@ -323,7 +330,7 @@ optional Lakehouse Sync:
 - **labeling_projects** — task/source configuration, classes, version lineage, and serving settings
 - **project_samples** — filepath, filename, status (unlabeled/labeled/skipped), locked_by/locked_at
 - **annotations** — classification, bbox, or mask labels with draft/model provenance
-- **annotation_history** — prior annotation states
+- **annotation_history** — create/update/delete history, including box and mask state
 - **preannotate_runs**, **embedding_runs**, **finetune_runs** — asynchronous workflow state
 
 Bounding boxes use normalized `[0, 1]` coordinates. Segmentation masks use
