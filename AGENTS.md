@@ -102,6 +102,11 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
 - **Images are never uploaded** — projects point at an existing UC Volume path. `scan_volume_for_samples` lists one directory level and creates `ProjectSample` rows.
 - **Image serving** goes through the backend: `/api/projects/{id}/samples/{id}/image` reads bytes via SDK and streams them. Thumbnails are resized with Pillow.
 - **Lakebase tokens expire** — a background thread in `lakebase.py` refreshes every 20 minutes with exponential backoff on failure. App-resource mode uses the same loop; `deps.get_engine()` / `get_session_factory()` delegate to `lakebase` so callers see the refreshed engine.
+- **Lakebase schema isolation is explicit** — bundle deployments set
+  `LAKEBASE_SCHEMA=cv_explorer_app` (the code fallback is `public`). A
+  non-public schema sets the connection search path. Existing public tables
+  move only during a deployment with
+  `LAKEBASE_MIGRATE_PUBLIC=true`, transactionally with row-count checks.
 - **Annotation model**: classification = one `Annotation` row per sample; detection = multiple rows with `bbox_json`. The `annotate-batch` endpoint replaces all annotations for a sample (delete + insert).
 - **Project cloning** copies sample rows (same file paths) with empty annotations and bumps the version number.
 

@@ -23,6 +23,8 @@ resources:
           default: ${var.lakebase_postgres_endpoint}
         - name: lakebase_database_name
           default: ${var.lakebase_database_name}
+        - name: lakebase_schema_name
+          default: ${var.lakebase_schema_name}
         - name: inference_adapter
           default: "sam31"
       tasks:
@@ -37,6 +39,7 @@ resources:
               - "{{job.parameters.lakebase_project_id}}"
               - "{{job.parameters.lakebase_endpoint}}"
               - "{{job.parameters.lakebase_database_name}}"
+              - "{{job.parameters.lakebase_schema_name}}"
               - "{{job.parameters.inference_adapter}}"
       environments:
         - environment_key: preann_env

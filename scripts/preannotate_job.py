@@ -74,7 +74,8 @@ def _inject_bundle_config():
         "LAKEBASE_PROJECT_ID": sys.argv[4] if len(sys.argv) > 4 else "",
         "LAKEBASE_ENDPOINT": sys.argv[5] if len(sys.argv) > 5 else "",
         "LAKEBASE_DATABASE_NAME": sys.argv[6] if len(sys.argv) > 6 else "",
-        "SERVING_ENDPOINT_ADAPTER": sys.argv[7] if len(sys.argv) > 7 else "",
+        "LAKEBASE_SCHEMA": sys.argv[7] if len(sys.argv) > 7 else "",
+        "SERVING_ENDPOINT_ADAPTER": sys.argv[8] if len(sys.argv) > 8 else "",
     }
     for name, value in values.items():
         if value:

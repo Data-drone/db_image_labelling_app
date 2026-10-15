@@ -18,12 +18,14 @@ class TestPreannotateBundleConfig(unittest.TestCase):
             "cv-explorer",
             "projects/cv-explorer/branches/production/endpoints/primary",
             "databricks_postgres",
+            "cv_explorer_app",
             "sam31",
         ]
         keys = (
             "LAKEBASE_PROJECT_ID",
             "LAKEBASE_ENDPOINT",
             "LAKEBASE_DATABASE_NAME",
+            "LAKEBASE_SCHEMA",
             "SERVING_ENDPOINT_ADAPTER",
             "LAKEBASE_AUTO_PROVISION",
         )
@@ -39,6 +41,7 @@ class TestPreannotateBundleConfig(unittest.TestCase):
             self.assertEqual(
                 os.environ["LAKEBASE_DATABASE_NAME"], "databricks_postgres"
             )
+            self.assertEqual(os.environ["LAKEBASE_SCHEMA"], "cv_explorer_app")
             self.assertEqual(os.environ["SERVING_ENDPOINT_ADAPTER"], "sam31")
             self.assertEqual(os.environ["LAKEBASE_AUTO_PROVISION"], "false")
             self.assertEqual(set(keys), set(os.environ))

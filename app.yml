@@ -11,6 +11,10 @@ env:
   # PGHOST/PGUSER/PGDATABASE are injected; this binding is required for OAuth.
   - name: LAKEBASE_ENDPOINT
     valueFrom: lakebase-db
+  - name: LAKEBASE_SCHEMA
+    value: 'cv_explorer_app'
+  - name: LAKEBASE_MIGRATE_PUBLIC
+    value: 'false'
   # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'

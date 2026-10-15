@@ -29,6 +29,10 @@ variables:
     default: projects/cv-explorer/branches/production/endpoints/primary
   lakebase_database_name:
     default: databricks_postgres
+  lakebase_schema_name:
+    default: cv_explorer_app
+  lakebase_migrate_public:
+    default: "false"
   # SDK lookup if PG* is not injected. Must match the postgres resource above,
   # not DATABRICKS_APP_NAME (cv-explorer-dev).
   lakebase_project_id:

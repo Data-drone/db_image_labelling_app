@@ -23,6 +23,10 @@ resources:
           # postgres resource. LAKEBASE_ENDPOINT is not auto-injected — bind it.
           - name: LAKEBASE_ENDPOINT
             value_from: lakebase-db
+          - name: LAKEBASE_SCHEMA
+            value: ${var.lakebase_schema_name}
+          - name: LAKEBASE_MIGRATE_PUBLIC
+            value: ${var.lakebase_migrate_public}
           - name: DEMO_VOLUME_PATH
             value_from: demo-volume
           - name: SERVING_ENDPOINT
