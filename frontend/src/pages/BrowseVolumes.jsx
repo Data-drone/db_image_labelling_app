@@ -19,6 +19,8 @@ import {
   browseThumbnailUrl,
 } from '../api/client';
 
+const FILE_PAGE_SIZE = 50;
+
 export default function BrowseVolumes() {
   const navigate = useNavigate();
   // Mode: 'picker' or 'direct'
@@ -58,7 +60,7 @@ export default function BrowseVolumes() {
   const [files, setFiles] = useState([]);
   const [totalFiles, setTotalFiles] = useState(0);
   const [filePage, setFilePage] = useState(0);
-  const filePageSize = 50;
+  const [browseEpoch, setBrowseEpoch] = useState(0);
   const [loading, setLoading] = useState(false);
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
@@ -177,8 +179,9 @@ export default function BrowseVolumes() {
     ? (subpath ? `${basePath.replace(/\/+$/, '')}/${subpath}` : basePath)
     : '';
 
-  // Browse directory
-  const loadDirectory = useCallback(async (pageOverride, { isPageChange = false } = {}) => {
+  // Browse directory. Callers always pass an explicit page so this callback
+  // does not close over filePage (which would retrigger the path-change effect).
+  const loadDirectory = useCallback(async (page, { isPageChange = false } = {}) => {
     if (!currentPath) return;
     if (isPageChange) {
       setPaging(true);
@@ -186,9 +189,8 @@ export default function BrowseVolumes() {
       setLoading(true);
     }
     setError('');
-    const page = pageOverride ?? filePage;
     try {
-      const data = await browseDirectory(currentPath, { page, page_size: filePageSize });
+      const data = await browseDirectory(currentPath, { page, page_size: FILE_PAGE_SIZE });
       setFolders(data.folders || []);
       setFiles(data.files || []);
       setTotalFiles(data.total_files ?? (data.files || []).length);
@@ -207,7 +209,7 @@ export default function BrowseVolumes() {
     if (mode === 'table') return;
     if (mode === 'direct' && !hasBrowsed) return;
     loadDirectory(0);
-  }, [currentPath, mode, hasBrowsed]);
+  }, [currentPath, mode, hasBrowsed, browseEpoch, loadDirectory]);
 
   // Breadcrumb navigation
   const breadcrumbs = ['Root', ...(subpath ? subpath.split('/') : [])];
@@ -234,7 +236,7 @@ export default function BrowseVolumes() {
     setTotalFiles(0);
     setFilePage(0);
     setHasBrowsed(true);
-    loadDirectory(0);
+    setBrowseEpoch((n) => n + 1);
   };
 
   return (
@@ -571,7 +573,7 @@ export default function BrowseVolumes() {
               <span key={i} style={{ display: 'flex', alignItems: 'center' }}>
                 {i > 0 && <span style={{ color: 'var(--text-muted)', margin: '0 0.25rem' }}>/</span>}
                 <button
-                  onClick={() => { navigateToCrumb(i); setTimeout(loadDirectory, 100); }}
+                  onClick={() => navigateToCrumb(i)}
                   style={{
                     background: 'var(--bg-card)',
                     border: '1px solid var(--border-color)',
@@ -633,8 +635,8 @@ export default function BrowseVolumes() {
             <div style={{ marginBottom: '2rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
                 <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
-                  Files {totalFiles > filePageSize
-                    ? `${filePage * filePageSize + 1}–${Math.min((filePage + 1) * filePageSize, totalFiles)} of ${totalFiles}`
+                  Files {totalFiles > FILE_PAGE_SIZE
+                    ? `${filePage * FILE_PAGE_SIZE + 1}–${Math.min((filePage + 1) * FILE_PAGE_SIZE, totalFiles)} of ${totalFiles}`
                     : `(${totalFiles})`}
                 </h3>
                 {totalFiles > 0 && (
@@ -720,8 +722,8 @@ export default function BrowseVolumes() {
               </div>
 
               {/* Pagination */}
-              {totalFiles > filePageSize && (() => {
-                const totalPages = Math.ceil(totalFiles / filePageSize);
+              {totalFiles > FILE_PAGE_SIZE && (() => {
+                const totalPages = Math.ceil(totalFiles / FILE_PAGE_SIZE);
                 return (
                   <div style={{
                     display: 'flex',

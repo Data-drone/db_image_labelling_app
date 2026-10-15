@@ -9,7 +9,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import Spinner from '../components/Spinner';
-import BBoxCanvas, { getClassColor } from '../components/BBoxCanvas';
+import BBoxCanvas from '../components/BBoxCanvas';
+import { getClassColor } from '../utils/classColors';
 import MaskCanvas from '../components/MaskCanvas';
 import MaskToolPanel from '../components/MaskToolPanel';
 import ImageAdjust from '../components/ImageAdjust';
@@ -21,7 +22,6 @@ import {
   fetchProjectStats,
   fetchSamples,
   fetchSample,
-  fetchNextSample,
   annotateSampleBatch,
   skipSample,
   sampleImageUrl,
@@ -39,7 +39,7 @@ import { humanizeApiError } from '../api/errors';
 export default function LabelingView() {
   const { id: projectId } = useParams();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
   const [project, setProject] = useState(null);
   const [stats, setStats] = useState(null);
@@ -134,11 +134,14 @@ export default function LabelingView() {
 
   useEffect(() => { loadStats(); }, [loadStats]);
 
+  const queueMode = searchParams.get('mode');
+  const sampleParam = searchParams.get('sample');
+
   // Load full sample list (IDs + statuses) on mount
   // In diversity/active_learning mode, load samples ordered by score
   useEffect(() => {
     if (!project) return;
-    const mode = searchParams.get('mode');
+    const mode = queueMode;
     const fallbackToDefault = () => {
       fetchSamples(projectId, { page: 0, page_size: 10000 })
         .then((page) => {
@@ -164,7 +167,7 @@ export default function LabelingView() {
     } else {
       fallbackToDefault();
     }
-  }, [project, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project, projectId, queueMode]);
 
   // Once sample list is loaded, navigate to initial sample (once only)
   const initialNavDone = useRef(false);
@@ -173,7 +176,6 @@ export default function LabelingView() {
     initialNavDone.current = true;
 
     // Check for ?sample=ID in URL
-    const sampleParam = searchParams.get('sample');
     if (sampleParam) {
       const idx = sampleList.findIndex(s => s.id === parseInt(sampleParam));
       if (idx >= 0) {
@@ -189,7 +191,7 @@ export default function LabelingView() {
     } else {
       setCurrentIndex(0);
     }
-  }, [sampleList]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sampleList, sampleParam]);
 
   useEffect(() => {
     setActionError('');
@@ -272,7 +274,7 @@ export default function LabelingView() {
     if (currentIndex >= 0 && sampleList.length > 0) {
       loadSampleAtIndex(currentIndex);
     }
-  }, [currentIndex, loadSampleAtIndex]);
+  }, [currentIndex, loadSampleAtIndex, sampleList.length]);
 
   // Load history when sample changes or panel is opened
   const loadHistory = useCallback(async () => {
@@ -307,17 +309,17 @@ export default function LabelingView() {
     return window.confirm('This image has unsaved mask edits. Leave without saving?');
   }, [isSegmentation]);
 
-  const goTo = (idx) => {
+  const goTo = useCallback((idx) => {
     if (idx >= 0 && idx < sampleList.length && idx !== currentIndex) {
       if (!confirmLeaveUnsavedMasks()) return;
       setCurrentIndex(idx);
     }
-  };
+  }, [sampleList.length, currentIndex, confirmLeaveUnsavedMasks]);
 
-  const goPrev = () => goTo(currentIndex - 1);
-  const goNext = () => goTo(currentIndex + 1);
+  const goPrev = useCallback(() => goTo(currentIndex - 1), [goTo, currentIndex]);
+  const goNext = useCallback(() => goTo(currentIndex + 1), [goTo, currentIndex]);
 
-  const goNextUnlabeled = () => {
+  const goNextUnlabeled = useCallback(() => {
     // Find next unlabeled or pre_labeled from current position (wrapping)
     for (let i = 1; i <= sampleList.length; i++) {
       const idx = (currentIndex + i) % sampleList.length;
@@ -326,7 +328,7 @@ export default function LabelingView() {
         return;
       }
     }
-  };
+  }, [sampleList, currentIndex, goTo]);
 
   // After annotating, update local sample list status and advance.
   // Uses functional updaters so rapid clicks always see latest state.
@@ -394,7 +396,7 @@ export default function LabelingView() {
   }, [sample, saving, selectedLabels, projectId, markCurrentAndAdvance]);
 
   // Skip
-  const handleSkip = async () => {
+  const handleSkip = useCallback(async () => {
     if (!sample || saving) return;
     setSaving(true);
     setActionError('');
@@ -412,7 +414,7 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [sample, saving, projectId, loadStats, sampleList.length]);
 
   const handleAcceptDraftsOnly = useCallback(async () => {
     if (!sample || saving || currentIndex < 0) return;
@@ -642,7 +644,7 @@ export default function LabelingView() {
   }, [boxes, selectedBoxId]);
 
   // Detection: Save & Next
-  const handleSaveBoxes = async () => {
+  const handleSaveBoxes = useCallback(async () => {
     if (!sample || saving || boxes.length === 0) return;
     setSaving(true);
     setActionError('');
@@ -664,7 +666,7 @@ export default function LabelingView() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [sample, saving, boxes, projectId, markCurrentAndAdvance]);
 
   // ---------- Segmentation: mask layer CRUD ----------
   const handleAddMaskLayer = useCallback(() => {
@@ -899,7 +901,8 @@ export default function LabelingView() {
   }, [project, sample, saving, projectId, navigate, isDetection, isSegmentation, selectedBoxId,
       boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
       handleSaveClassification, handleSaveMasks, toggleLabel, activeMaskId,
-      handleRelabelMaskLayer, confirmLeaveUnsavedMasks]);
+      handleRelabelMaskLayer, confirmLeaveUnsavedMasks, goNext, goNextUnlabeled, goPrev,
+      handleSaveBoxes, handleSkip]);
 
   const labeled = stats?.labeled || 0;
   const progressPct = total > 0 ? Math.round((labeled / total) * 100) : 0;

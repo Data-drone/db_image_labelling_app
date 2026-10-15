@@ -48,7 +48,7 @@
 import {
   useRef, useState, useEffect, useCallback, useImperativeHandle, forwardRef,
 } from 'react';
-import { getClassColor } from './BBoxCanvas';
+import { getClassColor } from '../utils/classColors';
 import { encodeMask, decodeMask, maskIsEmpty, readMask } from '../utils/rle';
 
 const UNDO_LIMIT = 20;
