@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session, joinedload, subqueryload
+from sqlalchemy.orm import Session, joinedload
 
 from .. import image_meta, masks
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
@@ -518,20 +518,19 @@ def list_project_samples(
         escaped = filename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.filter(ProjectSample.filename.ilike(f"%{escaped}%", escape="\\"))
 
-    needs_join = label or labeler
-    if needs_join:
-        query = query.join(Annotation, Annotation.sample_id == ProjectSample.id)
+    if label or labeler:
+        annotation_match = db.query(Annotation.id).filter(
+            Annotation.sample_id == ProjectSample.id
+        )
         if label:
-            query = query.filter(Annotation.label == label)
+            annotation_match = annotation_match.filter(Annotation.label == label)
         if labeler:
-            query = query.filter(Annotation.created_by == labeler)
-        query = query.distinct()
+            annotation_match = annotation_match.filter(Annotation.created_by == labeler)
+        # EXISTS avoids DISTINCT over ProjectSample's JSON columns, which
+        # PostgreSQL cannot compare and would reject with a 500.
+        query = query.filter(annotation_match.exists())
 
-    if needs_join:
-        query = query.options(subqueryload(ProjectSample.annotations))
-    else:
-        query = query.options(joinedload(ProjectSample.annotations))
-
+    query = query.options(joinedload(ProjectSample.annotations))
     total = query.count()
     items = query.order_by(ProjectSample.id).offset(page * page_size).limit(page_size).all()
 
