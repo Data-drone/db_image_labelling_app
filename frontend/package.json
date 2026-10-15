@@ -10,7 +10,8 @@
     "test:rle": "node test/rle.test.mjs",
     "preview": "vite preview",
     "test:payload": "node test/annotationPayload.test.mjs",
-    "test": "npm run test:rle && npm run test:payload"
+    "test:gallery": "node --test test/galleryState.test.mjs",
+    "test": "npm run test:rle && npm run test:payload && npm run test:gallery"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.0",

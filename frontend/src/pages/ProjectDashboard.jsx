@@ -22,6 +22,13 @@ import Spinner from '../components/Spinner';
 import ClusterMap from '../components/ClusterMap';
 import FinetuneTab from '../components/FinetuneTab';
 import DatasetReady from '../components/DatasetReady';
+import {
+  buildGalleryParams,
+  cancelDebounced,
+  clampGalleryPage,
+  galleryTotalPages as getGalleryTotalPages,
+  shouldShowGalleryPagination,
+} from '../utils/galleryState';
 
 export default function ProjectDashboard() {
   const { id: projectId } = useParams();
@@ -86,6 +93,9 @@ export default function ProjectDashboard() {
   const [gallerySamples, setGallerySamples] = useState([]);
   const [galleryTotal, setGalleryTotal] = useState(0);
   const [galleryPage, setGalleryPage] = useState(0);
+  const [galleryLoading, setGalleryLoading] = useState(false);
+  const [galleryError, setGalleryError] = useState('');
+  const [galleryReloadKey, setGalleryReloadKey] = useState(0);
   const [galleryFilter, setGalleryFilter] = useState('');
   const [filterLabel, setFilterLabel] = useState('');
   const [filterLabeler, setFilterLabeler] = useState('');
@@ -93,6 +103,7 @@ export default function ProjectDashboard() {
   const [filenameInput, setFilenameInput] = useState('');
   const galleryPageSize = 24;
   const debounceRef = useRef(null);
+  const galleryRequestRef = useRef(0);
 
   // Embedding / similarity state
   const [embeddingRun, setEmbeddingRun] = useState(null);
@@ -136,17 +147,16 @@ export default function ProjectDashboard() {
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
+    cancelDebounced(debounceRef);
     debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
       setFilterFilename(value);
       setGalleryPage(0);
     }, 300);
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
+    return () => cancelDebounced(debounceRef);
   }, []);
 
   useEffect(() => {
@@ -675,20 +685,43 @@ export default function ProjectDashboard() {
   // Load gallery
   useEffect(() => {
     if (!project) return;
-    const params = { page: galleryPage, page_size: galleryPageSize };
-    if (galleryFilter) params.status = galleryFilter;
-    if (filterLabel) params.label = filterLabel;
-    if (filterLabeler) params.labeler = filterLabeler;
-    if (filterFilename) params.filename = filterFilename;
+    const requestId = ++galleryRequestRef.current;
+    const params = buildGalleryParams({
+      page: galleryPage,
+      pageSize: galleryPageSize,
+      status: galleryFilter,
+      label: filterLabel,
+      labeler: filterLabeler,
+      filename: filterFilename,
+    });
+    setGalleryLoading(true);
+    setGalleryError('');
     fetchSamples(projectId, params)
       .then((page) => {
-        setGallerySamples(page.items);
+        if (requestId !== galleryRequestRef.current) return;
+        const validPage = clampGalleryPage(galleryPage, page.total, galleryPageSize);
         setGalleryTotal(page.total);
+        if (validPage !== galleryPage) {
+          setGalleryPage(validPage);
+          return;
+        }
+        setGallerySamples(page.items);
       })
-      .catch(console.error);
-  }, [project, projectId, galleryPage, galleryFilter, filterLabel, filterLabeler, filterFilename]);
+      .catch((err) => {
+        if (requestId !== galleryRequestRef.current) return;
+        setGalleryError(humanizeApiError(err, 'Unable to load samples.'));
+        setGallerySamples([]);
+        setGalleryTotal(0);
+      })
+      .finally(() => {
+        if (requestId === galleryRequestRef.current) setGalleryLoading(false);
+      });
+    return () => {
+      if (requestId === galleryRequestRef.current) galleryRequestRef.current += 1;
+    };
+  }, [project, projectId, galleryPage, galleryFilter, filterLabel, filterLabeler, filterFilename, galleryReloadKey]);
 
-  const galleryTotalPages = Math.ceil(galleryTotal / galleryPageSize);
+  const galleryTotalPages = getGalleryTotalPages(galleryTotal, galleryPageSize);
 
   // Load cluster map data when switching to cluster view
   useEffect(() => {
@@ -1975,6 +2008,7 @@ export default function ProjectDashboard() {
                 <button
                   className="btn-secondary"
                   onClick={() => {
+                    cancelDebounced(debounceRef);
                     setGalleryFilter('');
                     setFilterLabel('');
                     setFilterLabeler('');
@@ -2286,6 +2320,22 @@ export default function ProjectDashboard() {
                   ))}
                 </div>
               )
+            ) : galleryLoading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', padding: '2rem 0' }}>
+                <Spinner />
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading samples…</span>
+              </div>
+            ) : galleryError ? (
+              <div style={{ padding: '1rem', textAlign: 'center', borderRadius: 6, background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontSize: '0.85rem' }}>
+                <div>{galleryError}</div>
+                <button
+                  className="btn-secondary"
+                  onClick={() => setGalleryReloadKey((key) => key + 1)}
+                  style={{ marginTop: '0.75rem', fontSize: '0.75rem' }}
+                >
+                  Retry
+                </button>
+              </div>
             ) : gallerySamples.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '1rem 0', textAlign: 'center' }}>
                 No samples found
@@ -2435,7 +2485,13 @@ export default function ProjectDashboard() {
             )}
 
             {/* Pagination */}
-            {!similarMode && !dupMode && galleryTotalPages > 1 && (
+            {shouldShowGalleryPagination({
+              similarMode: Boolean(similarMode),
+              duplicateMode: dupMode,
+              outlierMode,
+              viewMode,
+              totalPages: galleryTotalPages,
+            }) && (
               <div style={{
                 display: 'flex',
                 justifyContent: 'center',
