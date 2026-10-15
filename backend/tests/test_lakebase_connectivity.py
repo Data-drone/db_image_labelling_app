@@ -11,6 +11,7 @@ from backend.lakebase import (
     app_postgres_username,
     build_psycopg2_url,
     generate_connection_string,
+    get_endpoint,
     init_lakebase_from_app_resource,
     postgres_database_name,
     require_complete_app_postgres_env,
@@ -53,6 +54,30 @@ class TestPostgresDatabaseName(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = prev
+
+
+class TestConfiguredEndpoint(unittest.TestCase):
+    def test_uses_exact_endpoint_for_project(self):
+        project = SimpleNamespace(name="projects/cv-explorer")
+        endpoint_name = (
+            "projects/cv-explorer/branches/production/endpoints/primary"
+        )
+        w = MagicMock()
+        expected = SimpleNamespace(name=endpoint_name)
+        w.postgres.get_endpoint.return_value = expected
+        with patch("backend.lakebase._get_workspace_client", return_value=w):
+            self.assertIs(get_endpoint(project, endpoint_name), expected)
+        w.postgres.get_endpoint.assert_called_once_with(name=endpoint_name)
+
+    def test_rejects_endpoint_from_another_project(self):
+        project = SimpleNamespace(name="projects/cv-explorer")
+        with patch("backend.lakebase._get_workspace_client"):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_endpoint(
+                    project,
+                    "projects/other/branches/production/endpoints/primary",
+                )
+        self.assertIn("does not belong", str(ctx.exception))
 
 
 class TestUsesAppResourcePostgres(unittest.TestCase):

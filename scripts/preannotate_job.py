@@ -6,7 +6,8 @@ The bundle job should pass ``{{job.parameters.run_id}}`` as the first parameter
 (see ``resources/preannotate_job.job.yml``).
 
 Environment matches the CV Explorer app (Lakebase or ``DATABASE_URL``, Databricks
-auth for volumes + serving, ``USE_LAKEBASE``, etc.).
+auth for volumes + serving, ``USE_LAKEBASE``, etc.). Bundle parameters inject
+the exact Lakebase endpoint/database and inference adapter.
 """
 from __future__ import annotations
 
@@ -67,8 +68,27 @@ def _inject_sp_credentials():
         print(f"[PREANNOTATE] No SP credentials in argv (argc={len(sys.argv)})", flush=True)
 
 
-_inject_sp_credentials()
+def _inject_bundle_config():
+    """Copy target-specific job parameters into the worker environment."""
+    values = {
+        "LAKEBASE_PROJECT_ID": sys.argv[4] if len(sys.argv) > 4 else "",
+        "LAKEBASE_ENDPOINT": sys.argv[5] if len(sys.argv) > 5 else "",
+        "LAKEBASE_DATABASE_NAME": sys.argv[6] if len(sys.argv) > 6 else "",
+        "SERVING_ENDPOINT_ADAPTER": sys.argv[7] if len(sys.argv) > 7 else "",
+    }
+    for name, value in values.items():
+        if value:
+            os.environ[name] = value
+    if values["LAKEBASE_ENDPOINT"] and values["LAKEBASE_DATABASE_NAME"]:
+        os.environ["LAKEBASE_AUTO_PROVISION"] = "false"
 
-from backend.jobs.preannotate_worker import main
 
-main(_run_id())
+def _main():
+    _inject_sp_credentials()
+    _inject_bundle_config()
+    from backend.jobs.preannotate_worker import main
+    main(_run_id())
+
+
+if __name__ == "__main__":
+    _main()

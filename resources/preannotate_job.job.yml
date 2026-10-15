@@ -17,6 +17,14 @@ resources:
           default: ""
         - name: sp_client_secret
           default: ""
+        - name: lakebase_project_id
+          default: ${var.lakebase_project_id}
+        - name: lakebase_endpoint
+          default: ${var.lakebase_postgres_endpoint}
+        - name: lakebase_database_name
+          default: ${var.lakebase_database_name}
+        - name: inference_adapter
+          default: "sam31"
       tasks:
         - task_key: main
           environment_key: preann_env
@@ -26,6 +34,10 @@ resources:
               - "{{job.parameters.run_id}}"
               - "{{job.parameters.sp_client_id}}"
               - "{{job.parameters.sp_client_secret}}"
+              - "{{job.parameters.lakebase_project_id}}"
+              - "{{job.parameters.lakebase_endpoint}}"
+              - "{{job.parameters.lakebase_database_name}}"
+              - "{{job.parameters.inference_adapter}}"
       environments:
         - environment_key: preann_env
           spec:
