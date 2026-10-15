@@ -11,6 +11,7 @@ On startup:
 
 import logging
 import os
+import re
 import threading
 import time
 from typing import Optional
@@ -34,6 +35,7 @@ LAKEBASE_AUTO_PROVISION = (
 )
 TOKEN_REFRESH_INTERVAL = 20 * 60  # 20 minutes (tokens typically expire in ~1 hour)
 DEFAULT_DATABASE_NAME = "databricks_postgres"
+DEFAULT_APP_SCHEMA = "public"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,10 @@ def generate_connection_string(
 
 def _build_engine(connection_url: str) -> Engine:
     """Create a SQLAlchemy engine from the connection URL."""
+    schema = get_lakebase_schema()
+    connect_args = {}
+    if schema != "public":
+        connect_args["options"] = f"-csearch_path={schema},public"
     return create_engine(
         connection_url,
         echo=False,
@@ -217,6 +223,100 @@ def _build_engine(connection_url: str) -> Engine:
         pool_recycle=3600,
         pool_size=5,
         max_overflow=10,
+        connect_args=connect_args,
+    )
+
+
+def get_lakebase_schema() -> str:
+    """Return the validated PostgreSQL schema used by this deployment."""
+    schema = (
+        os.environ.get("LAKEBASE_SCHEMA", DEFAULT_APP_SCHEMA).strip()
+        or DEFAULT_APP_SCHEMA
+    )
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", schema):
+        raise RuntimeError(
+            "LAKEBASE_SCHEMA must be a lowercase PostgreSQL identifier "
+            "(letters, numbers, and underscores; maximum 63 characters)."
+        )
+    return schema
+
+
+def allow_public_schema_migration() -> bool:
+    """Whether startup may move managed tables from public to LAKEBASE_SCHEMA."""
+    return os.environ.get(
+        "LAKEBASE_MIGRATE_PUBLIC", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def prepare_lakebase_schema(engine: Engine) -> None:
+    """Create the app schema and safely migrate existing public tables.
+
+    Schema isolation is opt-in through ``LAKEBASE_SCHEMA``. If managed tables
+    already exist in ``public``, startup fails until the one-time
+    ``LAKEBASE_MIGRATE_PUBLIC=true`` flag is supplied. Moving tables and
+    verifying row counts happens in one transaction.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    schema = get_lakebase_schema()
+    if schema == "public":
+        return
+
+    from sqlalchemy import inspect
+    from .models import TABLE_NAMES
+
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+
+    inspector = inspect(engine)
+    public_tables = set(inspector.get_table_names(schema="public"))
+    target_tables = set(inspector.get_table_names(schema=schema))
+    managed = set(TABLE_NAMES)
+    public_managed = managed & public_tables
+    target_managed = managed & target_tables
+
+    if public_managed and target_managed:
+        raise RuntimeError(
+            f"Managed CV Explorer tables exist in both public and {schema}; "
+            "refusing a split-schema startup."
+        )
+    if target_managed or not public_managed:
+        log.info("Lakebase application schema ready: %s", schema)
+        return
+    if not allow_public_schema_migration():
+        raise RuntimeError(
+            f"CV Explorer tables exist in public but LAKEBASE_SCHEMA={schema}. "
+            "Set LAKEBASE_MIGRATE_PUBLIC=true for one controlled deployment "
+            "to move and verify them."
+        )
+
+    ordered_tables = [name for name in TABLE_NAMES if name in public_managed]
+    with engine.begin() as conn:
+        before = {
+            table: conn.execute(
+                text(f'SELECT COUNT(*) FROM public."{table}"')
+            ).scalar_one()
+            for table in ordered_tables
+        }
+        for table in ordered_tables:
+            conn.execute(
+                text(f'ALTER TABLE public."{table}" SET SCHEMA "{schema}"')
+            )
+        after = {
+            table: conn.execute(
+                text(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
+            ).scalar_one()
+            for table in ordered_tables
+        }
+        if before != after:
+            raise RuntimeError(
+                f"Lakebase schema migration row-count mismatch: "
+                f"before={before}, after={after}"
+            )
+    log.info(
+        "Moved %d CV Explorer tables from public to %s with verified row counts",
+        len(ordered_tables),
+        schema,
     )
 
 
@@ -293,6 +393,7 @@ def init_lakebase_from_app_resource() -> Engine:
         _engine = _build_engine(url)
         _session_factory = sessionmaker(bind=_engine)
 
+    prepare_lakebase_schema(_engine)
     with _engine.connect() as conn:
         conn.execute(text("SELECT 1"))
 
@@ -389,6 +490,7 @@ def init_lakebase() -> Engine:
         _engine = _build_engine(connection_url)
         _session_factory = sessionmaker(bind=_engine)
 
+    prepare_lakebase_schema(_engine)
     # Verify the connection actually works before returning
     print("[LAKEBASE] Testing connection...", flush=True)
     with _engine.connect() as conn:

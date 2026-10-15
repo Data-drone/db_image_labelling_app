@@ -212,16 +212,19 @@ def admin_connect_lakebase(body: dict, request: Request):
         if not endpoint:
             raise HTTPException(status_code=400, detail="No endpoints found for this project.")
 
-        from ..lakebase import _get_pg_username, generate_connection_string
+        from ..lakebase import (
+            _build_engine,
+            _get_pg_username,
+            generate_connection_string,
+            prepare_lakebase_schema,
+        )
 
         host = endpoint.status.hosts.host
         pg_username = _get_pg_username(endpoint)
         conn_url = generate_connection_string(endpoint, pg_username)
 
-        from sqlalchemy import create_engine
-        new_engine = create_engine(
-            conn_url, echo=False, pool_pre_ping=True, pool_recycle=3600, pool_size=5, max_overflow=10,
-        )
+        new_engine = _build_engine(conn_url)
+        prepare_lakebase_schema(new_engine)
         Base.metadata.create_all(new_engine)
 
         try:

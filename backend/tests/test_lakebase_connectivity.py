@@ -9,11 +9,15 @@ from unittest.mock import MagicMock, patch
 from backend.lakebase import (
     allow_sqlite_fallback,
     app_postgres_username,
+    allow_public_schema_migration,
+    _build_engine,
     build_psycopg2_url,
     generate_connection_string,
     get_endpoint,
+    get_lakebase_schema,
     init_lakebase_from_app_resource,
     postgres_database_name,
+    prepare_lakebase_schema,
     require_complete_app_postgres_env,
     uses_app_resource_postgres,
 )
@@ -31,6 +35,87 @@ class TestBuildPsycopg2Url(unittest.TestCase):
         url = build_psycopg2_url("h", "user@corp", "p/w:d", "db")
         self.assertIn("user%40corp", url)
         self.assertIn("p%2Fw%3Ad", url)
+
+
+class TestLakebaseSchema(unittest.TestCase):
+    def test_validates_schema_identifier(self):
+        with patch.dict(os.environ, {"LAKEBASE_SCHEMA": "cv_explorer_app"}):
+            self.assertEqual(get_lakebase_schema(), "cv_explorer_app")
+        with patch.dict(os.environ, {"LAKEBASE_SCHEMA": "bad-name"}):
+            with self.assertRaises(RuntimeError):
+                get_lakebase_schema()
+
+    def test_build_engine_sets_search_path(self):
+        with (
+            patch.dict(os.environ, {"LAKEBASE_SCHEMA": "cv_explorer_app"}),
+            patch("backend.lakebase.create_engine") as create,
+        ):
+            _build_engine("postgresql+psycopg2://example")
+        self.assertEqual(
+            create.call_args.kwargs["connect_args"]["options"],
+            "-csearch_path=cv_explorer_app,public",
+        )
+
+    def test_public_migration_is_explicit(self):
+        engine = MagicMock()
+        engine.dialect.name = "postgresql"
+        inspector = MagicMock()
+        inspector.get_table_names.side_effect = lambda schema: (
+            ["labeling_projects"] if schema == "public" else []
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LAKEBASE_SCHEMA": "cv_explorer_app",
+                    "LAKEBASE_MIGRATE_PUBLIC": "false",
+                },
+                clear=True,
+            ),
+            patch("sqlalchemy.inspect", return_value=inspector),
+        ):
+            self.assertFalse(allow_public_schema_migration())
+            with self.assertRaises(RuntimeError) as ctx:
+                prepare_lakebase_schema(engine)
+        self.assertIn("LAKEBASE_MIGRATE_PUBLIC=true", str(ctx.exception))
+
+    def test_public_migration_verifies_row_counts(self):
+        engine = MagicMock()
+        engine.dialect.name = "postgresql"
+        conn = engine.begin.return_value.__enter__.return_value
+
+        def execute(statement):
+            sql = str(statement)
+            result = MagicMock()
+            if "SELECT COUNT(*)" in sql:
+                result.scalar_one.return_value = 8
+            return result
+
+        conn.execute.side_effect = execute
+        inspector = MagicMock()
+        inspector.get_table_names.side_effect = lambda schema: (
+            ["labeling_projects"] if schema == "public" else []
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LAKEBASE_SCHEMA": "cv_explorer_app",
+                    "LAKEBASE_MIGRATE_PUBLIC": "true",
+                },
+                clear=True,
+            ),
+            patch("sqlalchemy.inspect", return_value=inspector),
+        ):
+            prepare_lakebase_schema(engine)
+        sql_calls = [str(call.args[0]) for call in conn.execute.call_args_list]
+        self.assertTrue(
+            any(
+                'ALTER TABLE public."labeling_projects" SET SCHEMA '
+                '"cv_explorer_app"' in sql
+                for sql in sql_calls
+            )
+        )
 
 
 class TestPostgresDatabaseName(unittest.TestCase):

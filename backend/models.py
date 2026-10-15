@@ -350,7 +350,8 @@ def _reassign_table_ownership(engine, table_names: list[str]) -> None:
         with engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT DISTINCT tableowner FROM pg_tables "
-                "WHERE tablename = ANY(:tables) AND tableowner != :me"
+                "WHERE schemaname = current_schema() "
+                "AND tablename = ANY(:tables) AND tableowner != :me"
             ), {"tables": failed_tables, "me": current_user}).fetchall()
             old_owners = [r[0] for r in rows]
     except Exception:
@@ -445,7 +446,9 @@ def _ensure_pgvector(engine) -> bool:
     with engine.connect() as conn:
         row = conn.execute(text(
             "SELECT udt_name FROM information_schema.columns "
-            "WHERE table_name = 'project_samples' AND column_name = 'embedding_vec'"
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'project_samples' "
+            "AND column_name = 'embedding_vec'"
         )).fetchone()
 
     if row is None:
@@ -552,10 +555,9 @@ def init_db(engine):
     """Create all tables and set REPLICA IDENTITY FULL for Lakehouse Sync."""
     _reassign_table_ownership(engine, TABLE_NAMES)
 
-    pgvector_available = _ensure_pgvector(engine)
-
     Base.metadata.create_all(engine)
     log.info("Database tables created")
+    pgvector_available = _ensure_pgvector(engine)
     _ensure_missing_columns(engine)
     ensure_annotations_is_draft_column(engine)
     ensure_preannotate_runs_table(engine)

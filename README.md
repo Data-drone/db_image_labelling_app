@@ -100,6 +100,8 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `LAKEBASE_AUTO_PROVISION` | `false` (bundle app) | With a **postgres** App resource, use `false` and connect via injected `PG*` variables (no SDK project creation on app startup). |
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
 | `LAKEBASE_ENDPOINT` | _(from `valueFrom: lakebase-db`)_ | Postgres endpoint resource path. **Not auto-injected** — must be bound in the bundle / `app.yml`. |
+| `LAKEBASE_SCHEMA` | `cv_explorer_app` (bundle) | PostgreSQL schema used for CV Explorer tables. The code fallback is `public` when the variable is absent. |
+| `LAKEBASE_MIGRATE_PUBLIC` | `false` | One-time safety gate. When `true` with a non-`public` schema, moves managed tables transactionally and verifies row counts. Startup otherwise refuses to hide existing `public` data. |
 | `PGHOST`, `PGUSER`, `PGDATABASE`, `PGPORT`, `PGSSLMODE` | _(platform)_ | Injected when a Lakebase **postgres** resource is attached. Password is an OAuth token, not `PGPASSWORD`. |
 | `ADMIN_EMAILS` | `__disabled__` (bundle) | Comma-separated Databricks IdP emails allowed to provision, reconnect, reset, or test Admin resources. The Apps proxy supplies `X-Forwarded-Email`; the operations still execute with the App service principal and its declared resource permissions. The non-email default disables all Admin mutations. |
 
@@ -123,6 +125,13 @@ With `LAKEBASE_AUTO_PROVISION=false`, the app:
 3. Exits with a clear error if it does not (instead of creating one)
 
 See the [Databricks Apps → Lakebase resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources#lakebase) for how DAB declares Postgres project ownership and permissions.
+
+To move an existing deployment from `public` to a dedicated schema, deploy
+once with `LAKEBASE_SCHEMA=<schema>` and `LAKEBASE_MIGRATE_PUBLIC=true`.
+Startup creates the schema, moves all managed tables in one transaction, and
+compares row counts before and after. Remove the migration flag after the
+successful deployment. If managed tables exist in both schemas, startup stops
+instead of choosing one.
 
 ### Async pre-label (Databricks Job)
 
