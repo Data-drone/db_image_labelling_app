@@ -177,13 +177,16 @@ def admin_connect_lakebase(body: dict):
         if not endpoint:
             raise HTTPException(status_code=400, detail="No endpoints found for this project.")
 
-        cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
+        from ..lakebase import _get_pg_username, generate_connection_string
+
         host = endpoint.status.hosts.host
-        from urllib.parse import quote
-        conn_url = f"postgresql://token:{quote(cred.token, safe='')}@{host}:5432/databricks_postgres"
+        pg_username = _get_pg_username(endpoint)
+        conn_url = generate_connection_string(endpoint, pg_username)
 
         from sqlalchemy import create_engine
-        new_engine = create_engine(conn_url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
+        new_engine = create_engine(
+            conn_url, echo=False, pool_pre_ping=True, pool_recycle=3600, pool_size=5, max_overflow=10,
+        )
         Base.metadata.create_all(new_engine)
 
         try:

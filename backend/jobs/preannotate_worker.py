@@ -32,9 +32,11 @@ def _init_db_backend():
             get_session,
             init_lakebase,
             init_lakebase_from_app_resource,
+            require_complete_app_postgres_env,
             uses_app_resource_postgres,
         )
 
+        require_complete_app_postgres_env()
         if uses_app_resource_postgres():
             init_lakebase_from_app_resource()
         else:

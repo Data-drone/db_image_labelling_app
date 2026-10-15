@@ -2,10 +2,11 @@
 Lakebase (PostgreSQL) auto-provisioning and connection management.
 
 On startup:
-1. Find or create a Lakebase Autoscaling project via Databricks SDK
-2. Get the read-write endpoint and generate a short-lived token
-3. Build a SQLAlchemy engine with the connection string
-4. Start a background thread to refresh the token every 30 minutes
+1. Find or create a Lakebase Autoscaling project via Databricks SDK,
+   or attach via App postgres resource (PG* + LAKEBASE_ENDPOINT)
+2. Get the read-write endpoint and generate a short-lived OAuth token
+3. Build a SQLAlchemy engine with postgresql+psycopg2 (the driver we ship)
+4. Start a background thread to refresh the token every 20 minutes
 """
 
 import logging
@@ -32,6 +33,7 @@ LAKEBASE_AUTO_PROVISION = (
     os.environ.get("LAKEBASE_AUTO_PROVISION", "true").lower() != "false"
 )
 TOKEN_REFRESH_INTERVAL = 20 * 60  # 20 minutes (tokens typically expire in ~1 hour)
+DEFAULT_DATABASE_NAME = "databricks_postgres"
 
 
 # ---------------------------------------------------------------------------
@@ -123,15 +125,70 @@ def _get_pg_username(endpoint) -> str:
         return "token"
 
 
-def generate_connection_string(endpoint, pg_username: str = None) -> str:
-    """Generate a PostgreSQL connection string using a fresh token."""
+def postgres_database_name(explicit: Optional[str] = None) -> str:
+    """Database name: explicit arg, then env, then Lakebase default."""
+    for candidate in (
+        explicit,
+        os.environ.get("LAKEBASE_DATABASE_NAME"),
+        os.environ.get("PGDATABASE"),
+        DEFAULT_DATABASE_NAME,
+    ):
+        name = (candidate or "").strip()
+        if name:
+            return name
+    return DEFAULT_DATABASE_NAME
+
+
+def allow_sqlite_fallback() -> bool:
+    """Implicit SQLite after a Lakebase failure is opt-in, not the default."""
+    return os.environ.get("ALLOW_SQLITE_FALLBACK", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def build_psycopg2_url(
+    host: str,
+    user: str,
+    password: str,
+    database: str,
+    port: str = "5432",
+    sslmode: str = "require",
+) -> str:
+    """SQLAlchemy URL pinned to psycopg2 (the driver in requirements.txt).
+
+    Bare ``postgresql://`` is mapped to psycopg v3 on current SQLAlchemy, which
+    is not installed in the Databricks App image.
+    """
+    from urllib.parse import quote
+
+    return (
+        f"postgresql+psycopg2://{quote(user, safe='')}:{quote(password, safe='')}"
+        f"@{host}:{port}/{quote(database, safe='')}?sslmode={sslmode}"
+    )
+
+
+def generate_connection_string(
+    endpoint,
+    pg_username: str = None,
+    database_name: str = None,
+    host: str = None,
+    port: str = None,
+) -> str:
+    """Generate a PostgreSQL connection string using a fresh OAuth token."""
     w = _get_workspace_client()
     cred = w.postgres.generate_database_credential(endpoint=endpoint.name)
     token = cred.token
-    host = endpoint.status.hosts.host
+    resolved_host = (host or "").strip() or endpoint.status.hosts.host
+    resolved_port = (port or os.environ.get("PGPORT") or "5432").strip() or "5432"
     user = pg_username or "token"
-    from urllib.parse import quote
-    return f"postgresql://{quote(user, safe='')}:{quote(token, safe='')}@{host}:5432/databricks_postgres?sslmode=require"
+    database = postgres_database_name(database_name)
+    sslmode = (os.environ.get("PGSSLMODE") or "require").strip() or "require"
+    return build_psycopg2_url(
+        resolved_host, user, token, database, port=resolved_port, sslmode=sslmode,
+    )
 
 
 def _build_engine(connection_url: str) -> Engine:
@@ -140,66 +197,96 @@ def _build_engine(connection_url: str) -> Engine:
         connection_url,
         echo=False,
         pool_pre_ping=True,
+        pool_recycle=3600,
         pool_size=5,
         max_overflow=10,
     )
 
 
 def uses_app_resource_postgres() -> bool:
-    """True when the app declares a Lakebase postgres resource (Databricks injects PG*).
+    """True when Databricks Apps injected a complete Lakebase postgres resource.
 
-    Requires all four PG* variables including PGPASSWORD — if the platform
-    fails to inject the password we fall through to the SDK credential path.
+    Platform sets PGHOST/PGDATABASE/PGUSER/PGSSLMODE when a postgres resource is
+    attached. LAKEBASE_ENDPOINT must be bound with valueFrom (it is not
+    auto-injected). Auth is a one-hour OAuth token, not PGPASSWORD.
     """
     return bool(
-        os.environ.get("PGHOST")
-        and os.environ.get("PGDATABASE")
-        and os.environ.get("PGUSER")
-        and os.environ.get("PGPASSWORD")
+        os.environ.get("PGHOST", "").strip()
+        and os.environ.get("PGDATABASE", "").strip()
+        and os.environ.get("PGUSER", "").strip()
+        and os.environ.get("LAKEBASE_ENDPOINT", "").strip()
     )
+
+
+def require_complete_app_postgres_env() -> None:
+    """Fail if PG* and LAKEBASE_ENDPOINT are only partially set.
+
+    A postgres App resource without ``LAKEBASE_ENDPOINT`` used to fall through
+    to SDK project lookup. Apps OAuth needs the endpoint path explicitly.
+    """
+    pg_present = [
+        key
+        for key in ("PGHOST", "PGDATABASE", "PGUSER")
+        if os.environ.get(key, "").strip()
+    ]
+    endpoint = os.environ.get("LAKEBASE_ENDPOINT", "").strip()
+    if uses_app_resource_postgres():
+        return
+    if not pg_present and not endpoint:
+        return
+    raise RuntimeError(
+        "Lakebase App postgres resource is incomplete. Bind "
+        "LAKEBASE_ENDPOINT with valueFrom: lakebase-db (platform injects "
+        f"PGHOST/PGDATABASE/PGUSER; have {pg_present or 'none'}, "
+        f"endpoint={'set' if endpoint else 'missing'})."
+    )
+
+
+def app_postgres_username() -> str:
+    """Postgres role injected for the app service principal (PGUSER)."""
+    user = os.environ.get("PGUSER", "").strip()
+    if not user:
+        raise RuntimeError("PGUSER is required for App postgres-resource Lakebase mode.")
+    return user
 
 
 def init_lakebase_from_app_resource() -> Engine:
-    """Connect via PG* env from a Databricks Apps Lakebase database resource.
-
-    No SDK project provisioning and no token refresh thread (SP database password).
-    """
+    """Connect from an App postgres resource using PGUSER + OAuth token."""
     global _engine, _session_factory, _token_refresh_thread, _current_connection_url
-    from urllib.parse import quote_plus
 
     if not uses_app_resource_postgres():
-        raise RuntimeError("PGHOST/PGDATABASE/PGUSER must be set for app-resource Lakebase mode.")
+        raise RuntimeError(
+            "PGHOST/PGDATABASE/PGUSER/LAKEBASE_ENDPOINT must be set "
+            "for app-resource Lakebase mode."
+        )
 
-    host = os.environ["PGHOST"]
+    endpoint_name = os.environ["LAKEBASE_ENDPOINT"].strip()
+    endpoint = _get_workspace_client().postgres.get_endpoint(name=endpoint_name)
+    pg_username = app_postgres_username()
+    host = os.environ["PGHOST"].strip()
     port = os.environ.get("PGPORT") or "5432"
-    user = os.environ["PGUSER"]
-    password = os.environ.get("PGPASSWORD", "")
-    database = os.environ["PGDATABASE"]
-    sslmode = os.environ.get("PGSSLMODE") or "require"
-
-    url = (
-        f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
-        f"@{host}:{port}/{quote_plus(database)}"
+    database = postgres_database_name()
+    url = generate_connection_string(
+        endpoint, pg_username, database_name=database, host=host, port=port,
     )
 
-    print(f"[LAKEBASE] App resource mode (host={host}, db={database})", flush=True)
+    print(f"[LAKEBASE] App resource OAuth mode (host={host}, db={database})", flush=True)
     with _lock:
-        _token_refresh_thread = None
-        _current_connection_url = url.split("@", 1)[-1]  # host/db tail only for debugging
-        _engine = create_engine(
-            url,
-            echo=False,
-            pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
-            connect_args={"sslmode": sslmode},
-        )
+        _current_connection_url = url
+        _engine = _build_engine(url)
         _session_factory = sessionmaker(bind=_engine)
 
     with _engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    print("[LAKEBASE] App resource PostgreSQL connection OK", flush=True)
-    log.info("Lakebase initialized from App postgres resource (no token refresh)")
+
+    _token_refresh_thread = threading.Thread(
+        target=_refresh_token_loop,
+        args=(endpoint, pg_username),
+        daemon=True,
+    )
+    _token_refresh_thread.start()
+    print("[LAKEBASE] App resource OAuth connection OK", flush=True)
+    log.info("Lakebase initialized from App postgres resource with token refresh")
     return _engine
 
 
@@ -223,7 +310,12 @@ def _refresh_token_loop(endpoint, pg_username):
             time.sleep(backoff)
 
         try:
-            new_url = generate_connection_string(endpoint, pg_username)
+            new_url = generate_connection_string(
+                endpoint,
+                pg_username,
+                host=os.environ.get("PGHOST") or None,
+                port=os.environ.get("PGPORT") or None,
+            )
             new_engine = _build_engine(new_url)
             # Verify the new connection actually works before swapping
             with new_engine.connect() as conn:
@@ -305,8 +397,13 @@ def get_engine() -> Engine:
     return _engine
 
 
-def get_session():
-    """Return a new database session."""
+def get_session_factory():
+    """Return the current sessionmaker. Call init_lakebase() first."""
     if _session_factory is None:
         raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
-    return _session_factory()
+    return _session_factory
+
+
+def get_session():
+    """Return a new database session."""
+    return get_session_factory()()

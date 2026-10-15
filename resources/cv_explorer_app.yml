@@ -19,6 +19,10 @@ resources:
             value: "true"
           - name: LAKEBASE_PROJECT_ID
             value: ${var.lakebase_project_id}
+          # Platform injects PGHOST/PGPORT/PGDATABASE/PGUSER/PGSSLMODE from the
+          # postgres resource. LAKEBASE_ENDPOINT is not auto-injected — bind it.
+          - name: LAKEBASE_ENDPOINT
+            value_from: lakebase-db
           - name: DEMO_VOLUME_PATH
             value_from: demo-volume
           - name: SERVING_ENDPOINT

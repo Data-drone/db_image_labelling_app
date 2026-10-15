@@ -7,6 +7,10 @@ env:
     value: 'true'
   - name: LAKEBASE_PROJECT_ID
     value: 'cv-explorer-dev'
+  # Apps postgres resource (same name as resources/cv_explorer_app.yml).
+  # PGHOST/PGUSER/PGDATABASE are injected; this binding is required for OAuth.
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: lakebase-db
   # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
     value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'

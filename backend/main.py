@@ -50,7 +50,13 @@ async def lifespan(app: FastAPI):
 
     if use_lakebase:
         try:
-            from .lakebase import init_lakebase, init_lakebase_from_app_resource, uses_app_resource_postgres
+            from .lakebase import (
+                init_lakebase,
+                init_lakebase_from_app_resource,
+                require_complete_app_postgres_env,
+                uses_app_resource_postgres,
+            )
+            require_complete_app_postgres_env()
             if uses_app_resource_postgres():
                 print("[STARTUP] Lakebase via App postgres resource (PG* env)...", flush=True)
                 engine = init_lakebase_from_app_resource()
@@ -62,7 +68,18 @@ async def lifespan(app: FastAPI):
             log.info("Connected to Lakebase")
         except Exception as e:
             print(f"[STARTUP] Lakebase init failed: {e}", flush=True)
-            log.warning("Lakebase init failed (%s), falling back to SQLite", e)
+            from .lakebase import allow_sqlite_fallback
+            if not allow_sqlite_fallback():
+                log.exception("Lakebase init failed; refusing implicit SQLite fallback")
+                raise RuntimeError(
+                    "Lakebase initialization failed. Set USE_LAKEBASE=false for "
+                    "intentional SQLite use, or ALLOW_SQLITE_FALLBACK=true to "
+                    "explicitly permit fallback."
+                ) from e
+            log.warning(
+                "Lakebase init failed (%s); ALLOW_SQLITE_FALLBACK=true, using SQLite",
+                e,
+            )
             use_lakebase = False
 
     if not use_lakebase:

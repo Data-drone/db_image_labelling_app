@@ -18,7 +18,7 @@ Browser (React SPA)
 - `backend/models.py` — SQLAlchemy models (`labeling_projects`, `project_samples`, `annotations`, `preannotate_runs`)
 - `backend/schemas.py` — Pydantic request/response schemas
 - `backend/deps.py` — shared dependencies (`get_db`, `get_user_email`)
-- `backend/lakebase.py` — Lakebase: SDK auto-provision + token refresh, or **App postgres resource** (`PG*` env, no refresh)
+- `backend/lakebase.py` — Lakebase: SDK auto-provision or **App postgres resource** (`PG*` + `LAKEBASE_ENDPOINT` via `valueFrom: lakebase-db`). App-resource mode uses injected `PGUSER` plus a refreshing OAuth token. SQLite after a Lakebase failure requires `ALLOW_SQLITE_FALLBACK=true`. Partial `PG*` without the endpoint binding fails startup.
 - `backend/volumes.py` — UC Volume I/O (`read_image_bytes`, `scan_volume_for_samples`)
 - `backend/routes/` — one file per domain: `projects`, `labeling`, `inference`, `preannotate_runs`, `export`, `browse`, `admin`
 - `databricks.yml` + `resources/*.yml` — DAB bundle: app (`cv_explorer_app.yml` with UC/Lakebase/serving/job resources), pre-annotate job
@@ -96,7 +96,7 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
 
 - **Images are never uploaded** — projects point at an existing UC Volume path. `scan_volume_for_samples` lists one directory level and creates `ProjectSample` rows.
 - **Image serving** goes through the backend: `/api/projects/{id}/samples/{id}/image` reads bytes via SDK and streams them. Thumbnails are resized with Pillow.
-- **Lakebase tokens expire** — a background thread in `lakebase.py` refreshes every 20 minutes with exponential backoff on failure.
+- **Lakebase tokens expire** — a background thread in `lakebase.py` refreshes every 20 minutes with exponential backoff on failure. App-resource mode uses the same loop; `deps.get_engine()` / `get_session_factory()` delegate to `lakebase` so callers see the refreshed engine.
 - **Annotation model**: classification = one `Annotation` row per sample; detection = multiple rows with `bbox_json`. The `annotate-batch` endpoint replaces all annotations for a sample (delete + insert).
 - **Project cloning** copies sample rows (same file paths) with empty annotations and bumps the version number.
 
@@ -104,7 +104,7 @@ Without a bundle, resources can be added in the Apps UI instead; keep the same `
 
 - **SPA catch-all ordering**: The `/{path:path}` route in `main.py` must be registered last. New `/api/` routes in a router with `prefix="/api/..."` are fine, but bare routes will be masked.
 - **Volume scanning is not recursive**: Only top-level files in the volume path are found. Nested directories are ignored.
-- **Local dev without Databricks**: Set `USE_LAKEBASE=false` to fall back to SQLite. Image paths must be local (e.g., `/tmp/images/`). User identity will be `"anonymous"`.
+- **Local dev without Databricks**: Set `USE_LAKEBASE=false` to fall back to SQLite. Image paths must be local (e.g., `/tmp/images/`). User identity will be `"anonymous"`. A failed Lakebase init no longer silently uses SQLite unless `ALLOW_SQLITE_FALLBACK=true`.
 - **CORS**: Defaults to `*` if `CORS_ORIGINS` env var is not set.
 - **Lakebase Postgres username**: Derived from the JWT `sub` claim of the generated credential, not from listing roles. See `_get_pg_username` in `lakebase.py`.
 

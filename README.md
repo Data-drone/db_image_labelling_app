@@ -98,7 +98,8 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
 | `LAKEBASE_AUTO_PROVISION` | `false` (bundle app) | With a **postgres** App resource, use `false` and connect via injected `PG*` variables (no SDK project creation on app startup). |
 | `LAKEBASE_PROJECT_ID` | `cv-explorer` | Still used by **async pre-annotate job** clusters (SDK Lakebase path on the job). |
-| `PGHOST`, `PGUSER`, … | _(platform)_ | Set automatically when a Lakebase **postgres** database resource is attached. |
+| `LAKEBASE_ENDPOINT` | _(from `valueFrom: lakebase-db`)_ | Postgres endpoint resource path. **Not auto-injected** — must be bound in the bundle / `app.yml`. |
+| `PGHOST`, `PGUSER`, `PGDATABASE`, `PGPORT`, `PGSSLMODE` | _(platform)_ | Injected when a Lakebase **postgres** resource is attached. Password is an OAuth token, not `PGPASSWORD`. |
 
 ## Using with Databricks Asset Bundles
 
