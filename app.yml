@@ -1,6 +1,7 @@
 command: ["python", "start.py"]
 env:
-  # Lakebase: connect via SDK to the dev project
+  # Manual Git deployments must attach App resources with these exact names.
+  # Bundle deployments use resources/cv_explorer_app.yml instead.
   - name: LAKEBASE_AUTO_PROVISION
     value: 'false'
   - name: USE_LAKEBASE
@@ -15,20 +16,22 @@ env:
     value: 'cv_explorer_app'
   - name: LAKEBASE_MIGRATE_PUBLIC
     value: 'false'
-  # Unity Catalog volumes
   - name: DEMO_VOLUME_PATH
-    value: '/Volumes/brian_gen_ai/cv_explorer/demo_images'
+    valueFrom: demo-volume
   - name: EXPORT_VOLUME_PATH
-    value: '/Volumes/brian_gen_ai/cv_explorer/exports'
-  # Optional SQL warehouse for Delta table image sources (Create Project).
-  # Leave empty until a warehouse id is bound in the Apps UI or bundle.
+    valueFrom: export-volume
   - name: SQL_WAREHOUSE_ID
-    value: ''
+    valueFrom: sql-warehouse
+  - name: SERVING_ENDPOINT
+    valueFrom: serving-endpoint
+  - name: SERVING_ENDPOINT_ADAPTER
+    value: 'sam31'
   - name: EMBEDDING_ENDPOINT
     valueFrom: embedding-endpoint
-  # Finetuning job id
+  - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
+    valueFrom: app-preannotate-job
   - name: FINETUNE_DATABRICKS_JOB_ID
-    value: '143235656478173'
+    valueFrom: app-finetune-job
   # Comma-separated Databricks IdP emails. Sentinel disables Admin mutations.
   - name: ADMIN_EMAILS
     value: '__disabled__'

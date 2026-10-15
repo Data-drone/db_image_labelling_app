@@ -34,7 +34,7 @@ resources:
           - name: EMBEDDING_ENDPOINT
             value_from: embedding-endpoint
           - name: SERVING_ENDPOINT_ADAPTER
-            value: "sam31"
+            value: ${var.inference_adapter}
           - name: USE_SERVING_DATA_PLANE
             value: "true"
           - name: PRE_ANNOTATE_DATABRICKS_JOB_ID

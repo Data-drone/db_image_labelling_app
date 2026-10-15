@@ -26,7 +26,7 @@ resources:
         - name: lakebase_schema_name
           default: ${var.lakebase_schema_name}
         - name: inference_adapter
-          default: "sam31"
+          default: ${var.inference_adapter}
       tasks:
         - task_key: main
           environment_key: preann_env

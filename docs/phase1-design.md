@@ -1,5 +1,11 @@
 # CV Explorer — Phase 1 Design
 
+> Historical design document. For current deployment and authentication
+> behavior, use `README.md` and `AGENTS.md`. In particular, Lakehouse Sync is
+> configured separately in the workspace, App-resource Lakebase authentication
+> uses injected `PGUSER` plus renewable OAuth credentials, and current
+> deployments use the `cv_explorer_app` PostgreSQL schema.
+
 ## Vision
 
 A fast, functional image labeling tool for Databricks. Users point it at a UC Volume of images, create a labeling project, collaborate on annotations, and get automatic Delta Table replication via Lakehouse Sync — suitable for fine-tuning ML/LLM models.
