@@ -8,6 +8,11 @@ bundle:
 include:
   - resources/*.yml
 
+sync:
+  exclude:
+    - .isaac/**
+    - tmp/**
+
 variables:
   # App resources (override if your workspace differs)
   # Override for your workspace, e.g. brian_gen_ai.cv_explorer.demo_images
