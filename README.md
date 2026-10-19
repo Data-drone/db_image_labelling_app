@@ -17,6 +17,7 @@ configured separately in the workspace.
 - **Similarity and prioritization**: DINO embeddings, nearest neighbors, duplicate detection, cluster maps, outliers, diversity sampling, and active-learning queues
 - **Keyboard-driven workflow**: class hotkeys, navigation, and canvas shortcuts
 - **Sample scrubber**: navigate forward/backward through images, revisit and re-label previous samples
+- **Spatial consensus**: blind classification, box, and mask votes with configurable coverage/panel/quorum, IoU matching, medoid geometry, audited visual adjudication, agreement metrics, and consensus-aware exports
 - **Gallery and progress dashboard**: paginated thumbnails, status/class/filename/labeller filters, per-class and per-user counts, velocity, and completion estimates
 - **Import and audit history**: JSONL/COCO import, correction history, and COCO segmentation/RLE support
 - **Project versioning**: clone projects to create new versions for iterative labeling
@@ -27,8 +28,12 @@ configured separately in the workspace.
 ## Current limitations
 
 - UC Volume scans inspect only the selected directory; use a Delta-table image source for nested layouts.
-- Collaborative locking is only partially implemented: the backend has lock fields and a `/next` endpoint, but the current scrubber does not acquire or renew locks.
-- There is no project-level RBAC, assignment workflow, or consensus/reviewer queue. `ADMIN_EMAILS` protects destructive Admin mutations only.
+- Collaborative sample locking for non-consensus projects is only partially implemented; consensus projects use atomic private task claims, heartbeat, release, and stale-lock recovery.
+- Consensus is unweighted and image-only. Per-class thresholds, gold items, kappa, video tracks, keypoints, and attributes remain planned.
+- Project access is not full RBAC. Consensus settings are owner-only; reviewers
+  and optional labeller allowlists are selected from active Databricks users.
+  Databricks App `CAN USE` still controls who can enter the app, while other
+  non-consensus project mutations follow the existing App-access model.
 - Import is API-only and supports JSONL and COCO; Pascal VOC, YOLO, and CSV import are not implemented.
 - YOLO export, video extraction, keypoints, comments/flags, and completion webhooks remain planned.
 
@@ -37,11 +42,13 @@ See the [roadmap](docs/plans/2026-04-27-roadmap.md) for shipped, partial, and pl
 ## Core workflows
 
 - **Create a project:** choose a UC Volume or Delta-table source, labeling
-  mode, and class list.
+  mode, and class list. Consensus projects can assign reviewers and an
+  optional labeller pool from the Databricks user directory.
 - **Label samples:** select one or more classification labels, draw detection
   boxes, or paint segmentation masks while navigating with the scrubber.
 - **Review and prioritize:** inspect correction history, model drafts,
-  similarity results, outliers, duplicates, and Smart Queue suggestions.
+  similarity results, outliers, duplicates, Smart Queue suggestions, and
+  classification and spatial consensus disagreements.
 - **Prepare training data:** create a reference snapshot or copied export,
   inspect dataset history, and optionally launch the configured finetuning Job.
 
@@ -69,6 +76,7 @@ database credentials every 20 minutes.
 | **Create Project** | `/projects/new` | Pick a Volume or Delta table, task type, and classes |
 | **Project Dashboard** | `/projects/:id` | Progress, AI tools, gallery, datasets, export, and training handoff |
 | **Labeling View** | `/projects/:id/label` | Classify, draw boxes, or paint segmentation masks |
+| **Consensus Review** | `/projects/:id/review` | Visually adjudicate classification, box, and mask disagreements |
 | **Admin** | `/admin` | Read status; authorized users may run guarded mutations |
 
 ## Quick Start

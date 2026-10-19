@@ -57,6 +57,7 @@ export default function MaskToolPanel({
   addingClass,
   saving,
   onSave,
+  saveLabel,
   onSkip,
   predictions,
   endpointReady,
@@ -108,7 +109,11 @@ export default function MaskToolPanel({
             value={brushSize}
             disabled={tool === 'polygon'}
             onChange={(e) => onBrushSizeChange(Number(e.target.value))}
-            style={{ flex: 1, accentColor: 'var(--accent, #4299e0)', opacity: tool === 'polygon' ? 0.4 : 1 }}
+            style={{
+              flex: 1,
+              accentColor: getClassColor(activeClassIndex),
+              opacity: tool === 'polygon' ? 0.4 : 1,
+            }}
           />
           {/* Image pixels, not screen pixels: the stroke stays the same physical
               size on the photo whatever the zoom. */}
@@ -245,9 +250,9 @@ export default function MaskToolPanel({
 
       <div style={divider} />
 
-      {/* Class selector — sets the class for the next new layer */}
+      {/* Class selector — retints the active layer and the next new one */}
       <div style={{ marginBottom: '0.75rem', maxHeight: 160, overflowY: 'auto', flexShrink: 0 }}>
-        <h4 style={sectionTitle}>Class for new layer</h4>
+        <h4 style={sectionTitle}>Class</h4>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
           {classList.map((cls, i) => (
             <button
@@ -361,7 +366,7 @@ export default function MaskToolPanel({
         disabled={saving}
         style={{ width: '100%', fontSize: '0.85rem', marginBottom: '0.5rem' }}
       >
-        {saving ? 'Saving...' : `Save & Next (${storable.length})`}
+        {saving ? 'Saving...' : (saveLabel || `Save & Next (${storable.length})`)}
       </button>
 
       <button

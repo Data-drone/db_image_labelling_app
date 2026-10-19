@@ -119,6 +119,11 @@ updates bundle resources/files.
 - **Annotation model**: classification uses one row per sample; detection uses
   normalized `bbox_json`; segmentation uses COCO RLE `mask_json`. The
   `annotate-batch` endpoint replaces a sample's annotations.
+- **Consensus model**: classification uses exact label-set voting. Detection
+  and segmentation cluster same-class shapes by snapshotted IoU/quorum and
+  materialize the submitted medoid geometry. Private `task_annotations`
+  remain immutable; final `annotations` link to an append-only
+  `consensus_resolution`. Unmatched or ambiguous shapes require visual review.
 - **Project cloning** copies sample rows (same file paths) with empty annotations and bumps the version number.
 
 ## Common Pitfalls

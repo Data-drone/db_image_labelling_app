@@ -4,7 +4,7 @@ Pydantic schemas for the CV Explorer API.
 
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from backend import masks
 
@@ -24,6 +24,14 @@ class ProjectCreate(BaseModel):
     source_filter: Optional[str] = None
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
+    consensus_enabled: bool = False
+    consensus_panel_size: int = 3
+    consensus_coverage_percent: int = 100
+    consensus_quorum: int = 2
+    consensus_iou_threshold: float = 0.5
+    consensus_agreement_threshold: float = 0.5
+    consensus_reviewer_emails: list[str] = Field(default_factory=list)
+    consensus_labeller_emails: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _require_source(self):
@@ -39,6 +47,32 @@ class ProjectCreate(BaseModel):
                 raise ValueError("source_table is required when source_type is 'table'")
             col = (self.image_path_column or "image_path").strip()
             self.image_path_column = col or "image_path"
+        if not 1 <= self.consensus_panel_size <= 15:
+            raise ValueError("consensus_panel_size must be between 1 and 15")
+        if not 0 <= self.consensus_coverage_percent <= 100:
+            raise ValueError("consensus_coverage_percent must be between 0 and 100")
+        if not 1 <= self.consensus_quorum <= self.consensus_panel_size:
+            raise ValueError("consensus_quorum must be between 1 and consensus_panel_size")
+        if not 0 <= self.consensus_iou_threshold <= 1:
+            raise ValueError("consensus_iou_threshold must be between 0 and 1")
+        if not 0 <= self.consensus_agreement_threshold <= 1:
+            raise ValueError("consensus_agreement_threshold must be between 0 and 1")
+        self.consensus_reviewer_emails = sorted({
+            email.strip().lower()
+            for email in self.consensus_reviewer_emails
+            if email and email.strip()
+        })
+        self.consensus_labeller_emails = sorted({
+            email.strip().lower()
+            for email in self.consensus_labeller_emails
+            if email and email.strip()
+        })
+        overlap = set(self.consensus_reviewer_emails) & set(self.consensus_labeller_emails)
+        if overlap:
+            raise ValueError(
+                "A person cannot be both a reviewer and a labeller: "
+                + ", ".join(sorted(overlap))
+            )
         return self
 
 
@@ -54,6 +88,15 @@ class ProjectUpdate(BaseModel):
     confirm_source_change: bool = False
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
+    consensus_enabled: Optional[bool] = None
+    consensus_panel_size: Optional[int] = None
+    consensus_coverage_percent: Optional[int] = None
+    consensus_quorum: Optional[int] = None
+    consensus_iou_threshold: Optional[float] = None
+    consensus_agreement_threshold: Optional[float] = None
+    consensus_reviewer_emails: Optional[list[str]] = None
+    consensus_labeller_emails: Optional[list[str]] = None
+    reset_consensus_unstarted: bool = False
 
     @model_validator(mode="after")
     def _source_type_ok(self):
@@ -63,6 +106,51 @@ class ProjectUpdate(BaseModel):
         if st not in ("volume", "table"):
             raise ValueError("source_type must be 'volume' or 'table'")
         self.source_type = st
+        return self
+
+    @model_validator(mode="after")
+    def _consensus_values_ok(self):
+        if self.consensus_panel_size is not None and not 1 <= self.consensus_panel_size <= 15:
+            raise ValueError("consensus_panel_size must be between 1 and 15")
+        if (
+            self.consensus_coverage_percent is not None
+            and not 0 <= self.consensus_coverage_percent <= 100
+        ):
+            raise ValueError("consensus_coverage_percent must be between 0 and 100")
+        if self.consensus_quorum is not None and self.consensus_quorum < 1:
+            raise ValueError("consensus_quorum must be at least 1")
+        if (
+            self.consensus_iou_threshold is not None
+            and not 0 <= self.consensus_iou_threshold <= 1
+        ):
+            raise ValueError("consensus_iou_threshold must be between 0 and 1")
+        if (
+            self.consensus_agreement_threshold is not None
+            and not 0 <= self.consensus_agreement_threshold <= 1
+        ):
+            raise ValueError("consensus_agreement_threshold must be between 0 and 1")
+        if self.consensus_reviewer_emails is not None:
+            self.consensus_reviewer_emails = sorted({
+                email.strip().lower()
+                for email in self.consensus_reviewer_emails
+                if email and email.strip()
+            })
+        if self.consensus_labeller_emails is not None:
+            self.consensus_labeller_emails = sorted({
+                email.strip().lower()
+                for email in self.consensus_labeller_emails
+                if email and email.strip()
+            })
+        if (
+            self.consensus_reviewer_emails is not None
+            and self.consensus_labeller_emails is not None
+        ):
+            overlap = set(self.consensus_reviewer_emails) & set(self.consensus_labeller_emails)
+            if overlap:
+                raise ValueError(
+                    "A person cannot be both a reviewer and a labeller: "
+                    + ", ".join(sorted(overlap))
+                )
         return self
 
 
@@ -79,8 +167,22 @@ class ProjectOut(BaseModel):
     source_filter: Optional[str] = None
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
+    consensus_enabled: bool = False
+    consensus_panel_size: int = 3
+    consensus_coverage_percent: int = 100
+    consensus_quorum: int = 2
+    consensus_iou_threshold: float = 0.5
+    consensus_agreement_threshold: float = 0.5
+    consensus_reviewer_emails: list[str] = Field(default_factory=list)
+    consensus_labeller_emails: list[str] = Field(default_factory=list)
+    consensus_role: str = "labeller"
+    consensus_total_tasks: int = 0
+    consensus_submitted_tasks: int = 0
+    consensus_resolved_items: int = 0
+    consensus_review_items: int = 0
     created_by: str
     created_at: datetime
+    archived_at: Optional[datetime] = None
     sample_count: int = 0
     labeled_count: int = 0
     version: int = 1
@@ -97,6 +199,17 @@ class SourceSyncOut(BaseModel):
     source_type: str
     source_table: Optional[str] = None
     source_volume: str = ""
+
+
+class WorkspaceUserOut(BaseModel):
+    email: str
+    display_name: Optional[str] = None
+
+
+class WorkspaceUserDirectoryOut(BaseModel):
+    users: list[WorkspaceUserOut] = Field(default_factory=list)
+    source: Literal["workspace_scim", "app_visitors"]
+    warning: Optional[str] = None
 
 
 class ProjectStats(BaseModel):
@@ -325,6 +438,161 @@ class AnnotationOut(BaseModel):
         if self.mask_json is not None:
             self.mask_json = masks.to_wire(self.mask_json)
         return self
+
+
+# ---------------------------------------------------------------------------
+# Blind consensus
+# ---------------------------------------------------------------------------
+class ConsensusTaskAnnotationOut(BaseModel):
+    id: Optional[int] = None
+    label: str
+    ann_type: str = "classification"
+    bbox_json: Optional[dict] = None
+    mask_json: Optional[dict] = None
+    cluster_id: Optional[int] = None
+    agreement_score: Optional[float] = None
+    support: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _mask_to_wire(self):
+        if self.mask_json is not None:
+            self.mask_json = masks.to_wire(self.mask_json)
+        return self
+
+
+class ConsensusTaskOut(BaseModel):
+    id: int
+    case_id: int
+    sample_id: int
+    status: str
+    assigned_to: str
+    lock_token: str
+    locked_at: datetime
+    has_previous_submission: bool = False
+    editable_until_review: bool = True
+    sample: SampleOut
+    annotations: list[ConsensusTaskAnnotationOut] = Field(default_factory=list)
+
+
+class ConsensusTaskSubmit(BaseModel):
+    lock_token: str
+    annotations: list[AnnotationCreate]
+    allow_empty: bool = False
+
+
+class ConsensusLockRequest(BaseModel):
+    lock_token: str
+
+
+class ConsensusProgressOut(BaseModel):
+    total_tasks: int = 0
+    submitted_tasks: int = 0
+    available_tasks: int = 0
+    my_submitted_tasks: int = 0
+    resolved_items: int = 0
+    review_items: int = 0
+    total_items: int = 0
+
+
+class ConsensusReopenResult(BaseModel):
+    cases_reopened: int = 0
+    tasks_added: int = 0
+    annotations_removed: int = 0
+
+
+class ConsensusResetRequest(BaseModel):
+    confirm: bool = False
+
+
+class ConsensusResetResult(BaseModel):
+    samples_reset: int = 0
+    annotations_deleted: int = 0
+    history_deleted: int = 0
+    cases_recreated: int = 0
+
+
+class ConsensusSubmitOut(BaseModel):
+    task_id: int
+    case_id: int
+    case_state: str
+    submitted_labels: list[str]
+    submitted_annotation_count: int = 0
+    resolution: Optional["ConsensusResolutionOut"] = None
+
+
+class ConsensusReviewSubmissionOut(BaseModel):
+    task_id: int
+    submitted_by: str
+    submitted_at: datetime
+    labels: list[str]
+    annotations: list[ConsensusTaskAnnotationOut] = Field(default_factory=list)
+
+
+class ConsensusReviewCaseOut(BaseModel):
+    case_id: int
+    sample_id: int
+    filename: str
+    state: str
+    task_type: str = "classification"
+    required_votes: int
+    submissions: list[ConsensusReviewSubmissionOut]
+    match_report: dict = Field(default_factory=dict)
+    proposed_annotations: list[ConsensusTaskAnnotationOut] = Field(default_factory=list)
+
+
+class ConsensusReviewPage(BaseModel):
+    items: list[ConsensusReviewCaseOut]
+    total: int
+
+
+class ConsensusReviewAction(BaseModel):
+    action: Literal["pick", "edit", "reject", "relabel"]
+    source_task_id: Optional[int] = None
+    labels: list[str] = Field(default_factory=list)
+    annotations: list[AnnotationCreate] = Field(default_factory=list)
+
+
+class ConsensusResolutionOut(BaseModel):
+    id: int
+    case_id: int
+    sample_id: int
+    method: str
+    outcome: str
+    final_labels: list[str] = Field(default_factory=list)
+    final_annotations: Optional[list[ConsensusTaskAnnotationOut]] = None
+    match_report: Optional[dict] = None
+    agreement_score: Optional[float] = None
+    vote_count: int
+    resolver: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _empty_geometry_defaults(self):
+        if self.final_annotations is None:
+            self.final_annotations = []
+        if self.match_report is None:
+            self.match_report = {}
+        return self
+
+
+class ConsensusMetricsOut(BaseModel):
+    total_items: int = 0
+    pending_items: int = 0
+    in_progress_items: int = 0
+    resolved_items: int = 0
+    review_items: int = 0
+    rejected_items: int = 0
+    total_tasks: int = 0
+    submitted_tasks: int = 0
+    auto_resolved: int = 0
+    manually_resolved: int = 0
+    mean_agreement_score: float = 0.0
+    agreement_distribution: list[dict] = Field(default_factory=list)
+    per_user: list[dict] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import ProjectDashboard from './pages/ProjectDashboard';
 import LabelingView from './pages/LabelingView';
 import BrowseVolumes from './pages/BrowseVolumes';
 import AdminPage from './pages/AdminPage';
+import ConsensusReview from './pages/ConsensusReview';
 
 function App() {
   return (
@@ -17,6 +18,7 @@ function App() {
         <Route path="/projects/new" element={<CreateProject />} />
         <Route path="/projects/:id" element={<ProjectDashboard />} />
         <Route path="/projects/:id/label" element={<LabelingView />} />
+        <Route path="/projects/:id/review" element={<ConsensusReview />} />
         <Route path="/admin" element={<AdminPage />} />
       </Routes>
     </Layout>

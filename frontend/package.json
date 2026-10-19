@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0-beta.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,9 @@
     "preview": "vite preview",
     "test:payload": "node test/annotationPayload.test.mjs",
     "test:gallery": "node --test test/galleryState.test.mjs",
-    "test": "npm run test:rle && npm run test:payload && npm run test:gallery"
+    "test:consensus": "node --test test/consensus.test.mjs",
+    "test:e2e": "playwright test",
+    "test": "npm run test:rle && npm run test:payload && npm run test:gallery && npm run test:consensus"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.0",
@@ -24,6 +26,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.55.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",

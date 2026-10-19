@@ -5,6 +5,8 @@ Tables:
 - labeling_projects: project metadata
 - project_samples: images within a project
 - annotations: labels applied to samples
+- consensus_cases / labeling_tasks / task_annotations: blind independent work
+- consensus_resolutions: append-only voting and reviewer outcomes
 """
 
 import logging
@@ -49,8 +51,18 @@ class LabelingProject(Base):
     source_filter = Column(Text, nullable=True)  # optional WHERE body for table scan
     serving_endpoint = Column(String(255), nullable=True)  # Model Serving endpoint name
     endpoint_config = Column(JSON, nullable=True)  # response parsing overrides
+    consensus_enabled = Column(Boolean, nullable=False, default=False)
+    consensus_panel_size = Column(Integer, nullable=False, default=3)
+    consensus_coverage_percent = Column(Integer, nullable=False, default=100)
+    consensus_quorum = Column(Integer, nullable=False, default=2)
+    consensus_iou_threshold = Column(Float, nullable=False, default=0.5)
+    consensus_agreement_threshold = Column(Float, nullable=False, default=0.5)
+    consensus_reviewer_emails = Column(JSON, nullable=True)
+    # Empty means every authenticated App user who is not a reviewer may vote.
+    consensus_labeller_emails = Column(JSON, nullable=True)
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    archived_at = Column(DateTime(timezone=True), nullable=True)
     version = Column(Integer, default=1, nullable=False)
     parent_project_id = Column(Integer, nullable=True)  # FK to parent version (null = original)
 
@@ -59,6 +71,9 @@ class LabelingProject(Base):
     )
     annotations = relationship(
         "Annotation", back_populates="project", cascade="all, delete-orphan",
+    )
+    consensus_cases = relationship(
+        "ConsensusCase", back_populates="project", cascade="all, delete-orphan",
     )
 
 
@@ -121,6 +136,7 @@ class Annotation(Base):
     is_draft = Column(Boolean, nullable=False, default=False)  # model suggestions vs human-confirmed
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    consensus_resolution_id = Column(Integer, nullable=True)
 
     sample = relationship("ProjectSample", back_populates="annotations")
     project = relationship("LabelingProject", back_populates="annotations")
@@ -243,6 +259,168 @@ class AnnotationHistory(Base):
     )
 
 
+class AppUser(Base):
+    """A Databricks user who has authenticated through the Apps proxy."""
+
+    __tablename__ = "app_users"
+
+    email = Column(String(255), primary_key=True)
+    display_name = Column(String(255), nullable=True)
+    last_seen_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ConsensusCase(Base):
+    """Per-sample state for an opt-in multi-labeller consensus project."""
+
+    __tablename__ = "consensus_cases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(
+        Integer, ForeignKey("labeling_projects.id", ondelete="CASCADE"), nullable=False,
+    )
+    sample_id = Column(
+        Integer, ForeignKey("project_samples.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    selected_for_consensus = Column(Boolean, nullable=False, default=True)
+    required_votes = Column(Integer, nullable=False, default=3)
+    quorum = Column(Integer, nullable=False, default=2)
+    iou_threshold = Column(Float, nullable=False, default=0.5)
+    agreement_threshold = Column(Float, nullable=False, default=0.5)
+    state = Column(String(32), nullable=False, default="pending")
+    active_resolution_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    project = relationship("LabelingProject", back_populates="consensus_cases")
+    sample = relationship("ProjectSample")
+    tasks = relationship(
+        "LabelingTask", back_populates="case", cascade="all, delete-orphan",
+    )
+    resolutions = relationship(
+        "ConsensusResolution", back_populates="case", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_consensus_cases_project_state", "project_id", "state"),
+    )
+
+
+class LabelingTask(Base):
+    """One private, independently submitted vote for a consensus case."""
+
+    __tablename__ = "labeling_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_id = Column(
+        Integer, ForeignKey("consensus_cases.id", ondelete="CASCADE"), nullable=False,
+    )
+    project_id = Column(
+        Integer, ForeignKey("labeling_projects.id", ondelete="CASCADE"), nullable=False,
+    )
+    sample_id = Column(
+        Integer, ForeignKey("project_samples.id", ondelete="CASCADE"), nullable=False,
+    )
+    slot_index = Column(Integer, nullable=False)
+    assigned_to = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    lock_token = Column(String(64), nullable=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    assigned_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    # Submitted votes can be revised while the case is still collecting
+    # votes. Each save advances this pointer; old TaskAnnotation rows remain
+    # as an append-only audit trail.
+    annotation_revision = Column(Integer, nullable=False, default=0)
+    # Once the required panel is complete, every submitted vote is frozen
+    # before automatic resolution or reviewer adjudication begins.
+    locked_for_review = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    case = relationship("ConsensusCase", back_populates="tasks")
+    annotations = relationship(
+        "TaskAnnotation", back_populates="task", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_labeling_tasks_project_status", "project_id", "status"),
+        Index("ix_labeling_tasks_assignee_status", "assigned_to", "status"),
+        Index(
+            "uq_labeling_tasks_case_slot", "case_id", "slot_index", unique=True,
+        ),
+        Index(
+            "uq_labeling_tasks_case_assignee", "case_id", "assigned_to", unique=True,
+        ),
+    )
+
+
+class TaskAnnotation(Base):
+    """An annotation in an immutable submitted task."""
+
+    __tablename__ = "task_annotations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(
+        Integer, ForeignKey("labeling_tasks.id", ondelete="CASCADE"), nullable=False,
+    )
+    label = Column(String(255), nullable=False)
+    ann_type = Column(String(50), nullable=False, default="classification")
+    bbox_json = Column(JSON, nullable=True)
+    mask_json = Column(JSON, nullable=True)
+    revision = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    task = relationship("LabelingTask", back_populates="annotations")
+
+    __table_args__ = (
+        Index("ix_task_annotations_task", "task_id"),
+        Index("ix_task_annotations_task_revision", "task_id", "revision"),
+    )
+
+
+class ConsensusResolution(Base):
+    """Append-only record of automatic and reviewer consensus decisions."""
+
+    __tablename__ = "consensus_resolutions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_id = Column(
+        Integer, ForeignKey("consensus_cases.id", ondelete="CASCADE"), nullable=False,
+    )
+    project_id = Column(
+        Integer, ForeignKey("labeling_projects.id", ondelete="CASCADE"), nullable=False,
+    )
+    sample_id = Column(
+        Integer, ForeignKey("project_samples.id", ondelete="CASCADE"), nullable=False,
+    )
+    method = Column(String(32), nullable=False)
+    outcome = Column(String(32), nullable=False, default="resolved")
+    final_labels = Column(JSON, nullable=True)
+    final_annotations = Column(JSON, nullable=True)
+    match_report = Column(JSON, nullable=True)
+    agreement_score = Column(Float, nullable=True)
+    vote_count = Column(Integer, nullable=False, default=0)
+    resolver = Column(String(255), nullable=False, default="")
+    source_task_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    case = relationship("ConsensusCase", back_populates="resolutions")
+
+    __table_args__ = (
+        Index("ix_consensus_resolutions_case", "case_id"),
+        Index("ix_consensus_resolutions_project", "project_id"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Table management
 # ---------------------------------------------------------------------------
@@ -254,6 +432,11 @@ TABLE_NAMES = [
     "preannotate_runs",
     "embedding_runs",
     "finetune_runs",
+    "consensus_cases",
+    "labeling_tasks",
+    "task_annotations",
+    "consensus_resolutions",
+    "app_users",
 ]
 
 

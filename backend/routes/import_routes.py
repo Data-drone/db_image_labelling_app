@@ -164,6 +164,11 @@ def import_annotations(
     project = db.query(LabelingProject).filter_by(id=project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    if project.consensus_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the private consensus task workflow for this project.",
+        )
 
     if payload.on_missing_sample == "create" and (
         getattr(project, "source_type", None) or "volume"

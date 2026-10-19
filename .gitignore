@@ -32,6 +32,10 @@ Thumbs.db
 # Pytest
 .pytest_cache/
 
+# Browser test artifacts
+frontend/test-results/
+frontend/playwright-report/
+
 # Environment
 .env
 *.env.local

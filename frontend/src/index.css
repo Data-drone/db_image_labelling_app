@@ -25,7 +25,7 @@
   --text-primary: #e3e3e3;
   --text-heading: #fafafa;
   --text-secondary: #a1a1a1;
-  --text-muted: #686868;
+  --text-muted: #939393; /* >= 4.5:1 on every surface, including --bg-hover */
 
   /* Status */
   --status-success: #009400;
@@ -64,6 +64,12 @@ body {
 
 #root {
   min-height: 100vh;
+}
+
+/* Keyboard focus ring; mouse clicks on buttons stay ring-free */
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
 }
 
 ::-webkit-scrollbar {
@@ -259,6 +265,11 @@ a:hover {
   background: rgba(230, 167, 0, 0.15);
   color: #ffa726;
   border-color: rgba(230, 167, 0, 0.3);
+}
+.badge-teal {
+  background: rgba(76, 179, 212, 0.15);
+  color: #7dd3e8;
+  border-color: rgba(76, 179, 212, 0.3);
 }
 
 /* Dropdown menu */
