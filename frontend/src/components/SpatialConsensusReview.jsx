@@ -161,7 +161,18 @@ export default function SpatialConsensusReview({
             <select
               className="input"
               value={activeClassIndex}
-              onChange={(event) => setActiveClassIndex(Number(event.target.value))}
+              onChange={(event) => {
+                const index = Number(event.target.value);
+                setActiveClassIndex(index);
+                if (!selectedId) return;
+                const label = project.class_list[index];
+                if (!label) return;
+                setDraft((current) => current.map((row) => (
+                  String(row.id) === String(selectedId)
+                    ? { ...row, classIndex: index, label }
+                    : row
+                )));
+              }}
             >
               {(project.class_list || []).map((label, index) => (
                 <option key={label} value={index}>{label}</option>

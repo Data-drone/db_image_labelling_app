@@ -25,15 +25,35 @@ export { humanizeApiError } from './errors';
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
-export const fetchProjects = () => api.get('/projects').then(r => r.data);
+export const fetchProjects = (opts = {}) =>
+  api.get('/projects', {
+    params: opts.includeArchived ? { include_archived: true } : {},
+  }).then(r => r.data);
 
 export const fetchProject = (id) => api.get(`/projects/${id}`).then(r => r.data);
+
+export const fetchWorkspaceUsers = () => api.get('/users/directory').then(r => r.data);
+
+export const fetchCurrentUser = () => api.get('/users/me').then(r => r.data);
 
 export const createProject = (data) => api.post('/projects', data).then(r => r.data);
 
 export const updateProject = (id, data) => api.patch(`/projects/${id}`, data).then(r => r.data);
 
-export const deleteProject = (id) => api.delete(`/projects/${id}`).then(r => r.data);
+export const deleteProject = (id, opts = {}) =>
+  api.delete(`/projects/${id}`, {
+    params: opts.allVersions ? { all_versions: true } : {},
+  }).then(r => r.data);
+
+export const archiveProject = (id, opts = {}) =>
+  api.post(`/projects/${id}/archive`, null, {
+    params: opts.allVersions ? { all_versions: true } : {},
+  }).then(r => r.data);
+
+export const unarchiveProject = (id, opts = {}) =>
+  api.post(`/projects/${id}/unarchive`, null, {
+    params: opts.allVersions ? { all_versions: true } : {},
+  }).then(r => r.data);
 
 export const addProjectClass = (id, className) =>
   api.post(`/projects/${id}/classes`, { class_name: className }).then(r => r.data);

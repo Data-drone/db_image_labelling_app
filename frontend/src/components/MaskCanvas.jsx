@@ -268,6 +268,10 @@ const MaskCanvas = forwardRef(function MaskCanvas({
   const maskDataRef = useRef(null);      // its ImageData, kept in sync
   const loadedKeyRef = useRef(null);     // which mask bufRef currently holds
   const strokeRef = useRef(null);        // in-flight stroke, bound to one pointer
+  // The first press on an image without a layer creates that layer in the
+  // parent. Keep the press until the new active layer has rendered so the
+  // user's first brush dab is not silently discarded.
+  const pendingStrokeRef = useRef(null);
   const undoRef = useRef([]);
   const redoRef = useRef([]);
   const cursorRef = useRef(null);        // {cx, cy} in canvas px, or null
@@ -829,6 +833,38 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     return rect;
   }, [stampDisc]);
 
+  // `onNeedLayer` updates parent state, so its new buffer is not available in
+  // the pointerdown that requested it. Start the held stroke immediately after
+  // the active-layer loading effect above has installed that buffer.
+  useEffect(() => {
+    const pending = pendingStrokeRef.current;
+    const buf = bufRef.current;
+    if (!pending || !activeMaskId || !buf || !maskDataRef.current) return;
+
+    pendingStrokeRef.current = null;
+    strokeRef.current = {
+      pointerId: pending.pointerId,
+      journal: makeJournal(buf, dims.w, dims.h),
+      buf,
+      w: dims.w,
+      h: dims.h,
+      maskId: activeMaskId,
+      key: loadedKeyRef.current,
+      lastIx: pending.ix,
+      lastIy: pending.iy,
+      erase: pending.erase,
+    };
+    flushRect(stampDisc(
+      pending.ix,
+      pending.iy,
+      pending.brushSize / 2,
+      pending.erase,
+      strokeRef.current.journal,
+    ));
+    renderActive();
+    if (pending.released) finishStroke();
+  }, [activeMaskId, dims, finishStroke, flushRect, renderActive, stampDisc]);
+
   const commitInFlightPolygon = useCallback((erase = false) => {
     const poly = polyRef.current;
     if (poly.length === 0) return null;
@@ -930,8 +966,26 @@ const MaskCanvas = forwardRef(function MaskCanvas({
     if (readOnly) return;
     if (e.button !== 0) return;
     if (!activeMaskId || !bufRef.current) {
-      if (onNeedLayer) onNeedLayer();
-      else onMaskSelected?.(null);
+      if (tool === 'polygon') {
+        if (onNeedLayer) onNeedLayer();
+        else onMaskSelected?.(null);
+        return;
+      }
+      if (!onNeedLayer) {
+        onMaskSelected?.(null);
+        return;
+      }
+      const { ix, iy } = toImage(cx, cy);
+      safeCapture(activeCanvasRef.current, e.pointerId);
+      pendingStrokeRef.current = {
+        pointerId: e.pointerId,
+        ix,
+        iy,
+        erase: tool === 'eraser' || e.altKey,
+        brushSize,
+        released: false,
+      };
+      onNeedLayer();
       return;
     }
     const { ix, iy } = toImage(cx, cy);
@@ -1005,6 +1059,15 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       safeRelease(activeCanvasRef.current, e.pointerId);
       return;
     }
+    const pending = pendingStrokeRef.current;
+    if (pending && pending.pointerId === e.pointerId) {
+      // React normally commits the newly-created layer before pointerup, but a
+      // quick tap can win that race. The layer-loading effect will commit the
+      // dab as soon as its buffer exists.
+      pending.released = true;
+      safeRelease(activeCanvasRef.current, e.pointerId);
+      return;
+    }
     const stroke = strokeRef.current;
     if (!stroke || stroke.pointerId !== e.pointerId) return;
     safeRelease(activeCanvasRef.current, e.pointerId);
@@ -1072,6 +1135,7 @@ const MaskCanvas = forwardRef(function MaskCanvas({
       <canvas ref={staticCanvasRef} style={{ ...overlayStyle, pointerEvents: 'none' }} />
       <canvas
         ref={activeCanvasRef}
+        data-testid="mask-active-canvas"
         style={{
           ...overlayStyle,
           // The brush ring drawn on this canvas IS the cursor; a native one on

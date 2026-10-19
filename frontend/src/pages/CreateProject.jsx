@@ -14,9 +14,11 @@ import {
   fetchTables,
   fetchTablePreview,
   fetchAppConfig,
+  fetchWorkspaceUsers,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import FilterableSelect from '../components/FilterableSelect';
+import UserMultiSelect from '../components/UserMultiSelect';
 
 /** UC paths must be /Volumes/catalog/schema/volume[...]; local paths any non-empty string. */
 function isValidSourceVolumePath(path) {
@@ -50,7 +52,11 @@ export default function CreateProject() {
   const [consensusQuorum, setConsensusQuorum] = useState(2);
   const [consensusIouThreshold, setConsensusIouThreshold] = useState(0.5);
   const [consensusAgreementThreshold, setConsensusAgreementThreshold] = useState(0.5);
-  const [consensusReviewers, setConsensusReviewers] = useState('');
+  const [consensusReviewers, setConsensusReviewers] = useState([]);
+  const [consensusLabellers, setConsensusLabellers] = useState([]);
+  const [workspaceUsers, setWorkspaceUsers] = useState([]);
+  const [userDirectoryInfo, setUserDirectoryInfo] = useState(null);
+  const [userDirectoryError, setUserDirectoryError] = useState('');
   const [servingEndpoint, setServingEndpoint] = useState('');
   const [workspaceEndpointDefault, setWorkspaceEndpointDefault] = useState('');
   const [samPrompt, setSamPrompt] = useState('');
@@ -137,6 +143,16 @@ export default function CreateProject() {
       .then((cfg) => setWarehouseConfigured(Boolean(cfg.sql_warehouse_configured)))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!consensusEnabled || userDirectoryInfo || userDirectoryError) return;
+    fetchWorkspaceUsers()
+      .then((directory) => {
+        setWorkspaceUsers(directory.users || []);
+        setUserDirectoryInfo(directory);
+      })
+      .catch((err) => setUserDirectoryError(humanizeApiError(err)));
+  }, [consensusEnabled, userDirectoryInfo, userDirectoryError]);
 
   useEffect(() => {
     if (tableFromBrowser) {
@@ -374,10 +390,8 @@ export default function CreateProject() {
         payload.consensus_quorum = Number(consensusQuorum);
         payload.consensus_iou_threshold = Number(consensusIouThreshold);
         payload.consensus_agreement_threshold = Number(consensusAgreementThreshold);
-        payload.consensus_reviewer_emails = consensusReviewers
-          .split(',')
-          .map((email) => email.trim().toLowerCase())
-          .filter(Boolean);
+        payload.consensus_reviewer_emails = consensusReviewers;
+        payload.consensus_labeller_emails = consensusLabellers;
       }
       if (sourceKind === 'table') {
         payload.source_type = 'table';
@@ -594,16 +608,54 @@ export default function CreateProject() {
                     Odd panel sizes reduce tied votes.
                   </div>
                 )}
-                <label style={labelStyle}>
-                  Reviewer emails (comma-separated)
-                  <input
-                    type="text"
-                    value={consensusReviewers}
-                    onChange={(e) => setConsensusReviewers(e.target.value)}
-                    placeholder="reviewer@example.com"
-                    style={{ ...inputStyle, marginTop: '0.25rem' }}
-                  />
-                </label>
+                <div style={{
+                  marginTop: '0.75rem', padding: '0.75rem',
+                  border: '1px solid var(--border-color)', borderRadius: 8,
+                  background: 'var(--bg-secondary)',
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.2rem' }}>
+                    Project roles
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                    Databricks App access remains controlled in the App Share dialog. Only active users returned by Databricks can be selected here.
+                  </div>
+                  {userDirectoryError && (
+                    <div style={{ fontSize: '0.75rem', color: '#ef4444', marginBottom: '0.6rem' }}>
+                      Could not load Databricks users: {userDirectoryError}
+                    </div>
+                  )}
+                  {userDirectoryInfo?.warning && (
+                    <div style={{ fontSize: '0.72rem', color: 'var(--status-warning)', marginBottom: '0.6rem' }}>
+                      {userDirectoryInfo.warning}
+                    </div>
+                  )}
+                  <label style={{ ...labelStyle, marginBottom: '0.75rem' }}>
+                    Reviewers
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400, margin: '0.15rem 0 0.35rem' }}>
+                      Resolve disagreements and see quality analytics. The project owner is always a reviewer.
+                    </div>
+                    <UserMultiSelect
+                      users={workspaceUsers}
+                      selected={consensusReviewers}
+                      onChange={setConsensusReviewers}
+                      exclude={consensusLabellers}
+                      placeholder="Search reviewers…"
+                    />
+                  </label>
+                  <label style={labelStyle}>
+                    Labellers
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400, margin: '0.15rem 0 0.35rem' }}>
+                      Submit independent blind votes. Leave empty to allow every App user who is not a reviewer.
+                    </div>
+                    <UserMultiSelect
+                      users={workspaceUsers}
+                      selected={consensusLabellers}
+                      onChange={setConsensusLabellers}
+                      exclude={consensusReviewers}
+                      placeholder="Search labellers (optional)…"
+                    />
+                  </label>
+                </div>
               </div>
             )}
         </div>

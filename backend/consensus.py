@@ -18,6 +18,7 @@ from .consensus_matching import bbox_iou, mask_iou, match_spatial_annotations
 from .deps import LOCK_TIMEOUT
 from .models import (
     Annotation,
+    AnnotationHistory,
     ConsensusCase,
     ConsensusResolution,
     LabelingProject,
@@ -47,6 +48,14 @@ def project_reviewers(project: LabelingProject) -> set[str]:
     return reviewers
 
 
+def project_labellers(project: LabelingProject) -> set[str]:
+    return {
+        str(email).strip().lower()
+        for email in (project.consensus_labeller_emails or [])
+        if str(email).strip()
+    }
+
+
 def require_consensus_project(
     db: Session, project_id: int,
 ) -> LabelingProject:
@@ -71,6 +80,24 @@ def require_project_owner(project: LabelingProject, user_email: str) -> None:
 def require_reviewer(project: LabelingProject, user_email: str) -> None:
     if user_email.strip().lower() not in project_reviewers(project):
         raise HTTPException(status_code=403, detail="Reviewer access is required.")
+
+
+def require_labeller(project: LabelingProject, user_email: str) -> None:
+    user = user_email.strip().lower()
+    owner = (project.created_by or "").strip().lower()
+    if user == owner:
+        return
+    if user in project_reviewers(project):
+        raise HTTPException(
+            status_code=403,
+            detail="This project assigns you to review, not blind labeling.",
+        )
+    labellers = project_labellers(project)
+    if labellers and user not in labellers:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not assigned as a labeller for this project.",
+        )
 
 
 def _selected_for_consensus(project: LabelingProject, sample_id: int) -> bool:
@@ -145,6 +172,153 @@ def reset_unstarted_cases(db: Session, project: LabelingProject) -> int:
     return len(sample_ids)
 
 
+def reopen_under_voted_resolved_cases(
+    db: Session, project: LabelingProject,
+) -> dict[str, int]:
+    """Reopen resolved or review cases that need more votes under current settings.
+
+    Existing private submissions and append-only resolutions are preserved.
+    Only the materialized final annotation is withdrawn while the expanded
+    panel collects its remaining private votes. Disagreement queues already
+    in review are unlocked the same way so extra panel slots can be filled.
+    """
+    cases = (
+        db.query(ConsensusCase)
+        .options(joinedload(ConsensusCase.tasks))
+        .filter(
+            ConsensusCase.project_id == project.id,
+            ConsensusCase.state.in_(("resolved", "review")),
+        )
+        .order_by(ConsensusCase.id)
+        .all()
+    )
+    reopened = 0
+    tasks_added = 0
+    annotations_removed = 0
+    for case in cases:
+        selected = _selected_for_consensus(project, case.sample_id)
+        required = int(project.consensus_panel_size or 3) if selected else 1
+        submitted_count = sum(task.status == "submitted" for task in case.tasks)
+        if required <= submitted_count:
+            continue
+
+        active_resolution_id = case.active_resolution_id
+        if active_resolution_id:
+            annotations_removed += (
+                db.query(Annotation)
+                .filter(
+                    Annotation.project_id == project.id,
+                    Annotation.sample_id == case.sample_id,
+                    Annotation.consensus_resolution_id == active_resolution_id,
+                )
+                .delete(synchronize_session=False)
+            )
+
+        for task in case.tasks:
+            task.locked_for_review = False
+            task.lock_token = None
+            task.locked_at = None
+            if task.submitted_at is not None:
+                task.status = "submitted"
+            elif task.status == "in_progress":
+                task.status = "pending"
+                task.assigned_to = None
+                task.assigned_at = None
+
+        next_slot = max((task.slot_index for task in case.tasks), default=-1) + 1
+        while len(case.tasks) < required:
+            task = LabelingTask(
+                case_id=case.id,
+                project_id=project.id,
+                sample_id=case.sample_id,
+                slot_index=next_slot,
+            )
+            db.add(task)
+            case.tasks.append(task)
+            next_slot += 1
+            tasks_added += 1
+
+        case.selected_for_consensus = selected
+        case.required_votes = required
+        case.quorum = min(int(project.consensus_quorum or 1), required)
+        case.iou_threshold = float(project.consensus_iou_threshold)
+        case.agreement_threshold = float(project.consensus_agreement_threshold)
+        case.active_resolution_id = None
+        case.state = "in_progress" if submitted_count else "pending"
+
+        sample = db.query(ProjectSample).filter_by(id=case.sample_id).first()
+        if sample:
+            has_drafts = (
+                db.query(Annotation.id)
+                .filter_by(
+                    project_id=project.id,
+                    sample_id=case.sample_id,
+                    is_draft=True,
+                )
+                .first()
+                is not None
+            )
+            sample.status = "pre_labeled" if has_drafts else "unlabeled"
+            sample.locked_by = None
+            sample.locked_at = None
+        reopened += 1
+
+    return {
+        "cases_reopened": reopened,
+        "tasks_added": tasks_added,
+        "annotations_removed": annotations_removed,
+    }
+
+
+def reset_consensus_labeling(
+    db: Session, project: LabelingProject,
+) -> dict[str, int]:
+    """Remove all labeling work and recreate fresh consensus task panels."""
+    annotations_deleted = (
+        db.query(Annotation)
+        .filter(Annotation.project_id == project.id)
+        .delete(synchronize_session=False)
+    )
+    history_deleted = (
+        db.query(AnnotationHistory)
+        .filter(AnnotationHistory.project_id == project.id)
+        .delete(synchronize_session=False)
+    )
+    cases = (
+        db.query(ConsensusCase)
+        .options(
+            joinedload(ConsensusCase.tasks).joinedload(LabelingTask.annotations),
+            joinedload(ConsensusCase.resolutions),
+        )
+        .filter(ConsensusCase.project_id == project.id)
+        .all()
+    )
+    for case in cases:
+        db.delete(case)
+    db.flush()
+
+    samples_reset = (
+        db.query(ProjectSample)
+        .filter(ProjectSample.project_id == project.id)
+        .update(
+            {
+                ProjectSample.status: "unlabeled",
+                ProjectSample.locked_by: None,
+                ProjectSample.locked_at: None,
+                ProjectSample.prediction_confidence: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    cases_recreated = ensure_consensus_cases(db, project)
+    return {
+        "samples_reset": samples_reset,
+        "annotations_deleted": annotations_deleted,
+        "history_deleted": history_deleted,
+        "cases_recreated": cases_recreated,
+    }
+
+
 def delete_unstarted_cases(db: Session, project_id: int) -> int:
     """Delete cases that have no assignment history, using ORM cascades."""
     cases = (
@@ -174,9 +348,14 @@ def release_stale_tasks(db: Session, project_id: int) -> int:
         .all()
     )
     for task in tasks:
-        task.status = "pending"
-        task.assigned_to = None
-        task.assigned_at = None
+        if task.submitted_at is not None:
+            # A stale edit session must not erase the user's submitted vote or
+            # make its slot available to another annotator.
+            task.status = "submitted"
+        else:
+            task.status = "pending"
+            task.assigned_to = None
+            task.assigned_at = None
         task.lock_token = None
         task.locked_at = None
     return len(tasks)
@@ -212,6 +391,42 @@ def claim_task(
     release_stale_tasks(db, project.id)
     ensure_consensus_cases(db, project)
     db.flush()
+
+    # Explicitly opening a sample from the gallery reopens this user's own
+    # submitted vote while the case is still collecting votes. "Next" never
+    # does this, otherwise users would loop over their previous submissions.
+    if sample_id is not None:
+        is_postgres = db.bind is not None and db.bind.dialect.name == "postgresql"
+        case_query = db.query(ConsensusCase).filter_by(
+            project_id=project.id, sample_id=sample_id,
+        )
+        if is_postgres:
+            # Use the same row lock as evaluate_case so reopening cannot race
+            # the final panel submission and resurrect a frozen vote.
+            case_query = case_query.with_for_update()
+        editable_case = case_query.first()
+        editable = None
+        if editable_case and editable_case.state in ("pending", "in_progress"):
+            editable = (
+                db.query(LabelingTask)
+                .filter(
+                    LabelingTask.case_id == editable_case.id,
+                    LabelingTask.assigned_to == user_email,
+                    LabelingTask.status == "submitted",
+                    LabelingTask.locked_for_review.is_(False),
+                )
+                .order_by(LabelingTask.id)
+                .first()
+            )
+        if editable:
+            now = utcnow()
+            editable.status = "in_progress"
+            editable.lock_token = uuid4().hex
+            editable.locked_at = now
+            editable.case.state = "in_progress"
+            db.commit()
+            db.refresh(editable)
+            return editable
 
     active = (
         db.query(LabelingTask)
@@ -348,18 +563,37 @@ def release_task(
 ) -> None:
     task = _task_or_404(db, project_id, task_id)
     require_task_lock(task, user_email, lock_token)
-    task.status = "pending"
-    task.assigned_to = None
-    task.assigned_at = None
+    if task.submitted_at is not None:
+        task.status = "submitted"
+    else:
+        task.status = "pending"
+        task.assigned_to = None
+        task.assigned_at = None
     task.lock_token = None
     task.locked_at = None
-    if not any(t.status in ("in_progress", "submitted") for t in task.case.tasks if t.id != task.id):
+    if (
+        task.submitted_at is None
+        and not any(
+            t.status in ("in_progress", "submitted")
+            for t in task.case.tasks if t.id != task.id
+        )
+    ):
         task.case.state = "pending"
     db.commit()
 
 
+def task_annotations(task: LabelingTask) -> list[TaskAnnotation]:
+    """Return only the task's current annotation revision."""
+    revision = int(task.annotation_revision or 0)
+    return [
+        annotation
+        for annotation in task.annotations
+        if int(annotation.revision or 0) == revision
+    ]
+
+
 def _task_signature(task: LabelingTask) -> tuple[str, ...]:
-    return normalized_labels(a.label for a in task.annotations)
+    return normalized_labels(a.label for a in task_annotations(task))
 
 
 def _annotation_spec(annotation) -> dict:
@@ -555,6 +789,10 @@ def create_resolution(
 def evaluate_case(
     db: Session, project: LabelingProject, case: ConsensusCase,
 ) -> ConsensusResolution | None:
+    # Expired reopen sessions must count as submitted again, otherwise the
+    # last panel vote can never freeze while an abandoned editor holds a slot.
+    release_stale_tasks(db, project.id)
+    db.flush()
     is_postgres = db.bind is not None and db.bind.dialect.name == "postgresql"
     case_query = db.query(ConsensusCase).filter(ConsensusCase.id == case.id)
     if is_postgres:
@@ -573,10 +811,15 @@ def evaluate_case(
         case.state = "in_progress"
         return None
 
+    # This is the freeze boundary: once the complete panel exists, neither an
+    # automatic outcome nor reviewer input may race against changing votes.
+    for task in submitted:
+        task.locked_for_review = True
+
     if project.task_type != "classification":
         merge = match_spatial_annotations(
             [
-                {"task_id": task.id, "annotations": task.annotations}
+                {"task_id": task.id, "annotations": task_annotations(task)}
                 for task in submitted
             ],
             task_type=project.task_type,
@@ -647,14 +890,21 @@ def submit_task(
     annotations,
     allow_empty: bool,
 ) -> tuple[LabelingTask, ConsensusResolution | None]:
+    release_stale_tasks(db, project.id)
+    db.flush()
     task = _task_or_404(db, project.id, task_id)
     prepared = _validate_task_annotations(
         db, project, task.sample_id, annotations, allow_empty,
     )
-    if task.status == "submitted":
+    if task.locked_for_review:
         require_task_lock(task, user_email, lock_token, allow_submitted=True)
-        if _spec_signature([_annotation_spec(row) for row in task.annotations]) != _spec_signature(prepared):
-            raise HTTPException(status_code=409, detail="A submitted vote is immutable.")
+        if _spec_signature(
+            [_annotation_spec(row) for row in task_annotations(task)]
+        ) != _spec_signature(prepared):
+            raise HTTPException(
+                status_code=409,
+                detail="This vote is locked for review.",
+            )
         resolution = (
             db.query(ConsensusResolution)
             .filter_by(id=task.case.active_resolution_id)
@@ -663,9 +913,19 @@ def submit_task(
         )
         return task, resolution
 
-    require_task_lock(task, user_email, lock_token)
-    for annotation in prepared:
-        db.add(TaskAnnotation(task_id=task.id, **annotation))
+    if task.status == "submitted":
+        require_task_lock(task, user_email, lock_token, allow_submitted=True)
+    else:
+        require_task_lock(task, user_email, lock_token)
+    current = [_annotation_spec(row) for row in task_annotations(task)]
+    if task.annotation_revision == 0 or _spec_signature(current) != _spec_signature(prepared):
+        task.annotation_revision = int(task.annotation_revision or 0) + 1
+        for annotation in prepared:
+            db.add(TaskAnnotation(
+                task_id=task.id,
+                revision=task.annotation_revision,
+                **annotation,
+            ))
     task.status = "submitted"
     task.submitted_at = utcnow()
     task.locked_at = None
@@ -695,7 +955,9 @@ def case_submissions(
                     "id": annotation.id,
                     **_annotation_spec(annotation),
                 }
-                for annotation in sorted(task.annotations, key=lambda row: row.id)
+                for annotation in sorted(
+                    task_annotations(task), key=lambda row: row.id,
+                )
             ] if include_annotations else [],
         })
     return rows
@@ -778,7 +1040,9 @@ def review_case(
         source_task = next((task for task in submitted if task.id == source_task_id), None)
         if not source_task:
             raise HTTPException(status_code=422, detail="Pick requires a submitted source_task_id.")
-        final_annotations = [_annotation_spec(row) for row in source_task.annotations]
+        final_annotations = [
+            _annotation_spec(row) for row in task_annotations(source_task)
+        ]
         method = "manual-pick"
     elif action == "edit":
         if project.task_type == "classification" and labels and not annotations:
@@ -833,7 +1097,7 @@ def _task_agrees_with_resolution(
         return _task_signature(task) == normalized_labels(resolution.final_labels or [])
     final_annotations = list(resolution.final_annotations or [])
     remaining = list(range(len(final_annotations)))
-    for annotation in task.annotations:
+    for annotation in task_annotations(task):
         best = None
         best_score = -1.0
         for index in remaining:

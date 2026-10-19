@@ -58,8 +58,11 @@ class LabelingProject(Base):
     consensus_iou_threshold = Column(Float, nullable=False, default=0.5)
     consensus_agreement_threshold = Column(Float, nullable=False, default=0.5)
     consensus_reviewer_emails = Column(JSON, nullable=True)
+    # Empty means every authenticated App user who is not a reviewer may vote.
+    consensus_labeller_emails = Column(JSON, nullable=True)
     created_by = Column(String(255), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    archived_at = Column(DateTime(timezone=True), nullable=True)
     version = Column(Integer, default=1, nullable=False)
     parent_project_id = Column(Integer, nullable=True)  # FK to parent version (null = original)
 
@@ -256,6 +259,20 @@ class AnnotationHistory(Base):
     )
 
 
+class AppUser(Base):
+    """A Databricks user who has authenticated through the Apps proxy."""
+
+    __tablename__ = "app_users"
+
+    email = Column(String(255), primary_key=True)
+    display_name = Column(String(255), nullable=True)
+    last_seen_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class ConsensusCase(Base):
     """Per-sample state for an opt-in multi-labeller consensus project."""
 
@@ -320,6 +337,13 @@ class LabelingTask(Base):
     locked_at = Column(DateTime(timezone=True), nullable=True)
     assigned_at = Column(DateTime(timezone=True), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
+    # Submitted votes can be revised while the case is still collecting
+    # votes. Each save advances this pointer; old TaskAnnotation rows remain
+    # as an append-only audit trail.
+    annotation_revision = Column(Integer, nullable=False, default=0)
+    # Once the required panel is complete, every submitted vote is frozen
+    # before automatic resolution or reviewer adjudication begins.
+    locked_for_review = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     case = relationship("ConsensusCase", back_populates="tasks")
@@ -352,11 +376,15 @@ class TaskAnnotation(Base):
     ann_type = Column(String(50), nullable=False, default="classification")
     bbox_json = Column(JSON, nullable=True)
     mask_json = Column(JSON, nullable=True)
+    revision = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     task = relationship("LabelingTask", back_populates="annotations")
 
-    __table_args__ = (Index("ix_task_annotations_task", "task_id"),)
+    __table_args__ = (
+        Index("ix_task_annotations_task", "task_id"),
+        Index("ix_task_annotations_task_revision", "task_id", "revision"),
+    )
 
 
 class ConsensusResolution(Base):
@@ -408,6 +436,7 @@ TABLE_NAMES = [
     "labeling_tasks",
     "task_annotations",
     "consensus_resolutions",
+    "app_users",
 ]
 
 

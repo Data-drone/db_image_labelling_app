@@ -13,11 +13,16 @@ from ..consensus import (
     consensus_metrics,
     heartbeat_task,
     project_reviewers,
+    reopen_under_voted_resolved_cases,
     release_task,
     require_consensus_project,
+    require_labeller,
+    require_project_owner,
     require_reviewer,
+    reset_consensus_labeling,
     review_case,
     submit_task,
+    task_annotations,
 )
 from ..deps import get_db, get_user_email
 from ..models import (
@@ -30,6 +35,9 @@ from ..schemas import (
     ConsensusLockRequest,
     ConsensusMetricsOut,
     ConsensusProgressOut,
+    ConsensusReopenResult,
+    ConsensusResetRequest,
+    ConsensusResetResult,
     ConsensusResolutionOut,
     ConsensusReviewAction,
     ConsensusReviewCaseOut,
@@ -70,10 +78,12 @@ def _task_out(db: Session, task: LabelingTask) -> ConsensusTaskOut:
         assigned_to=task.assigned_to or "",
         lock_token=task.lock_token or "",
         locked_at=task.locked_at,
+        has_previous_submission=task.submitted_at is not None,
+        editable_until_review=not task.locked_for_review,
         sample=sample_out,
         annotations=[
             ConsensusTaskAnnotationOut.model_validate(annotation)
-            for annotation in task.annotations
+            for annotation in task_annotations(task)
         ],
     )
 
@@ -85,7 +95,9 @@ def claim_next_task(
     db: Session = Depends(get_db),
 ):
     project = require_consensus_project(db, project_id)
-    task = claim_task(db, project, get_user_email(request))
+    user = get_user_email(request)
+    require_labeller(project, user)
+    task = claim_task(db, project, user)
     return _task_out(db, task) if task else None
 
 
@@ -97,10 +109,12 @@ def claim_sample_task(
     db: Session = Depends(get_db),
 ):
     project = require_consensus_project(db, project_id)
+    user = get_user_email(request)
+    require_labeller(project, user)
     sample = db.query(ProjectSample).filter_by(id=sample_id, project_id=project_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found.")
-    task = claim_task(db, project, get_user_email(request), sample_id=sample_id)
+    task = claim_task(db, project, user, sample_id=sample_id)
     return _task_out(db, task) if task else None
 
 
@@ -156,8 +170,10 @@ def submit(
         task_id=task.id,
         case_id=task.case_id,
         case_state=task.case.state,
-        submitted_labels=sorted(annotation.label for annotation in task.annotations),
-        submitted_annotation_count=len(task.annotations),
+        submitted_labels=sorted(
+            annotation.label for annotation in task_annotations(task)
+        ),
+        submitted_annotation_count=len(task_annotations(task)),
         resolution=(
             ConsensusResolutionOut.model_validate(resolution)
             if resolution else None
@@ -209,6 +225,40 @@ def progress(
         review_items=review,
         total_items=total_items,
     )
+
+
+@router.post("/reopen-under-voted", response_model=ConsensusReopenResult)
+def reopen_under_voted(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Reopen resolved or review cases that need more votes under current settings."""
+    project = require_consensus_project(db, project_id)
+    require_project_owner(project, get_user_email(request))
+    result = reopen_under_voted_resolved_cases(db, project)
+    db.commit()
+    return ConsensusReopenResult(**result)
+
+
+@router.post("/reset-labeling", response_model=ConsensusResetResult)
+def reset_labeling(
+    project_id: int,
+    payload: ConsensusResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Delete all project labeling work and recreate fresh private tasks."""
+    project = require_consensus_project(db, project_id)
+    require_project_owner(project, get_user_email(request))
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Set confirm=true to permanently remove all labeling work.",
+        )
+    result = reset_consensus_labeling(db, project)
+    db.commit()
+    return ConsensusResetResult(**result)
 
 
 def _review_case_out(

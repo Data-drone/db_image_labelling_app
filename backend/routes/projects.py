@@ -7,16 +7,21 @@ import math
 import os
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import distinct, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_user_email
 from ..models import (
     Annotation,
+    AnnotationHistory,
     ConsensusCase,
+    EmbeddingRun,
+    FinetuneRun,
     LabelingProject,
     LabelingTask,
+    PreannotateRun,
     ProjectSample,
 )
 from ..schemas import (
@@ -25,6 +30,7 @@ from ..schemas import (
 )
 from ..uc_tables import TableScanResult, TableSourceError, scan_table_for_samples
 from ..volumes import scan_volume_for_samples
+from .users import record_current_user, validate_active_project_users
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -59,6 +65,39 @@ def _scan_project_source(db: Session, project: LabelingProject):
     return TableScanResult(added=added, skipped_existing=0, volume_hint=project.source_volume)
 
 
+def _require_can_manage_project(p: LabelingProject, request: Request) -> None:
+    """Archive/delete is limited to the project owner."""
+    owner = (p.created_by or "").strip().lower()
+    caller = get_user_email(request).strip().lower()
+    if owner != caller:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the project owner can archive or delete this project.",
+        )
+
+
+def _lineage_projects(db: Session, p: LabelingProject) -> list[LabelingProject]:
+    root_id = p.parent_project_id or p.id
+    return (
+        db.query(LabelingProject)
+        .filter(
+            (LabelingProject.id == root_id)
+            | (LabelingProject.parent_project_id == root_id)
+        )
+        .all()
+    )
+
+
+def _purge_project_row(db: Session, p: LabelingProject) -> None:
+    """Delete a project and rows that still FK to it without ORM cascades."""
+    pid = p.id
+    db.query(PreannotateRun).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.query(EmbeddingRun).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.query(FinetuneRun).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.query(AnnotationHistory).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.delete(p)
+
+
 def _table_source_changed(p: LabelingProject, payload) -> bool:
     if payload.source_type is not None and payload.source_type != _source_type(p):
         return True
@@ -73,19 +112,51 @@ def _table_source_changed(p: LabelingProject, payload) -> bool:
     return False
 
 
-def _project_out(p, total=None, labeled=None, user_email=None):
+def _project_out(p, total=None, labeled=None, user_email=None, db: Session | None = None):
     """Build a ProjectOut from a LabelingProject model instance."""
     normalized_user = (user_email or "").strip().lower()
     reviewers = {
         str(email).strip().lower()
         for email in (getattr(p, "consensus_reviewer_emails", None) or [])
     }
+    labellers = {
+        str(email).strip().lower()
+        for email in (getattr(p, "consensus_labeller_emails", None) or [])
+    }
     if normalized_user and normalized_user == (p.created_by or "").strip().lower():
         consensus_role = "owner"
     elif normalized_user and normalized_user in reviewers:
         consensus_role = "reviewer"
+    elif labellers and normalized_user not in labellers:
+        consensus_role = "viewer"
     else:
         consensus_role = "labeller"
+    consensus_counts = {
+        "consensus_total_tasks": 0,
+        "consensus_submitted_tasks": 0,
+        "consensus_resolved_items": 0,
+        "consensus_review_items": 0,
+    }
+    if db is not None and bool(getattr(p, "consensus_enabled", False)):
+        consensus_counts = {
+            "consensus_total_tasks": db.query(LabelingTask).filter_by(project_id=p.id).count(),
+            "consensus_submitted_tasks": (
+                db.query(LabelingTask)
+                .filter_by(project_id=p.id, status="submitted")
+                .count()
+            ),
+            "consensus_resolved_items": (
+                db.query(ConsensusCase)
+                .filter_by(project_id=p.id, state="resolved")
+                .count()
+            ),
+            "consensus_review_items": (
+                db.query(ConsensusCase)
+                .filter_by(project_id=p.id, state="review")
+                .count()
+            ),
+        }
+    expose_members = consensus_role == "owner"
     return ProjectOut(
         id=p.id,
         name=p.name,
@@ -107,16 +178,23 @@ def _project_out(p, total=None, labeled=None, user_email=None):
         consensus_agreement_threshold=getattr(
             p, "consensus_agreement_threshold", 0.5,
         ),
-        consensus_reviewer_emails=list(
-            getattr(p, "consensus_reviewer_emails", None) or []
+        consensus_reviewer_emails=(
+            list(getattr(p, "consensus_reviewer_emails", None) or [])
+            if expose_members else []
+        ),
+        consensus_labeller_emails=(
+            list(getattr(p, "consensus_labeller_emails", None) or [])
+            if expose_members else []
         ),
         consensus_role=consensus_role,
         created_by=p.created_by,
         created_at=p.created_at,
+        archived_at=getattr(p, "archived_at", None),
         sample_count=total if total is not None else 0,
         labeled_count=labeled if labeled is not None else 0,
         version=p.version or 1,
         parent_project_id=p.parent_project_id,
+        **consensus_counts,
     )
 
 
@@ -141,6 +219,11 @@ def create_project(
         )
 
     user_email = get_user_email(request)
+    record_current_user(db, request)
+    validate_active_project_users(
+        db,
+        payload.consensus_reviewer_emails + payload.consensus_labeller_emails,
+    )
     # Do not silently attach SERVING_ENDPOINT from env. The create form treats
     # model assist as optional; the UI can opt in via /inference-defaults.
     serving_ep = (payload.serving_endpoint or "").strip() or None
@@ -173,6 +256,7 @@ def create_project(
         consensus_iou_threshold=payload.consensus_iou_threshold,
         consensus_agreement_threshold=payload.consensus_agreement_threshold,
         consensus_reviewer_emails=payload.consensus_reviewer_emails,
+        consensus_labeller_emails=payload.consensus_labeller_emails,
         created_by=user_email,
     )
     db.add(project)
@@ -218,18 +302,25 @@ def create_project(
     db.commit()
     db.refresh(project)
 
-    return _project_out(project, scan_result.added, 0, user_email)
+    return _project_out(project, scan_result.added, 0, user_email, db)
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects(request: Request, db: Session = Depends(get_db)):
-    """List all projects with sample counts."""
-    projects = db.query(LabelingProject).order_by(LabelingProject.created_at.desc()).all()
+def list_projects(
+    request: Request,
+    include_archived: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """List projects with sample counts. Archived projects are hidden unless requested."""
+    q = db.query(LabelingProject)
+    if not include_archived:
+        q = q.filter(LabelingProject.archived_at.is_(None))
+    projects = q.order_by(LabelingProject.created_at.desc()).all()
     result = []
     for p in projects:
         total = db.query(ProjectSample).filter_by(project_id=p.id).count()
         labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-        result.append(_project_out(p, total, labeled, get_user_email(request)))
+        result.append(_project_out(p, total, labeled, get_user_email(request), db))
     return result
 
 
@@ -241,7 +332,7 @@ def get_project(project_id: int, request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Project not found.")
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-    return _project_out(p, total, labeled, get_user_email(request))
+    return _project_out(p, total, labeled, get_user_email(request), db)
 
 
 @router.post("/{project_id}/sync-source", response_model=SourceSyncOut)
@@ -317,6 +408,7 @@ def update_project(
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
+    record_current_user(db, request)
 
     consensus_fields = (
         "consensus_enabled",
@@ -326,6 +418,7 @@ def update_project(
         "consensus_iou_threshold",
         "consensus_agreement_threshold",
         "consensus_reviewer_emails",
+        "consensus_labeller_emails",
     )
     consensus_changed = any(
         getattr(payload, field) is not None
@@ -347,6 +440,30 @@ def update_project(
     if consensus_changed:
         from ..consensus import require_project_owner
         require_project_owner(p, get_user_email(request))
+
+        effective_reviewers = (
+            payload.consensus_reviewer_emails
+            if payload.consensus_reviewer_emails is not None
+            else list(p.consensus_reviewer_emails or [])
+        )
+        effective_labellers = (
+            payload.consensus_labeller_emails
+            if payload.consensus_labeller_emails is not None
+            else list(p.consensus_labeller_emails or [])
+        )
+        overlap = set(effective_reviewers) & set(effective_labellers)
+        if overlap:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A person cannot be both a reviewer and a labeller: "
+                    + ", ".join(sorted(overlap))
+                ),
+            )
+        validate_active_project_users(
+            db,
+            list(effective_reviewers) + list(effective_labellers),
+        )
 
         panel = payload.consensus_panel_size or p.consensus_panel_size
         quorum = payload.consensus_quorum or p.consensus_quorum
@@ -476,17 +593,82 @@ def update_project(
 
     total = db.query(ProjectSample).filter_by(project_id=p.id).count()
     labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
-    return _project_out(p, total, labeled, get_user_email(request))
+    return _project_out(p, total, labeled, get_user_email(request), db)
 
 
-@router.delete("/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
-    """Delete a project and all associated samples/annotations."""
+@router.post("/{project_id}/archive", response_model=ProjectOut)
+def archive_project(
+    project_id: int,
+    request: Request,
+    all_versions: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Hide a project from the default list. Labels and samples are kept."""
     p = db.query(LabelingProject).filter_by(id=project_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
-    db.delete(p)
+    targets = _lineage_projects(db, p) if all_versions else [p]
+    now = datetime.now(timezone.utc)
+    for row in targets:
+        _require_can_manage_project(row, request)
+        if row.archived_at is None:
+            row.archived_at = now
     db.commit()
+    db.refresh(p)
+    total = db.query(ProjectSample).filter_by(project_id=p.id).count()
+    labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
+    return _project_out(p, total, labeled, get_user_email(request), db)
+
+
+@router.post("/{project_id}/unarchive", response_model=ProjectOut)
+def unarchive_project(
+    project_id: int,
+    request: Request,
+    all_versions: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Restore an archived project to the default list."""
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    targets = _lineage_projects(db, p) if all_versions else [p]
+    for row in targets:
+        _require_can_manage_project(row, request)
+        row.archived_at = None
+    db.commit()
+    db.refresh(p)
+    total = db.query(ProjectSample).filter_by(project_id=p.id).count()
+    labeled = db.query(ProjectSample).filter_by(project_id=p.id, status="labeled").count()
+    return _project_out(p, total, labeled, get_user_email(request), db)
+
+
+@router.delete("/{project_id}")
+def delete_project(
+    project_id: int,
+    request: Request,
+    all_versions: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Delete a project and all associated samples/annotations/runs.
+
+    Source images and exported training dataset folders on UC Volumes are kept.
+    """
+    p = db.query(LabelingProject).filter_by(id=project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    targets = _lineage_projects(db, p) if all_versions else [p]
+    for row in targets:
+        _require_can_manage_project(row, request)
+    try:
+        for row in targets:
+            _purge_project_row(db, row)
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Could not delete this project because related records still reference it.",
+        ) from e
     return {"detail": "Deleted."}
 
 
@@ -542,6 +724,9 @@ def clone_project(
         consensus_reviewer_emails=list(
             getattr(parent, "consensus_reviewer_emails", None) or []
         ),
+        consensus_labeller_emails=list(
+            getattr(parent, "consensus_labeller_emails", None) or []
+        ),
         created_by=user_email,
         version=new_version,
         parent_project_id=root_id,
@@ -566,7 +751,7 @@ def clone_project(
     db.commit()
     db.refresh(new_project)
 
-    return _project_out(new_project, sample_count, 0, user_email)
+    return _project_out(new_project, sample_count, 0, user_email, db)
 
 
 @router.get("/{project_id}/stats", response_model=ProjectStats)

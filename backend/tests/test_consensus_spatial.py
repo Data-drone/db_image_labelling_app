@@ -91,6 +91,49 @@ class TestSpatialConsensus(unittest.TestCase):
         self.assertEqual(canonical[0]["ann_type"], "bbox")
         self.assertEqual(canonical[0]["bbox_json"], boxes[1])
 
+    def test_detection_vote_can_be_revised_before_panel_is_complete(self):
+        project_id = self.create_project("detection")["id"]
+        first = self.claim(project_id, "a@example.com")
+        old_box = {"x": 0.05, "y": 0.05, "w": 0.2, "h": 0.2}
+        revised_box = {"x": 0.40, "y": 0.40, "w": 0.3, "h": 0.3}
+        response = self.submit(
+            project_id,
+            first,
+            "a@example.com",
+            [{"label": "cat", "ann_type": "bbox", "bbox_json": old_box}],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        reopened = self.client.post(
+            f"/api/projects/{project_id}/consensus/samples/{first['sample_id']}/claim",
+            headers={"X-Forwarded-Email": "a@example.com"},
+        )
+        self.assertEqual(reopened.status_code, 200, reopened.text)
+        self.assertEqual(reopened.json()["annotations"][0]["bbox_json"], old_box)
+        revised = self.submit(
+            project_id,
+            reopened.json(),
+            "a@example.com",
+            [{"label": "cat", "ann_type": "bbox", "bbox_json": revised_box}],
+        )
+        self.assertEqual(revised.status_code, 200, revised.text)
+
+        result = None
+        for user in ("b@example.com", "c@example.com"):
+            task = self.claim(project_id, user)
+            result = self.submit(
+                project_id,
+                task,
+                user,
+                [{"label": "cat", "ann_type": "bbox", "bbox_json": revised_box}],
+            )
+            self.assertEqual(result.status_code, 200, result.text)
+
+        self.assertEqual(
+            result.json()["resolution"]["final_annotations"][0]["bbox_json"],
+            revised_box,
+        )
+
     def test_detection_conflict_enters_visual_review_and_pick_copies_geometry(self):
         project_id = self.create_project("detection")["id"]
         for user, label in (

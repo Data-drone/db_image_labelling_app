@@ -5,15 +5,24 @@ Labeling workflow routes — next sample, annotate, skip, image serving.
 import io
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
 from .. import image_meta, masks
+from ..consensus import project_reviewers
 from ..deps import get_db, get_user_email, LOCK_TIMEOUT
-from ..models import LabelingProject, ProjectSample, Annotation, AnnotationHistory
+from ..models import (
+    Annotation,
+    AnnotationHistory,
+    ConsensusCase,
+    LabelingProject,
+    LabelingTask,
+    ProjectSample,
+    TaskAnnotation,
+)
 from ..preannotate import refresh_sample_status_after_annotation_change
 from ..schemas import (
     SampleOut, SamplePage,
@@ -29,6 +38,45 @@ router = APIRouter(prefix="/api/projects/{project_id}", tags=["labeling"])
 
 
 _MODEL_PROVENANCE = re.compile(r"^model:[A-Za-z0-9][A-Za-z0-9._:/ -]{0,180}$")
+_CONSENSUS_STATES = {"pending", "in_progress", "review", "resolved"}
+
+
+def _same_user(left: str | None, right: str | None) -> bool:
+    return (left or "").strip().lower() == (right or "").strip().lower()
+
+
+def _can_review_consensus(project: LabelingProject, user_email: str) -> bool:
+    return _same_user(user_email, project.created_by) or (
+        user_email.strip().lower() in project_reviewers(project)
+    )
+
+
+def _submitted_vote_match(
+    db: Session,
+    project_id: int,
+    *,
+    assignee: str,
+    label: Optional[str] = None,
+    visible_states: Optional[tuple[str, ...]] = None,
+):
+    match = (
+        db.query(LabelingTask.id)
+        .join(TaskAnnotation, TaskAnnotation.task_id == LabelingTask.id)
+        .filter(
+            LabelingTask.sample_id == ProjectSample.id,
+            LabelingTask.project_id == project_id,
+            LabelingTask.status == "submitted",
+            LabelingTask.assigned_to == assignee,
+            TaskAnnotation.revision == LabelingTask.annotation_revision,
+        )
+    )
+    if label:
+        match = match.filter(TaskAnnotation.label == label)
+    if visible_states:
+        match = match.join(
+            ConsensusCase, ConsensusCase.id == LabelingTask.case_id,
+        ).filter(ConsensusCase.state.in_(visible_states))
+    return match
 
 
 def _reject_consensus_write(db: Session, project_id: int) -> None:
@@ -517,16 +565,37 @@ def get_sample(
 @router.get("/samples", response_model=SamplePage)
 def list_project_samples(
     project_id: int,
+    request: Request,
     page: int = Query(0, ge=0),
     page_size: int = Query(24, ge=1, le=10000),
     status: Optional[str] = None,
     label: Optional[str] = None,
     filename: Optional[str] = None,
     labeler: Optional[str] = None,
+    label_scope: Literal["resolved", "mine"] = Query("resolved"),
+    consensus_state: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Paginated sample list with optional filters (AND logic)."""
     query = db.query(ProjectSample).filter(ProjectSample.project_id == project_id)
+    project = db.query(LabelingProject).filter_by(id=project_id).first()
+    user_email = get_user_email(request)
+    consensus = bool(project and project.consensus_enabled)
+    if consensus_state:
+        if consensus_state not in _CONSENSUS_STATES:
+            raise HTTPException(
+                status_code=422,
+                detail="consensus_state must be pending, in_progress, review, or resolved.",
+            )
+        query = query.filter(
+            db.query(ConsensusCase.id)
+            .filter(
+                ConsensusCase.sample_id == ProjectSample.id,
+                ConsensusCase.project_id == project_id,
+                ConsensusCase.state == consensus_state,
+            )
+            .exists()
+        )
 
     if status:
         query = query.filter(ProjectSample.status == status)
@@ -534,25 +603,96 @@ def list_project_samples(
         escaped = filename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.filter(ProjectSample.filename.ilike(f"%{escaped}%", escape="\\"))
 
-    if label or labeler:
-        annotation_match = db.query(Annotation.id).filter(
-            Annotation.sample_id == ProjectSample.id
-        )
-        if label:
-            annotation_match = annotation_match.filter(Annotation.label == label)
-        if labeler:
-            annotation_match = annotation_match.filter(Annotation.created_by == labeler)
-        # EXISTS avoids DISTINCT over ProjectSample's JSON columns, which
-        # PostgreSQL cannot compare and would reject with a 500.
-        query = query.filter(annotation_match.exists())
+    if label or labeler or label_scope == "mine":
+        if consensus:
+            can_review = _can_review_consensus(project, user_email)
+            if labeler and not _same_user(labeler, user_email) and not can_review:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot filter by another labeller on a consensus project.",
+                )
+            if label_scope == "mine":
+                if labeler and not _same_user(labeler, user_email):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="label_scope=mine cannot be combined with another labeller.",
+                    )
+                query = query.filter(
+                    _submitted_vote_match(
+                        db, project_id, assignee=user_email, label=label,
+                    ).exists()
+                )
+            else:
+                if label:
+                    annotation_match = db.query(Annotation.id).filter(
+                        Annotation.sample_id == ProjectSample.id,
+                        Annotation.label == label,
+                    )
+                    query = query.filter(annotation_match.exists())
+                if labeler:
+                    visible_states = None
+                    if not _same_user(labeler, user_email):
+                        # Other people's votes, including who has submitted,
+                        # stay hidden until the case leaves blind collection.
+                        visible_states = ("review", "resolved")
+                    query = query.filter(
+                        _submitted_vote_match(
+                            db,
+                            project_id,
+                            assignee=labeler,
+                            label=label,
+                            visible_states=visible_states,
+                        ).exists()
+                    )
+        else:
+            annotation_match = db.query(Annotation.id).filter(
+                Annotation.sample_id == ProjectSample.id
+            )
+            if label:
+                annotation_match = annotation_match.filter(Annotation.label == label)
+            if label_scope == "mine":
+                annotation_match = annotation_match.filter(
+                    Annotation.created_by == user_email
+                )
+            elif labeler:
+                annotation_match = annotation_match.filter(
+                    Annotation.created_by == labeler
+                )
+            # EXISTS avoids DISTINCT over ProjectSample's JSON columns, which
+            # PostgreSQL cannot compare and would reject with a 500.
+            query = query.filter(annotation_match.exists())
 
     query = query.options(joinedload(ProjectSample.annotations))
     total = query.count()
     items = query.order_by(ProjectSample.id).offset(page * page_size).limit(page_size).all()
 
+    mine_labels: dict[int, set[str]] = {}
+    if label_scope == "mine" and items:
+        rows = (
+            db.query(LabelingTask.sample_id, TaskAnnotation.label)
+            .join(TaskAnnotation, TaskAnnotation.task_id == LabelingTask.id)
+            .filter(
+                LabelingTask.project_id == project_id,
+                LabelingTask.sample_id.in_([sample.id for sample in items]),
+                LabelingTask.status == "submitted",
+                LabelingTask.assigned_to == user_email,
+                TaskAnnotation.revision == LabelingTask.annotation_revision,
+            )
+            .all()
+        )
+        for sample_id, vote_label in rows:
+            mine_labels.setdefault(sample_id, set()).add(vote_label)
+
     def to_out(s):
         out = SampleOut.model_validate(s)
-        out.labels = list({a.label for a in s.annotations})
+        if label_scope == "mine":
+            out.labels = (
+                sorted(mine_labels.get(s.id, set()))
+                if consensus
+                else list({a.label for a in s.annotations if a.created_by == user_email})
+            )
+        else:
+            out.labels = list({a.label for a in s.annotations})
         return out
 
     return SamplePage(

@@ -57,6 +57,25 @@ test('buildGalleryParams omits empty filters', () => {
   );
 });
 
+test('buildGalleryParams includes consensus label scope and state', () => {
+  assert.deepEqual(
+    buildGalleryParams({
+      page: 0,
+      pageSize: 24,
+      label: 'cat',
+      labelScope: 'mine',
+      consensusState: 'review',
+    }),
+    {
+      page: 0,
+      page_size: 24,
+      label: 'cat',
+      label_scope: 'mine',
+      consensus_state: 'review',
+    },
+  );
+});
+
 test('cancelDebounced clears and resets an active timer', () => {
   const ref = { current: setTimeout(() => {}, 10_000) };
   cancelDebounced(ref);

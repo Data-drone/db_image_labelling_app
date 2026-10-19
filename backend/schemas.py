@@ -31,6 +31,7 @@ class ProjectCreate(BaseModel):
     consensus_iou_threshold: float = 0.5
     consensus_agreement_threshold: float = 0.5
     consensus_reviewer_emails: list[str] = Field(default_factory=list)
+    consensus_labeller_emails: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _require_source(self):
@@ -61,6 +62,17 @@ class ProjectCreate(BaseModel):
             for email in self.consensus_reviewer_emails
             if email and email.strip()
         })
+        self.consensus_labeller_emails = sorted({
+            email.strip().lower()
+            for email in self.consensus_labeller_emails
+            if email and email.strip()
+        })
+        overlap = set(self.consensus_reviewer_emails) & set(self.consensus_labeller_emails)
+        if overlap:
+            raise ValueError(
+                "A person cannot be both a reviewer and a labeller: "
+                + ", ".join(sorted(overlap))
+            )
         return self
 
 
@@ -83,6 +95,7 @@ class ProjectUpdate(BaseModel):
     consensus_iou_threshold: Optional[float] = None
     consensus_agreement_threshold: Optional[float] = None
     consensus_reviewer_emails: Optional[list[str]] = None
+    consensus_labeller_emails: Optional[list[str]] = None
     reset_consensus_unstarted: bool = False
 
     @model_validator(mode="after")
@@ -122,6 +135,22 @@ class ProjectUpdate(BaseModel):
                 for email in self.consensus_reviewer_emails
                 if email and email.strip()
             })
+        if self.consensus_labeller_emails is not None:
+            self.consensus_labeller_emails = sorted({
+                email.strip().lower()
+                for email in self.consensus_labeller_emails
+                if email and email.strip()
+            })
+        if (
+            self.consensus_reviewer_emails is not None
+            and self.consensus_labeller_emails is not None
+        ):
+            overlap = set(self.consensus_reviewer_emails) & set(self.consensus_labeller_emails)
+            if overlap:
+                raise ValueError(
+                    "A person cannot be both a reviewer and a labeller: "
+                    + ", ".join(sorted(overlap))
+                )
         return self
 
 
@@ -145,9 +174,15 @@ class ProjectOut(BaseModel):
     consensus_iou_threshold: float = 0.5
     consensus_agreement_threshold: float = 0.5
     consensus_reviewer_emails: list[str] = Field(default_factory=list)
+    consensus_labeller_emails: list[str] = Field(default_factory=list)
     consensus_role: str = "labeller"
+    consensus_total_tasks: int = 0
+    consensus_submitted_tasks: int = 0
+    consensus_resolved_items: int = 0
+    consensus_review_items: int = 0
     created_by: str
     created_at: datetime
+    archived_at: Optional[datetime] = None
     sample_count: int = 0
     labeled_count: int = 0
     version: int = 1
@@ -164,6 +199,17 @@ class SourceSyncOut(BaseModel):
     source_type: str
     source_table: Optional[str] = None
     source_volume: str = ""
+
+
+class WorkspaceUserOut(BaseModel):
+    email: str
+    display_name: Optional[str] = None
+
+
+class WorkspaceUserDirectoryOut(BaseModel):
+    users: list[WorkspaceUserOut] = Field(default_factory=list)
+    source: Literal["workspace_scim", "app_visitors"]
+    warning: Optional[str] = None
 
 
 class ProjectStats(BaseModel):
@@ -424,6 +470,8 @@ class ConsensusTaskOut(BaseModel):
     assigned_to: str
     lock_token: str
     locked_at: datetime
+    has_previous_submission: bool = False
+    editable_until_review: bool = True
     sample: SampleOut
     annotations: list[ConsensusTaskAnnotationOut] = Field(default_factory=list)
 
@@ -446,6 +494,23 @@ class ConsensusProgressOut(BaseModel):
     resolved_items: int = 0
     review_items: int = 0
     total_items: int = 0
+
+
+class ConsensusReopenResult(BaseModel):
+    cases_reopened: int = 0
+    tasks_added: int = 0
+    annotations_removed: int = 0
+
+
+class ConsensusResetRequest(BaseModel):
+    confirm: bool = False
+
+
+class ConsensusResetResult(BaseModel):
+    samples_reset: int = 0
+    annotations_deleted: int = 0
+    history_deleted: int = 0
+    cases_recreated: int = 0
 
 
 class ConsensusSubmitOut(BaseModel):

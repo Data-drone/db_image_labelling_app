@@ -34,12 +34,16 @@ export function buildGalleryParams({
   label,
   labeler,
   filename,
+  labelScope,
+  consensusState,
 }) {
   const params = { page, page_size: pageSize };
   if (status) params.status = status;
   if (label) params.label = label;
   if (labeler) params.labeler = labeler;
   if (filename) params.filename = filename;
+  if (labelScope) params.label_scope = labelScope;
+  if (consensusState) params.consensus_state = consensusState;
   return params;
 }
 

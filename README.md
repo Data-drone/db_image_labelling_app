@@ -30,7 +30,10 @@ configured separately in the workspace.
 - UC Volume scans inspect only the selected directory; use a Delta-table image source for nested layouts.
 - Collaborative sample locking for non-consensus projects is only partially implemented; consensus projects use atomic private task claims, heartbeat, release, and stale-lock recovery.
 - Consensus is unweighted and image-only. Per-class thresholds, gold items, kappa, video tracks, keypoints, and attributes remain planned.
-- Project access is not full RBAC. Consensus settings are owner-only and its review queue uses an owner/reviewer allowlist; other project mutations still follow the existing App-access model.
+- Project access is not full RBAC. Consensus settings are owner-only; reviewers
+  and optional labeller allowlists are selected from active Databricks users.
+  Databricks App `CAN USE` still controls who can enter the app, while other
+  non-consensus project mutations follow the existing App-access model.
 - Import is API-only and supports JSONL and COCO; Pascal VOC, YOLO, and CSV import are not implemented.
 - YOLO export, video extraction, keypoints, comments/flags, and completion webhooks remain planned.
 
@@ -39,7 +42,8 @@ See the [roadmap](docs/plans/2026-04-27-roadmap.md) for shipped, partial, and pl
 ## Core workflows
 
 - **Create a project:** choose a UC Volume or Delta-table source, labeling
-  mode, and class list.
+  mode, and class list. Consensus projects can assign reviewers and an
+  optional labeller pool from the Databricks user directory.
 - **Label samples:** select one or more classification labels, draw detection
   boxes, or paint segmentation masks while navigating with the scrubber.
 - **Review and prioritize:** inspect correction history, model drafts,

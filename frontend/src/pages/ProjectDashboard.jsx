@@ -6,6 +6,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   fetchProject, fetchProjectStats, fetchDetailedProjectStats, cloneProject, updateProject,
+  deleteProject, archiveProject, unarchiveProject,
   syncProjectSource,
   fetchSamples, sampleThumbnailUrl, exportProject, fetchEndpointStatus,
   preAnnotateProjectStream,
@@ -17,12 +18,15 @@ import {
   fetchDiversityQueue, fetchActiveLearningQueue, fetchOutliers,
   fetchClusterMap,
   fetchConsensusMetrics,
+  fetchConsensusProgress,
+  fetchWorkspaceUsers,
 } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import Spinner from '../components/Spinner';
 import ClusterMap from '../components/ClusterMap';
 import FinetuneTab from '../components/FinetuneTab';
 import DatasetReady from '../components/DatasetReady';
+import UserMultiSelect from '../components/UserMultiSelect';
 import {
   buildGalleryParams,
   cancelDebounced,
@@ -30,6 +34,7 @@ import {
   galleryTotalPages as getGalleryTotalPages,
   shouldShowGalleryPagination,
 } from '../utils/galleryState';
+import { taskTypeBadgeClass } from '../utils/taskType';
 
 export default function ProjectDashboard() {
   const { id: projectId } = useParams();
@@ -40,12 +45,18 @@ export default function ProjectDashboard() {
   const [detailedStats, setDetailedStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [cloning, setCloning] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [newClass, setNewClass] = useState('');
   const [consensusMetrics, setConsensusMetrics] = useState(null);
+  const [consensusProgress, setConsensusProgress] = useState(null);
+  const [workspaceUsers, setWorkspaceUsers] = useState([]);
+  const [userDirectoryInfo, setUserDirectoryInfo] = useState(null);
+  const [userDirectoryError, setUserDirectoryError] = useState('');
 
   // Export state
   const [showExport, setShowExport] = useState(false);
@@ -101,6 +112,8 @@ export default function ProjectDashboard() {
   const [galleryFilter, setGalleryFilter] = useState('');
   const [filterLabel, setFilterLabel] = useState('');
   const [filterLabeler, setFilterLabeler] = useState('');
+  const [filterLabelScope, setFilterLabelScope] = useState('resolved');
+  const [filterConsensusState, setFilterConsensusState] = useState('');
   const [filterFilename, setFilterFilename] = useState('');
   const [filenameInput, setFilenameInput] = useState('');
   const galleryPageSize = 24;
@@ -224,11 +237,21 @@ export default function ProjectDashboard() {
   useEffect(() => {
     if (!project?.consensus_enabled) {
       setConsensusMetrics(null);
+      setConsensusProgress(null);
       return;
     }
-    fetchConsensusMetrics(projectId)
-      .then(setConsensusMetrics)
-      .catch(() => setConsensusMetrics(null));
+    Promise.all([
+      fetchConsensusMetrics(projectId),
+      fetchConsensusProgress(projectId),
+    ])
+      .then(([metrics, progress]) => {
+        setConsensusMetrics(metrics);
+        setConsensusProgress(progress);
+      })
+      .catch(() => {
+        setConsensusMetrics(null);
+        setConsensusProgress(null);
+      });
   }, [project?.consensus_enabled, projectId]);
 
   useEffect(() => {
@@ -300,6 +323,36 @@ export default function ProjectDashboard() {
       alert('Failed to create new version: ' + humanizeApiError(err));
     } finally {
       setCloning(false);
+    }
+  };
+
+  const handleArchiveToggle = async () => {
+    if (archiving || deleting || !project) return;
+    const isArchived = !!project.archived_at;
+    if (!isArchived && !confirm(`Archive "${project.name}"? It will be hidden from the default project list. You can restore it later.`)) return;
+    setArchiving(true);
+    try {
+      const updated = isArchived
+        ? await unarchiveProject(projectId)
+        : await archiveProject(projectId);
+      setProject(updated);
+    } catch (err) {
+      alert(humanizeApiError(err));
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (deleting || archiving || !project) return;
+    if (!confirm(`Permanently delete "${project.name}"? Labels in this app are removed. Source images and exported training datasets on the volume are kept. This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await deleteProject(projectId);
+      navigate('/projects');
+    } catch (err) {
+      alert(humanizeApiError(err));
+      setDeleting(false);
     }
   };
 
@@ -694,17 +747,33 @@ export default function ProjectDashboard() {
     setOutlierIds(new Set());
   };
 
+  const consensusEnabled = Boolean(project?.consensus_enabled);
+  const consensusRole = project?.consensus_role;
+
+  useEffect(() => {
+    setFilterLabelScope(
+      consensusEnabled && consensusRole === 'labeller' ? 'mine' : 'resolved'
+    );
+    setFilterConsensusState('');
+    setFilterLabeler('');
+  }, [projectId, consensusEnabled, consensusRole]);
+
   // Load gallery
   useEffect(() => {
     if (!project) return;
     const requestId = ++galleryRequestRef.current;
+    const canFilterOtherLabelers = !consensusEnabled
+      || ['owner', 'reviewer'].includes(consensusRole);
+    const effectiveLabelScope = consensusRole === 'labeller' ? 'mine' : filterLabelScope;
     const params = buildGalleryParams({
       page: galleryPage,
       pageSize: galleryPageSize,
       status: galleryFilter,
       label: filterLabel,
-      labeler: filterLabeler,
+      labeler: canFilterOtherLabelers ? filterLabeler : '',
       filename: filterFilename,
+      labelScope: consensusEnabled && filterLabel ? effectiveLabelScope : undefined,
+      consensusState: consensusEnabled && canFilterOtherLabelers ? filterConsensusState : '',
     });
     setGalleryLoading(true);
     setGalleryError('');
@@ -731,7 +800,7 @@ export default function ProjectDashboard() {
     return () => {
       if (requestId === galleryRequestRef.current) galleryRequestRef.current += 1;
     };
-  }, [project, projectId, galleryPage, galleryFilter, filterLabel, filterLabeler, filterFilename, galleryReloadKey]);
+  }, [project, projectId, consensusEnabled, consensusRole, galleryPage, galleryFilter, filterLabel, filterLabeler, filterLabelScope, filterConsensusState, filterFilename, galleryReloadKey]);
 
   const galleryTotalPages = getGalleryTotalPages(galleryTotal, galleryPageSize);
 
@@ -776,8 +845,16 @@ export default function ProjectDashboard() {
       consensus_quorum: project.consensus_quorum || 2,
       consensus_iou_threshold: project.consensus_iou_threshold ?? 0.5,
       consensus_agreement_threshold: project.consensus_agreement_threshold ?? 0.5,
-      consensus_reviewer_emails: (project.consensus_reviewer_emails || []).join(', '),
+      consensus_reviewer_emails: [...(project.consensus_reviewer_emails || [])],
+      consensus_labeller_emails: [...(project.consensus_labeller_emails || [])],
     });
+    setUserDirectoryError('');
+    fetchWorkspaceUsers()
+      .then((directory) => {
+        setWorkspaceUsers(directory.users || []);
+        setUserDirectoryInfo(directory);
+      })
+      .catch((err) => setUserDirectoryError(humanizeApiError(err)));
     setNewClass('');
     setEditing(true);
   };
@@ -795,10 +872,8 @@ export default function ProjectDashboard() {
       if (editForm.description !== (project.description || '')) patch.description = editForm.description;
       if (JSON.stringify(editForm.class_list) !== JSON.stringify(project.class_list)) patch.class_list = editForm.class_list;
       if ((editForm.serving_endpoint || '') !== (project.serving_endpoint || '')) patch.serving_endpoint = editForm.serving_endpoint;
-      const reviewerEmails = (editForm.consensus_reviewer_emails || '')
-        .split(',')
-        .map((email) => email.trim().toLowerCase())
-        .filter(Boolean);
+      const reviewerEmails = editForm.consensus_reviewer_emails || [];
+      const labellerEmails = editForm.consensus_labeller_emails || [];
       const structuralConsensusChanged = (
         Boolean(editForm.consensus_enabled) !== Boolean(project.consensus_enabled)
         || Number(editForm.consensus_panel_size) !== Number(project.consensus_panel_size || 3)
@@ -827,6 +902,12 @@ export default function ProjectDashboard() {
         !== JSON.stringify([...(project.consensus_reviewer_emails || [])].sort())
       ) {
         patch.consensus_reviewer_emails = reviewerEmails;
+      }
+      if (
+        JSON.stringify([...labellerEmails].sort())
+        !== JSON.stringify([...(project.consensus_labeller_emails || [])].sort())
+      ) {
+        patch.consensus_labeller_emails = labellerEmails;
       }
 
       const sourceChanged = editForm.source_volume !== project.source_volume
@@ -896,6 +977,17 @@ export default function ProjectDashboard() {
   const pct = stats && stats.total > 0
     ? Math.round((stats.labeled / stats.total) * 100)
     : 0;
+  const isConsensus = Boolean(project.consensus_enabled);
+  const isConsensusWorker = isConsensus && project.consensus_role === 'labeller';
+  const isConsensusViewer = isConsensus && project.consensus_role === 'viewer';
+  const canReviewConsensus = isConsensus && ['owner', 'reviewer'].includes(project.consensus_role);
+  const canLabelConsensus = isConsensus && ['owner', 'labeller'].includes(project.consensus_role);
+  const votePct = consensusMetrics?.total_tasks
+    ? Math.round((consensusMetrics.submitted_tasks / consensusMetrics.total_tasks) * 100)
+    : 0;
+  const resolvedPct = consensusMetrics?.total_items
+    ? Math.round((consensusMetrics.resolved_items / consensusMetrics.total_items) * 100)
+    : 0;
 
   return (
     <div>
@@ -919,7 +1011,7 @@ export default function ProjectDashboard() {
             <h1 style={{ fontSize: '1.75rem', fontWeight: 700, margin: 0 }}>
               {project.name}
             </h1>
-            <span className={`badge ${project.task_type === 'classification' ? 'badge-blue' : 'badge-yellow'}`}>
+            <span className={`badge ${taskTypeBadgeClass(project.task_type)}`}>
               {project.task_type}
             </span>
             {project.version > 1 && (
@@ -927,7 +1019,17 @@ export default function ProjectDashboard() {
                 v{project.version}
               </span>
             )}
+            {project.archived_at && (
+              <span className="badge" style={{ background: 'rgba(249,115,22,0.15)', color: '#fb923c' }}>
+                archived
+              </span>
+            )}
           </div>
+          {project.archived_at && (
+            <p style={{ color: '#fb923c', fontSize: '0.85rem', marginLeft: '2.5rem', marginTop: '0.35rem' }}>
+              This project is archived and hidden from the default list. Restore it from Actions if you still need it.
+            </p>
+          )}
           {project.description && (
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginLeft: '2.5rem' }}>
               {project.description}
@@ -938,6 +1040,7 @@ export default function ProjectDashboard() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          {(!isConsensus || project.consensus_role === 'owner') && (
           <div className="dropdown-wrapper" ref={actionsRef}>
             <button
               className="btn-secondary"
@@ -973,6 +1076,23 @@ export default function ProjectDashboard() {
                 >
                   {cloning ? 'Creating…' : 'New Version'}
                 </button>
+                <div className="dropdown-divider" />
+                <button
+                  className="dropdown-item"
+                  onClick={() => { handleArchiveToggle(); setActionsOpen(false); }}
+                  disabled={archiving || deleting}
+                >
+                  {archiving
+                    ? (project.archived_at ? 'Restoring…' : 'Archiving…')
+                    : (project.archived_at ? 'Restore from archive' : 'Archive project')}
+                </button>
+                <button
+                  className="dropdown-item danger"
+                  onClick={() => { handleDeleteProject(); setActionsOpen(false); }}
+                  disabled={deleting || archiving}
+                >
+                  {deleting ? 'Deleting…' : 'Delete project'}
+                </button>
                 {stats && stats.pre_labeled > 0 && (
                   <>
                     <div className="dropdown-divider" />
@@ -995,6 +1115,7 @@ export default function ProjectDashboard() {
               </div>
             )}
           </div>
+          )}
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {!project.consensus_enabled && stats?.embedded > 0 && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
@@ -1033,7 +1154,6 @@ export default function ProjectDashboard() {
                     background: 'rgba(168,85,247,0.1)',
                     color: '#a855f7',
                     cursor: 'pointer',
-                    outline: 'none',
                     fontWeight: 600,
                   }}
                 >
@@ -1042,7 +1162,7 @@ export default function ProjectDashboard() {
                 </select>
               </div>
             )}
-            {project.consensus_enabled && ['owner', 'reviewer'].includes(project.consensus_role) && (
+            {canReviewConsensus && (
               <button
                 className="btn-secondary"
                 onClick={() => navigate(`/projects/${projectId}/review`)}
@@ -1052,19 +1172,47 @@ export default function ProjectDashboard() {
                 {consensusMetrics?.review_items ? ` (${consensusMetrics.review_items})` : ''}
               </button>
             )}
-            <button
-              className="btn-primary"
-              onClick={() => navigate(`/projects/${projectId}/label`)}
-              style={{ padding: '0.6rem 1.5rem' }}
-            >
-              Start Labeling
-            </button>
+            {(!isConsensus || canLabelConsensus) && (
+              <button
+                className="btn-primary"
+                onClick={() => navigate(`/projects/${projectId}/label`)}
+                style={{ padding: '0.6rem 1.5rem' }}
+              >
+                {isConsensus ? 'Start blind voting' : 'Start Labeling'}
+              </button>
+            )}
           </div>
         </div>
       </div>
 
+      {isConsensus && (
+        <div style={{
+          marginBottom: '1rem', padding: '0.8rem 1rem', borderRadius: 8,
+          border: '1px solid rgba(59,130,246,0.3)', background: 'rgba(59,130,246,0.08)',
+          display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>Blind consensus mode</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.15rem' }}>
+              Votes stay private until the panel agrees or a reviewer resolves the item.
+              Dataset statistics below contain resolved labels only.
+            </div>
+          </div>
+          <span className="badge badge-blue" style={{ flexShrink: 0 }}>{project.consensus_role}</span>
+        </div>
+      )}
+
+      {isConsensusViewer && (
+        <div className="card" style={{ marginBottom: '1rem', border: '1px solid var(--status-warning)' }}>
+          <strong>No project role assigned</strong>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem' }}>
+            You can view resolved project results, but you are not assigned to submit votes or review disagreements.
+          </div>
+        </div>
+      )}
+
       {/* Tab Navigation */}
-      {(
+      {!isConsensusWorker && !isConsensusViewer && (
         <div style={{
           display: 'flex',
           gap: '0',
@@ -1109,9 +1257,13 @@ export default function ProjectDashboard() {
         <div className="card" style={{ marginBottom: '1rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
             <div>
-              <h3 style={{ margin: 0, fontSize: '1rem' }}>Consensus quality</h3>
+              <h3 style={{ margin: 0, fontSize: '1rem' }}>
+                {isConsensusWorker ? 'Your blind-vote work' : 'Consensus workflow'}
+              </h3>
               <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>
-                {project.task_type === 'classification'
+                {isConsensusWorker
+                  ? 'Your submissions are private; class and agreement details appear only after resolution.'
+                  : project.task_type === 'classification'
                   ? 'Exact-match agreement across blind classification votes'
                   : 'IoU and quorum agreement across blind spatial votes'}
               </div>
@@ -1122,14 +1274,18 @@ export default function ProjectDashboard() {
             display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
             gap: '0.6rem', marginBottom: consensusMetrics.per_user?.length ? '1rem' : 0,
           }}>
-            {[
+            {(isConsensusWorker ? [
+              ['My votes submitted', consensusProgress?.my_submitted_tasks || 0],
+              ['Votes available', consensusProgress?.available_tasks || 0],
+              ['Resolved dataset', `${consensusMetrics.resolved_items}/${consensusMetrics.total_items}`],
+            ] : [
               ['Resolved', consensusMetrics.resolved_items],
               ['Needs review', consensusMetrics.review_items],
               ['Votes submitted', `${consensusMetrics.submitted_tasks}/${consensusMetrics.total_tasks}`],
               ['Auto resolved', consensusMetrics.auto_resolved],
               ['Manual', consensusMetrics.manually_resolved],
               ['Mean agreement', `${Math.round((consensusMetrics.mean_agreement_score || 0) * 100)}%`],
-            ].map(([label, value]) => (
+            ]).map(([label, value]) => (
               <div key={label} style={{
                 padding: '0.65rem', borderRadius: 6, background: 'var(--bg-secondary)',
                 border: '1px solid var(--border-color)',
@@ -1138,6 +1294,24 @@ export default function ProjectDashboard() {
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{label}</div>
               </div>
             ))}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.8rem', marginBottom: consensusMetrics.per_user?.length ? '1rem' : 0 }}>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '0.3rem' }}>
+                <span>Vote collection</span><strong>{votePct}%</strong>
+              </div>
+              <div className="progress-bar" style={{ height: 6 }}>
+                <div className="progress-fill" style={{ width: `${votePct}%` }} />
+              </div>
+            </div>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '0.3rem' }}>
+                <span>Dataset readiness</span><strong>{resolvedPct}%</strong>
+              </div>
+              <div className="progress-bar" style={{ height: 6 }}>
+                <div className="progress-fill" style={{ width: `${resolvedPct}%`, background: 'var(--status-success)' }} />
+              </div>
+            </div>
           </div>
           {consensusMetrics.per_user?.length > 0 && (
             <div style={{ overflowX: 'auto' }}>
@@ -1169,7 +1343,7 @@ export default function ProjectDashboard() {
       )}
 
       {/* AI Tools panel */}
-      {stats && (
+      {stats && (!isConsensus || project.consensus_role === 'owner') && (
         <div className="card" style={{ marginBottom: '1rem', padding: 0, overflow: 'hidden' }}>
           <div style={{ padding: '0.6rem 1rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <span style={{ fontSize: '0.95rem', fontWeight: 700 }}>AI Tools</span>
@@ -1723,14 +1897,19 @@ export default function ProjectDashboard() {
             gap: '1rem',
             marginBottom: '1.5rem',
           }}>
-            {[
+            {(isConsensus ? [
+              { label: 'Total items', value: stats.total, color: 'var(--text-primary)' },
+              { label: 'Resolved', value: stats.labeled, color: 'var(--status-success)' },
+              { label: 'Needs review', value: consensusMetrics?.review_items || 0, color: 'var(--status-warning)' },
+              { label: 'Not yet resolved', value: Math.max(0, stats.total - stats.labeled), color: 'var(--accent-blue)' },
+            ] : [
               { label: 'Total', value: stats.total, color: 'var(--text-primary)' },
               { label: 'Labeled', value: stats.labeled, color: 'var(--status-success)' },
               ...(stats.pre_labeled > 0 ? [{ label: 'Pre-labeled', value: stats.pre_labeled, color: '#a78bfa' }] : []),
               { label: 'Skipped', value: stats.skipped, color: 'var(--status-warning)' },
               { label: 'Remaining', value: stats.unlabeled, color: 'var(--accent-blue)' },
               ...(stats.embedded > 0 ? [{ label: 'Embedded', value: stats.embedded, color: '#60a5fa' }] : []),
-            ].map((card) => (
+            ]).map((card) => (
               <div key={card.label} className="card" style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 700, color: card.color, lineHeight: 1.2 }}>
                   {card.value}
@@ -1745,19 +1924,21 @@ export default function ProjectDashboard() {
           {/* Progress bar */}
           <div className="card" style={{ marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.5rem' }}>
-              <span style={{ fontWeight: 600 }}>Overall Progress</span>
-              <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>{pct}%</span>
+              <span style={{ fontWeight: 600 }}>{isConsensus ? 'Dataset Readiness' : 'Overall Progress'}</span>
+              <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>{isConsensus ? resolvedPct : pct}%</span>
             </div>
             <div className="progress-bar" style={{ height: 8 }}>
-              <div className="progress-fill" style={{ width: `${pct}%` }} />
+              <div className="progress-fill" style={{ width: `${isConsensus ? resolvedPct : pct}%` }} />
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
-              {stats.labeled} labeled{stats.pre_labeled > 0 ? `, ${stats.pre_labeled} pre-labeled` : ''}, {stats.skipped} skipped, {stats.unlabeled} remaining
+              {isConsensus
+                ? `${stats.labeled} resolved labels are ready for export; ${Math.max(0, stats.total - stats.labeled)} items are still collecting votes or awaiting review.`
+                : `${stats.labeled} labeled${stats.pre_labeled > 0 ? `, ${stats.pre_labeled} pre-labeled` : ''}, ${stats.skipped} skipped, ${stats.unlabeled} remaining`}
             </div>
           </div>
 
           {/* Analytics Section */}
-          {detailedStats && (
+          {detailedStats && (!isConsensus || canReviewConsensus) && (
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
@@ -1767,10 +1948,14 @@ export default function ProjectDashboard() {
               {/* Class Distribution */}
               <div className="card">
                 <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem' }}>
-                  Class Distribution
+                  {isConsensus ? 'Resolved Class Distribution' : 'Class Distribution'}
                 </h3>
                 {detailedStats.per_class.length === 0 ? (
                   <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No classes defined</div>
+                ) : isConsensus && detailedStats.per_class.every((cls) => cls.count === 0) ? (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+                    No resolved labels yet. Blind votes will appear here only after consensus or reviewer resolution.
+                  </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                     {(() => {
@@ -1859,6 +2044,7 @@ export default function ProjectDashboard() {
           )}
 
           {/* Sample Gallery / Cluster Map */}
+          {(!isConsensus || canReviewConsensus) && (
           <div className="card" style={{ marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2099,6 +2285,24 @@ export default function ProjectDashboard() {
                   fontSize: '0.8rem',
                 }}
               />
+              {isConsensus && canReviewConsensus && (
+                <select
+                  value={filterLabelScope}
+                  onChange={(e) => { setFilterLabelScope(e.target.value); setGalleryPage(0); }}
+                  title="Whose labels to search"
+                  style={{
+                    padding: '0.35rem 0.6rem',
+                    background: 'var(--bg-input)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: 4,
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  <option value="resolved">Resolved labels</option>
+                  <option value="mine">My submitted labels</option>
+                </select>
+              )}
               <select
                 value={filterLabel}
                 onChange={(e) => { setFilterLabel(e.target.value); setGalleryPage(0); }}
@@ -2111,11 +2315,34 @@ export default function ProjectDashboard() {
                   fontSize: '0.8rem',
                 }}
               >
-                <option value="">All labels</option>
+                <option value="">
+                  {isConsensusWorker ? 'Any of my classes' : isConsensus ? 'Any class' : 'All labels'}
+                </option>
                 {(project.class_list || []).map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
+              {isConsensus && canReviewConsensus && (
+                <select
+                  value={filterConsensusState}
+                  onChange={(e) => { setFilterConsensusState(e.target.value); setGalleryPage(0); }}
+                  style={{
+                    padding: '0.35rem 0.6rem',
+                    background: 'var(--bg-input)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: 4,
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  <option value="">Any consensus state</option>
+                  <option value="pending">Pending</option>
+                  <option value="in_progress">Collecting votes</option>
+                  <option value="review">Needs review</option>
+                  <option value="resolved">Resolved</option>
+                </select>
+              )}
+              {(!isConsensus || canReviewConsensus) && (
               <select
                 value={filterLabeler}
                 onChange={(e) => { setFilterLabeler(e.target.value); setGalleryPage(0); }}
@@ -2133,7 +2360,8 @@ export default function ProjectDashboard() {
                   <option key={u.user} value={u.user}>{u.user}</option>
                 ))}
               </select>
-              {(filterLabel || filterLabeler || filterFilename || galleryFilter) && (
+              )}
+              {(filterLabel || filterLabeler || filterFilename || galleryFilter || filterConsensusState) && (
                 <button
                   className="btn-secondary"
                   onClick={() => {
@@ -2141,6 +2369,8 @@ export default function ProjectDashboard() {
                     setGalleryFilter('');
                     setFilterLabel('');
                     setFilterLabeler('');
+                    setFilterLabelScope(isConsensusWorker ? 'mine' : 'resolved');
+                    setFilterConsensusState('');
                     setFilterFilename('');
                     setFilenameInput('');
                     setGalleryPage(0);
@@ -2654,9 +2884,10 @@ export default function ProjectDashboard() {
             </>
             )}
           </div>
+          )}
 
           {/* Per-user breakdown */}
-          {stats.per_user && stats.per_user.length > 0 && (
+          {(!isConsensus || canReviewConsensus) && stats.per_user && stats.per_user.length > 0 && (
             <div className="card">
               <h3 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem' }}>
                 Contributor Activity
@@ -2758,11 +2989,15 @@ export default function ProjectDashboard() {
                     ? `${project.consensus_panel_size} votes on ${project.consensus_coverage_percent}% of items; quorum ${project.consensus_quorum}${project.task_type === 'classification' ? '' : `; IoU ${project.consensus_iou_threshold}`}`
                     : 'Disabled'}
                 </span>
-                {project.consensus_enabled && (
+                {project.consensus_enabled && project.consensus_role === 'owner' && (
                   <>
                     <span style={{ color: 'var(--text-muted)' }}>Reviewers</span>
                     <span>
                       {(project.consensus_reviewer_emails || []).join(', ') || 'Project owner only'}
+                    </span>
+                    <span style={{ color: 'var(--text-muted)' }}>Labellers</span>
+                    <span>
+                      {(project.consensus_labeller_emails || []).join(', ') || 'All other App users'}
                     </span>
                   </>
                 )}
@@ -2993,17 +3228,43 @@ export default function ProjectDashboard() {
                               Odd panel sizes reduce tied votes.
                             </div>
                           )}
-                          <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                            Reviewer emails (comma-separated)
-                            <input
-                              type="text"
-                              value={editForm.consensus_reviewer_emails}
-                              onChange={(e) => setEditForm({ ...editForm, consensus_reviewer_emails: e.target.value })}
-                              className="input"
-                              placeholder="reviewer@example.com"
-                              style={{ width: '100%', marginTop: '0.2rem' }}
-                            />
-                          </label>
+                          <div style={{ padding: '0.65rem', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
+                            <div style={{ fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                              Project roles
+                            </div>
+                            {userDirectoryError && (
+                              <div style={{ color: '#ef4444', fontSize: '0.7rem', marginBottom: '0.5rem' }}>
+                                Could not load Databricks users: {userDirectoryError}
+                              </div>
+                            )}
+                            {userDirectoryInfo?.warning && (
+                              <div style={{ color: 'var(--status-warning)', fontSize: '0.68rem', marginBottom: '0.5rem' }}>
+                                {userDirectoryInfo.warning}
+                              </div>
+                            )}
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.65rem' }}>
+                              <div style={{ marginBottom: '0.25rem' }}>Reviewers resolve disagreements.</div>
+                              <UserMultiSelect
+                                users={workspaceUsers}
+                                selected={editForm.consensus_reviewer_emails || []}
+                                onChange={(value) => setEditForm({ ...editForm, consensus_reviewer_emails: value })}
+                                exclude={editForm.consensus_labeller_emails || []}
+                                placeholder="Search reviewers…"
+                              />
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              <div style={{ marginBottom: '0.25rem' }}>
+                                Labellers submit blind votes. Leave empty to allow all other App users.
+                              </div>
+                              <UserMultiSelect
+                                users={workspaceUsers}
+                                selected={editForm.consensus_labeller_emails || []}
+                                onChange={(value) => setEditForm({ ...editForm, consensus_labeller_emails: value })}
+                                exclude={editForm.consensus_reviewer_emails || []}
+                                placeholder="Search labellers (optional)…"
+                              />
+                            </div>
+                          </div>
                         </>
                       )}
                     </div>

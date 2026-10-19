@@ -11,6 +11,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import Spinner from '../components/Spinner';
 import BBoxCanvas from '../components/BBoxCanvas';
 import { getClassColor } from '../utils/classColors';
+import { taskTypeBadgeClass } from '../utils/taskType';
 import MaskCanvas from '../components/MaskCanvas';
 import MaskToolPanel from '../components/MaskToolPanel';
 import ImageAdjust from '../components/ImageAdjust';
@@ -60,6 +61,7 @@ export default function LabelingView() {
   const [consensusProgress, setConsensusProgress] = useState(null);
   const [consensusDone, setConsensusDone] = useState(false);
   const consensusTaskRef = useRef(null);
+  const classListRef = useRef([]);
   const [loading, setLoading] = useState(true);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -126,6 +128,7 @@ export default function LabelingView() {
   const isDetection = project?.task_type === 'detection';
   const isSegmentation = project?.task_type === 'segmentation';
   const isConsensus = Boolean(project?.consensus_enabled);
+  classListRef.current = project?.class_list || [];
   const total = sampleList.length;
   const hasDraftAnnotations = Boolean(sample?.annotations?.some((a) => a.is_draft));
 
@@ -167,11 +170,45 @@ export default function LabelingView() {
       setConsensusTask(task);
       setConsensusDone(!task);
       if (task) {
+        const ownAnnotations = task.annotations || [];
+        const classes = classListRef.current;
         setSample(task.sample);
         sampleAnnotations.current = task.sample.annotations || [];
-        setSelectedLabels(new Set());
-        setBoxes([]);
-        setMaskLayers([]);
+        setSelectedLabels(new Set(
+          ownAnnotations
+            .filter((annotation) => annotation.ann_type === 'classification')
+            .map((annotation) => annotation.label),
+        ));
+        const ownBoxes = ownAnnotations
+          .filter((annotation) => annotation.ann_type === 'bbox' && annotation.bbox_json)
+          .map((annotation) => ({
+            id: `vote-${nextBoxId.current++}`,
+            label: annotation.label,
+            classIndex: Math.max(0, classes.indexOf(annotation.label)),
+            ...annotation.bbox_json,
+          }));
+        setBoxes(ownBoxes);
+        setSelectedBoxId(null);
+        const ownMasks = ownAnnotations
+          .filter((annotation) => annotation.ann_type === 'mask' && annotation.mask_json)
+          .map((annotation) => ({
+            id: `vote-${nextMaskId.current++}`,
+            label: annotation.label,
+            classIndex: Math.max(0, classes.indexOf(annotation.label)),
+            isDraft: false,
+            mask_json: annotation.mask_json,
+            source: stripServerFields(annotation),
+            dirty: false,
+          }));
+        setMaskLayers(ownMasks);
+        setActiveMaskId(ownMasks.length > 0 ? ownMasks[0].id : null);
+        const firstSpatial = ownMasks[0] || ownBoxes[0];
+        setActiveClassIndex(
+          firstSpatial && Number.isInteger(firstSpatial.classIndex)
+            ? firstSpatial.classIndex
+            : 0,
+        );
+        masksDirty.current = false;
         setSampleList([{ id: task.sample_id, status: 'in_progress' }]);
         setCurrentIndex(0);
       } else {
@@ -197,7 +234,7 @@ export default function LabelingView() {
   }, [project?.consensus_enabled, sampleParam, loadConsensusTask]);
 
   useEffect(() => {
-    if (!isConsensus || !consensusTask) return undefined;
+    if (!isConsensus || !consensusTask || consensusTask.status === 'submitted') return undefined;
     const timer = window.setInterval(() => {
       heartbeatConsensusTask(
         projectId, consensusTask.id, consensusTask.lock_token,
@@ -462,17 +499,34 @@ export default function LabelingView() {
 
   const submitConsensusVote = useCallback(async (annotations, allowEmpty = false) => {
     if (!consensusTask) throw new Error('No active consensus task.');
-    await submitConsensusTask(
+    const result = await submitConsensusTask(
       projectId,
       consensusTask.id,
       consensusTask.lock_token,
       annotations,
       allowEmpty,
     );
+    const requested = sampleParam ? Number.parseInt(sampleParam, 10) : null;
+    const stayOnSample = Number.isFinite(requested);
+    const panelClosed = result?.case_state === 'review' || result?.case_state === 'resolved';
+    if (stayOnSample && !panelClosed) {
+      const updated = {
+        ...consensusTask,
+        status: 'submitted',
+        has_previous_submission: true,
+      };
+      consensusTaskRef.current = updated;
+      setConsensusTask(updated);
+      const progress = await fetchConsensusProgress(projectId);
+      setConsensusProgress(progress);
+      return;
+    }
     consensusTaskRef.current = null;
     setConsensusTask(null);
-    await loadConsensusTask();
-  }, [consensusTask, projectId, loadConsensusTask]);
+    await loadConsensusTask({
+      requestedSampleId: stayOnSample ? requested : null,
+    });
+  }, [consensusTask, projectId, loadConsensusTask, sampleParam]);
 
   // Multi-label classification: save all selected labels and advance
   const handleSaveClassification = useCallback(async () => {
@@ -855,7 +909,23 @@ export default function LabelingView() {
     setMaskLayers(prev => prev.map(l => (
       String(l.id) === String(id) ? { ...l, classIndex, label, dirty: true } : l
     )));
-  }, [project]);
+    if (String(id) === String(activeMaskId)) setActiveClassIndex(classIndex);
+  }, [project, activeMaskId]);
+
+  const handleSelectMaskLayer = useCallback((id) => {
+    setActiveMaskId(id);
+    const layer = maskLayers.find((l) => String(l.id) === String(id));
+    if (layer && Number.isInteger(layer.classIndex)) {
+      setActiveClassIndex(layer.classIndex);
+    }
+  }, [maskLayers]);
+
+  // Number keys and the class list both paint with the chosen class: update the
+  // picker *and* retint the layer under the brush so the ring matches.
+  const handleSelectClass = useCallback((idx) => {
+    setActiveClassIndex(idx);
+    if (activeMaskId) handleRelabelMaskLayer(activeMaskId, idx);
+  }, [activeMaskId, handleRelabelMaskLayer]);
 
   // Segmentation: Save & Next
   const handleSaveMasks = useCallback(async () => {
@@ -1016,8 +1086,7 @@ export default function LabelingView() {
           if (isDetection) {
             setActiveClassIndex(idx);
           } else if (isSegmentation) {
-            setActiveClassIndex(idx);
-            if (activeMaskId) handleRelabelMaskLayer(activeMaskId, idx);
+            handleSelectClass(idx);
           } else {
             toggleLabel(project.class_list[idx]);
           }
@@ -1064,7 +1133,7 @@ export default function LabelingView() {
   }, [project, sample, saving, projectId, navigate, isDetection, isSegmentation, selectedBoxId,
       boxes, currentIndex, sampleList, handleUndo, cycleSelectedBox, selectedLabels,
       handleSaveClassification, handleSaveMasks, toggleLabel, activeMaskId,
-      handleRelabelMaskLayer, confirmLeaveUnsavedMasks, goNext, goNextUnlabeled, goPrev,
+      handleRelabelMaskLayer, handleSelectClass, confirmLeaveUnsavedMasks, goNext, goNextUnlabeled, goPrev,
       handleSaveBoxes, handleSkip, leaveLabeling]);
 
   const labeled = isConsensus
@@ -1150,7 +1219,7 @@ export default function LabelingView() {
         <h2 style={{ fontWeight: 600, fontSize: '1.1rem', margin: 0 }}>
           {project.name}
         </h2>
-        <span className={`badge ${isDetection || isSegmentation ? 'badge-yellow' : 'badge-blue'}`}>
+        <span className={`badge ${taskTypeBadgeClass(project.task_type)}`}>
           {project.task_type}
         </span>
         {isConsensus && (
@@ -1346,7 +1415,7 @@ export default function LabelingView() {
                 brightness={adjust.brightness}
                 contrast={adjust.contrast}
                 onMaskUpdated={handleMaskUpdated}
-                onMaskSelected={setActiveMaskId}
+                onMaskSelected={handleSelectMaskLayer}
                 onNeedLayer={handleAddMaskLayer}
                 onHistoryChange={setMaskHistory}
               />
@@ -1406,6 +1475,25 @@ export default function LabelingView() {
                   {sample.filepath}
                 </div>
               </div>
+
+              {isConsensus && consensusTask?.has_previous_submission && (
+                <div
+                  role="status"
+                  data-testid="consensus-editing-vote"
+                  style={{
+                    marginBottom: '0.75rem',
+                    padding: '0.55rem 0.65rem',
+                    borderRadius: 6,
+                    background: 'rgba(66, 153, 224, 0.12)',
+                    border: '1px solid rgba(66, 153, 224, 0.35)',
+                    color: 'var(--accent-blue)',
+                    fontSize: '0.75rem',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  Editing your submitted vote. You can update it until this image is locked for review.
+                </div>
+              )}
 
               <div style={{ borderTop: '1px solid var(--border-color)', margin: '0 0 1rem' }} />
 
@@ -1620,7 +1708,7 @@ export default function LabelingView() {
                       ? 'Saving...'
                       : isConsensus && boxes.length === 0
                         ? 'Submit no objects'
-                        : `Save & Next (${boxes.length})`}
+                        : `${consensusTask?.has_previous_submission ? 'Update vote' : 'Save & Next'} (${boxes.length})`}
                   </button>
 
                   <button
@@ -1639,11 +1727,11 @@ export default function LabelingView() {
                 <MaskToolPanel
                   classList={project.class_list}
                   activeClassIndex={activeClassIndex}
-                  onActiveClassChange={setActiveClassIndex}
+                  onActiveClassChange={handleSelectClass}
                   flashIndex={flashIndex}
                   layers={maskLayers}
                   activeMaskId={activeMaskId}
-                  onSelectLayer={setActiveMaskId}
+                  onSelectLayer={handleSelectMaskLayer}
                   onAddLayer={handleAddMaskLayer}
                   onDeleteLayer={handleDeleteMaskLayer}
                   onRelabelLayer={handleRelabelMaskLayer}
@@ -1666,6 +1754,11 @@ export default function LabelingView() {
                   addingClass={addingClass}
                   saving={saving}
                   onSave={handleSaveMasks}
+                  saveLabel={
+                    consensusTask?.has_previous_submission
+                      ? `Update vote (${maskLayers.filter((layer) => layer.mask_json).length})`
+                      : undefined
+                  }
                   onSkip={handleSkip}
                   predictions={predictions}
                   endpointReady={endpointReady}
@@ -1851,7 +1944,7 @@ export default function LabelingView() {
                             const summary = labels.length <= 2
                               ? labels.join(', ')
                               : `${labels.slice(0, 2).join(', ')}, +${labels.length - 2} more`;
-                            return `Save & Next (${summary})`;
+                            return `${consensusTask?.has_previous_submission ? 'Update vote' : 'Save & Next'} (${summary})`;
                           })()}
                   </button>
 
@@ -2071,3 +2164,11 @@ function KeyboardShortcutLegend({ maxClassKey, mode = 'detection', collapsible =
     </details>
   );
 }
+
+
+
+
+
+
+
+
