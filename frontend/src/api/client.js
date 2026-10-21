@@ -299,6 +299,12 @@ export const fetchTablePreview = (fullName, { path_column, source_filter, limit 
 export const browseDirectory = (path, { page, page_size } = {}) =>
   api.get('/browse', { params: { path, page, page_size } }).then(r => r.data);
 
+export const browseImageCount = (path, { include_subfolders = false, max_depth = 3 } = {}) =>
+  api.get('/browse/count', {
+    params: { path, include_subfolders, max_depth },
+    timeout: 120000,
+  }).then(r => r.data);
+
 export const browseThumbnailUrl = (filePath, size = 120) =>
   `/api/browse/thumbnail?path=${encodeURIComponent(filePath)}&size=${size}`;
 

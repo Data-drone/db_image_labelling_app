@@ -16,6 +16,7 @@ import {
   fetchTables,
   fetchTablePreview,
   browseDirectory,
+  browseImageCount,
   browseThumbnailUrl,
 } from '../api/client';
 
@@ -65,6 +66,10 @@ export default function BrowseVolumes() {
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
   const [hasBrowsed, setHasBrowsed] = useState(false);
+  const [includeSubfolders, setIncludeSubfolders] = useState(false);
+  const [scanMaxDepth, setScanMaxDepth] = useState(3);
+  const [counting, setCounting] = useState(false);
+  const [countResult, setCountResult] = useState(null);
 
   // Load catalogs when picker or table mode is activated
   useEffect(() => {
@@ -211,6 +216,42 @@ export default function BrowseVolumes() {
     loadDirectory(0);
   }, [currentPath, mode, hasBrowsed, browseEpoch, loadDirectory]);
 
+  const scanDepth = Number.isFinite(Number(scanMaxDepth))
+    ? Math.max(0, Math.min(8, Number(scanMaxDepth)))
+    : 3;
+
+  useEffect(() => {
+    if (mode === 'table' || !currentPath) return;
+    if (mode === 'direct' && !hasBrowsed) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setCounting(true);
+      browseImageCount(currentPath, {
+        include_subfolders: includeSubfolders,
+        max_depth: scanDepth,
+      })
+        .then((data) => {
+          if (cancelled) return;
+          setCountResult({
+            imageCount: data.image_count ?? 0,
+            truncated: Boolean(data.truncated),
+            warning: data.error || '',
+          });
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setCountResult({ error: humanizeApiError(e) });
+        })
+        .finally(() => {
+          if (!cancelled) setCounting(false);
+        });
+    }, includeSubfolders ? 250 : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [currentPath, includeSubfolders, scanDepth, mode, hasBrowsed]);
+
   // Breadcrumb navigation
   const breadcrumbs = ['Root', ...(subpath ? subpath.split('/') : [])];
 
@@ -235,8 +276,18 @@ export default function BrowseVolumes() {
     setFiles([]);
     setTotalFiles(0);
     setFilePage(0);
+    setCountResult(null);
     setHasBrowsed(true);
     setBrowseEpoch((n) => n + 1);
+  };
+
+  const createProjectHref = () => {
+    const params = new URLSearchParams({ volume: currentPath });
+    if (includeSubfolders) {
+      params.set('include_subfolders', 'true');
+      params.set('max_depth', String(scanDepth));
+    }
+    return `/projects/new?${params.toString()}`;
   };
 
   return (
@@ -291,7 +342,7 @@ export default function BrowseVolumes() {
           <button
             onClick={handleBrowse}
             disabled={!directPath.trim() || loading}
-            className="btn-primary"
+            className="btn-secondary"
             style={{ padding: '0.5rem 1.5rem', whiteSpace: 'nowrap' }}
           >
             {loading ? 'Loading...' : 'Browse'}
@@ -421,6 +472,78 @@ export default function BrowseVolumes() {
               />
             </div>
           </div>
+        </div>
+      )}
+
+      {mode !== 'table' && currentPath && (mode !== 'direct' || hasBrowsed) && (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '1rem',
+            marginBottom: '1.25rem',
+            padding: '0.9rem 1rem',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 8,
+          }}
+        >
+          <div style={{ minWidth: 220, flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.45rem' }}>
+              Use this folder
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                <input
+                  type="checkbox"
+                  checked={includeSubfolders}
+                  onChange={(e) => {
+                    setIncludeSubfolders(e.target.checked);
+                    setCountResult(null);
+                  }}
+                />
+                Include nested folders
+              </label>
+              {includeSubfolders && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                  Depth
+                  <input
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={scanMaxDepth}
+                    onChange={(e) => {
+                      setScanMaxDepth(e.target.value);
+                      setCountResult(null);
+                    }}
+                    style={{ width: 52, padding: '0.2rem 0.35rem' }}
+                  />
+                </label>
+              )}
+            </div>
+            <div style={{ fontSize: '0.8rem', marginTop: '0.45rem', color: countResult?.error ? 'var(--status-error)' : 'var(--text-muted)' }}>
+              {counting && 'Counting images…'}
+              {!counting && countResult?.error}
+              {!counting && countResult?.warning}
+              {!counting && countResult && !countResult.error && (
+                <>
+                  {countResult.imageCount} image{countResult.imageCount === 1 ? '' : 's'}
+                  {includeSubfolders ? ' in this folder and nested folders' : ' in this folder'}
+                  {countResult.truncated ? ' (count capped)' : ''}
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate(createProjectHref())}
+            style={{ padding: '0.5rem 1.15rem', fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+          >
+            Create project
+          </button>
         </div>
       )}
 
@@ -639,15 +762,6 @@ export default function BrowseVolumes() {
                     ? `${filePage * FILE_PAGE_SIZE + 1}–${Math.min((filePage + 1) * FILE_PAGE_SIZE, totalFiles)} of ${totalFiles}`
                     : `(${totalFiles})`}
                 </h3>
-                {totalFiles > 0 && (
-                  <button
-                    className="btn-primary"
-                    onClick={() => navigate(`/projects/new?volume=${encodeURIComponent(currentPath)}`)}
-                    style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
-                  >
-                    Create Project ({totalFiles} files)
-                  </button>
-                )}
               </div>
               <div style={{
                 display: 'grid',

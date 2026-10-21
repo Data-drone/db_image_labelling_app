@@ -27,7 +27,7 @@ configured separately in the workspace.
 
 ## Current limitations
 
-- UC Volume scans inspect only the selected directory; use a Delta-table image source for nested layouts.
+- UC Volume scans default to the selected directory. Enable **Include subfolders** on create to walk nested folders up to a bounded depth.
 - Collaborative sample locking for non-consensus projects is only partially implemented; consensus projects use atomic private task claims, heartbeat, release, and stale-lock recovery.
 - Consensus is unweighted and image-only. Per-class thresholds, gold items, kappa, video tracks, keypoints, and attributes remain planned.
 - Project access is not full RBAC. Consensus settings are owner-only; reviewers

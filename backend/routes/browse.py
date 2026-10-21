@@ -8,9 +8,26 @@ import os
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from ..volumes import IMAGE_EXTENSIONS, is_volume_path, read_image_bytes, _get_workspace_client
+from ..volumes import (
+    IMAGE_EXTENSIONS,
+    discover_images,
+    effective_scan_depth,
+    is_volume_path,
+    read_image_bytes,
+    _get_workspace_client,
+)
 
 router = APIRouter(prefix="/api", tags=["browse"])
+
+# macOS maps /tmp to /private/tmp; realpath must still be allowed for local tests.
+_ALLOWED_LOCAL_PREFIXES = ("/Volumes/", "/tmp/", "/private/tmp/")
+
+
+def _local_browse_path(path: str) -> str:
+    resolved = os.path.realpath(path)
+    if not any(resolved.startswith(prefix) for prefix in _ALLOWED_LOCAL_PREFIXES):
+        raise HTTPException(status_code=403, detail="Local browsing restricted to allowed directories.")
+    return resolved
 
 
 @router.get("/catalogs")
@@ -115,6 +132,29 @@ def preview_table(
     }
 
 
+@router.get("/browse/count")
+def browse_image_count(
+    path: str = Query(...),
+    include_subfolders: bool = Query(False),
+    max_depth: int = Query(3, ge=0, le=8),
+):
+    """Count images that project ingestion would discover for these scan settings.
+
+    Folder navigation stays on ``/browse`` and does not walk nested trees.
+    """
+    scan_path = path if is_volume_path(path) else _local_browse_path(path)
+    depth = effective_scan_depth(include_subfolders, max_depth)
+    discovery = discover_images(scan_path, max_depth=depth)
+    return {
+        "path": path,
+        "image_count": len(discovery.images),
+        "include_subfolders": include_subfolders,
+        "max_depth": depth,
+        "truncated": discovery.truncated,
+        "error": discovery.error,
+    }
+
+
 @router.get("/browse")
 def browse_directory(
     path: str = Query(...),
@@ -127,8 +167,6 @@ def browse_directory(
     prevent arbitrary path traversal.  Files are paginated; folders are
     always returned in full.
     """
-    ALLOWED_LOCAL_PREFIXES = ("/Volumes/", "/tmp/")
-
     if is_volume_path(path):
         try:
             w = _get_workspace_client()
@@ -157,9 +195,7 @@ def browse_directory(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     else:
-        resolved = os.path.realpath(path)
-        if not any(resolved.startswith(prefix) for prefix in ALLOWED_LOCAL_PREFIXES):
-            raise HTTPException(status_code=403, detail="Local browsing restricted to allowed directories.")
+        resolved = _local_browse_path(path)
         if not os.path.isdir(resolved):
             raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
         folders, files = [], []
@@ -191,12 +227,8 @@ def browse_thumbnail(
 
     Same path-safety rules as browse_directory apply for local files.
     """
-    ALLOWED_LOCAL_PREFIXES = ("/Volumes/", "/tmp/")
-
     if not is_volume_path(path):
-        resolved = os.path.realpath(path)
-        if not any(resolved.startswith(prefix) for prefix in ALLOWED_LOCAL_PREFIXES):
-            raise HTTPException(status_code=403, detail="Access denied.")
+        _local_browse_path(path)
 
     data = read_image_bytes(path)
     if data is None:

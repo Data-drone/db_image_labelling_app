@@ -49,6 +49,10 @@ class LabelingProject(Base):
     source_table = Column(Text, nullable=True)  # catalog.schema.table when source_type='table'
     image_path_column = Column(String(255), nullable=True)
     source_filter = Column(Text, nullable=True)  # optional WHERE body for table scan
+    # Volume-scan recursion. Depth 0 (or include_subfolders=false) is the
+    # selected directory only. Table-backed projects ignore these flags.
+    scan_include_subfolders = Column(Boolean, nullable=False, default=False)
+    scan_max_depth = Column(Integer, nullable=False, default=3)
     serving_endpoint = Column(String(255), nullable=True)  # Model Serving endpoint name
     endpoint_config = Column(JSON, nullable=True)  # response parsing overrides
     consensus_enabled = Column(Boolean, nullable=False, default=False)
