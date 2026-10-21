@@ -11,9 +11,10 @@ node_modules
 dist-ssr
 *.local
 
-# dist/ is intentionally tracked so Databricks Apps can deploy directly from Git
-# (package.json is nested under frontend/ so Databricks won't auto-run npm build).
-# Rebuild before committing when frontend source changes: `npm run build`
+# dist/ is intentionally tracked so Git-backed Databricks Apps can serve the SPA
+# without running npm. package.json stays under frontend/ so Apps does not
+# auto-run npm install at startup. Rebuild before commit or deploy:
+# `python scripts/build_frontend.py` (also run by scripts/deploy_app.py).
 
 
 # Editor directories and files

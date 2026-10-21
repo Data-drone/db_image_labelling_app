@@ -84,14 +84,21 @@ database credentials every 20 minutes.
 ### Deploy to Databricks Apps
 
 **Recommended:** use the Databricks Apps deployment pipeline in this repo
-(`databricks apps deploy --target dev`). It validates/uploads the bundle,
-updates the App and its Job resources, and starts the App.
+(`python scripts/deploy_app.py --target <target> --profile <profile>`). It
+builds `frontend/dist` first, then validates/uploads the bundle, updates the
+App and its Job resources, and starts the App. A failed frontend build stops
+before source is staged.
 
 1. Adjust the bundle variables for the target workspace, including both
    Volumes, Lakebase branch/database/endpoint, serving endpoints, warehouse,
    jobs, and App name.
-2. Run `databricks apps deploy --target dev --profile <profile>`.
-3. The App runs `python start.py`. The Lakebase postgres resource injects
+2. Install frontend dependencies once on the machine that deploys:
+   `cd frontend && npm ci`.
+3. Run `python scripts/deploy_app.py --target dev --profile <profile>`.
+4. The App runs `python start.py`. Databricks Apps installs Python packages
+   from `requirements.txt` only. There is no root `package.json`, so startup
+   does not run `npm install` or hit the npm registry. FastAPI serves the
+   uploaded `frontend/dist`. The Lakebase postgres resource injects
    `PGHOST`, `PGUSER`, and `PGDATABASE`; `LAKEBASE_ENDPOINT` is bound from the
    same resource so the App can mint renewable OAuth credentials.
 
@@ -170,7 +177,7 @@ instead of choosing one.
 
 This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and API routes so large pre-label batches run on a cluster instead of inside the app HTTP worker.
 
-1. From the repo root: `databricks apps deploy --target <target> --profile <profile>`.
+1. From the repo root: `python scripts/deploy_app.py --target <target> --profile <profile>`.
 2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). Bundle job parameters inject the exact Lakebase project, endpoint, PostgreSQL database, and inference adapter before the worker imports the backend.
 
 The dashboard shows **Pre-label (job)** when the job id resolves. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
@@ -294,7 +301,9 @@ cv-explorer/
 ├── app.yml                         # Databricks App manifest (Git deploy expects app.yml)
 ├── databricks.yml                  # Asset Bundle entry point
 ├── start.py                        # Uvicorn entrypoint
-├── requirements.txt                # Python dependencies
+├── requirements.txt                # Python dependencies (Apps runtime; no npm)
+├── scripts/deploy_app.py           # Frontend build then `databricks apps deploy`
+├── scripts/build_frontend.py       # Production `npm run build` for frontend/dist
 ├── backend/
 │   ├── main.py                     # App assembly, lifespan, routers, SPA serving
 │   ├── models.py                   # SQLAlchemy models and additive initialization

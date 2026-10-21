@@ -68,9 +68,16 @@ Prefer **declarative resources** in `resources/cv_explorer_app.yml` (bundle depl
 
 Without a bundle, resources can be added in the Apps UI instead; keep the same `valueFrom` keys in `app.yml`.
 
-Deploy with `databricks apps deploy --target <target> --profile <profile>` so
-the bundle is applied and the App is restarted; `bundle deploy` alone only
-updates bundle resources/files.
+Deploy with `python scripts/deploy_app.py --target <target> --profile <profile>`
+so the frontend production build runs before source upload, then the bundle is
+applied and the App is restarted. A failed `npm run build` exits before
+staging. `databricks bundle deploy` / `databricks apps deploy` alone skip that
+check. `bundle deploy` without `apps deploy` only updates bundle
+resources/files.
+
+The Apps runtime does not run npm. Python comes from `requirements.txt`; the
+SPA is the prebuilt `frontend/dist`. Keep `package.json` under `frontend/` —
+a root `package.json` would make Apps run `npm install` at startup.
 
 **Lakebase:** either attach a **postgres** database App resource (platform injects `PG*`; app uses `init_lakebase_from_app_resource`) or omit it and use SDK auto-provision in `lakebase.py` (`LAKEBASE_AUTO_PROVISION=true`, no `PGHOST`).
 
@@ -95,7 +102,7 @@ updates bundle resources/files.
 1. Create a component in `frontend/src/pages/`
 2. Add the route in `frontend/src/App.jsx`
 3. Add API calls to `frontend/src/api/client.js` — this is the single source of truth for all endpoints
-4. Build: `npm run build` in `frontend/` — output goes to `frontend/dist/` which FastAPI serves as static files
+4. Build: `python scripts/build_frontend.py` (or `npm run build` in `frontend/`) — output goes to `frontend/dist/` which FastAPI serves as static files. `scripts/deploy_app.py` runs this automatically before upload.
 
 ### Database Changes
 
