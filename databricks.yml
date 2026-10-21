@@ -12,6 +12,8 @@ sync:
   exclude:
     - .isaac/**
     - tmp/**
+    # Apps runtime does not run npm; never upload local install trees.
+    - frontend/node_modules/**
 
 variables:
   # App resources (override if your workspace differs)
