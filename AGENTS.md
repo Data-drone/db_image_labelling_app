@@ -133,7 +133,9 @@ a root `package.json` would make Apps run `npm install` at startup.
  adapters. Dedicated serving clients shorten the Databricks SDK's internal
  retry window so the outer budget can take effect. App endpoint resources
  remain least-privilege `CAN_QUERY`, with endpoint names injected through
- `valueFrom`.
+ `valueFrom`. The pre-annotate Job shares one `EndpointCircuitBreaker`
+ across batches and fails the run after consecutive unavailable-endpoint
+ samples instead of exhausting retries on every remaining sample.
 - **Consensus model**: classification uses exact label-set voting. Detection
   and segmentation cluster same-class shapes by snapshotted IoU/quorum and
   materialize the submitted medoid geometry. Private `task_annotations`

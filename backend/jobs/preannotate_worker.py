@@ -14,7 +14,34 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = int(os.environ.get("PRE_ANNOTATE_JOB_BATCH_SIZE", "50"))
+DEFAULT_BATCH_SIZE = 50
+DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE = 3
+
+
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("Ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("Clamping %s to %d", name, minimum)
+        return minimum
+    return value
+
+
+BATCH_SIZE = _env_int("PRE_ANNOTATE_JOB_BATCH_SIZE", DEFAULT_BATCH_SIZE, minimum=1)
+
+
+def _max_consecutive_unavailable() -> int:
+    return _env_int(
+        "PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE",
+        DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE,
+        minimum=0,
+    )
 
 
 def _init_db_backend():
@@ -68,7 +95,7 @@ def main(run_id: int) -> None:
 
     from sqlalchemy import or_
     from ..models import LabelingProject, PreannotateRun, ProjectSample
-    from ..preannotate import run_preannotate_for_samples
+    from ..preannotate import EndpointCircuitBreaker, run_preannotate_for_samples
 
     new_session = _init_db_backend()
 
@@ -139,6 +166,7 @@ def main(run_id: int) -> None:
 
     completed = failed = skipped = 0
     last_error = ""
+    breaker = EndpointCircuitBreaker(_max_consecutive_unavailable())
     for batch_start in range(0, total_planned, BATCH_SIZE):
         batch_ids = sample_ids[batch_start : batch_start + BATCH_SIZE]
         db = new_session()
@@ -159,6 +187,7 @@ def main(run_id: int) -> None:
                 min_confidence=min_confidence,
                 text_prompt=text_prompt,
                 retry_context="job",
+                circuit_breaker=breaker,
             )
             db.commit()
             completed += stats["completed"]
@@ -187,10 +216,23 @@ def main(run_id: int) -> None:
         finally:
             db.close()
 
+        if breaker.tripped:
+            break
+
     db = new_session()
     try:
         run_row = db.query(PreannotateRun).filter_by(id=run_id).first()
-        if completed == 0 and failed > 0:
+        if breaker.tripped:
+            not_attempted = max(0, total_planned - completed - failed - skipped)
+            run_row.status = "failed"
+            run_row.error_message = (
+                f"Stopped after {breaker.consecutive} consecutive samples failed "
+                f"because the serving endpoint was unavailable "
+                f"({type(breaker.last_error).__name__}). "
+                f"{not_attempted} sample(s) were not attempted; "
+                "check the endpoint and start a new run."
+            )
+        elif completed == 0 and failed > 0:
             run_row.status = "failed"
             run_row.error_message = (
                 f"All {failed} sample(s) failed. Last error: {last_error[:500]}"
