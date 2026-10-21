@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.models import PreannotateRun
+from backend.models import ClusterMapPointCache, ClusterMapRun, PreannotateRun
 from backend.tests.conftest import make_sample_volume, test_client
 
 
@@ -65,6 +65,7 @@ class TestProjectLifecycle(unittest.TestCase):
         pid = project["id"]
         with deps.get_session_factory()() as db:
             db.add(PreannotateRun(project_id=pid, status="succeeded"))
+            db.add(ClusterMapRun(project_id=pid, status="ready", sample_count=0))
             db.commit()
 
         deleted = self.client.delete(f"/api/projects/{pid}")
@@ -77,6 +78,42 @@ class TestProjectLifecycle(unittest.TestCase):
         with deps.get_session_factory()() as db:
             leftover = db.query(PreannotateRun).filter_by(project_id=pid).count()
             self.assertEqual(leftover, 0)
+            self.assertEqual(db.query(ClusterMapRun).filter_by(project_id=pid).count(), 0)
+            self.assertEqual(db.query(ClusterMapPointCache).filter_by(project_id=pid).count(), 0)
+
+    def test_source_change_clears_cluster_map_before_samples(self):
+        from sqlalchemy import event
+
+        from backend import deps
+
+        engine = deps.get_engine()
+        event.listen(
+            engine, "connect",
+            lambda conn, _record: conn.execute("PRAGMA foreign_keys=ON"),
+        )
+        engine.dispose()
+
+        project = self._create("source-change")
+        pid = project["id"]
+        with deps.get_session_factory()() as db:
+            from backend.models import ProjectSample
+            sample = db.query(ProjectSample).filter_by(project_id=pid).first()
+            db.add(ClusterMapRun(project_id=pid, status="ready", sample_count=1))
+            db.add(ClusterMapPointCache(project_id=pid, sample_id=sample.id, x=0.1, y=0.2))
+            db.commit()
+
+        other = self.root / "other"
+        other.mkdir()
+        (other / "d.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        changed = self.client.patch(
+            f"/api/projects/{pid}",
+            json={"source_volume": str(other), "confirm_source_change": True},
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+
+        with deps.get_session_factory()() as db:
+            self.assertEqual(db.query(ClusterMapRun).filter_by(project_id=pid).count(), 0)
+            self.assertEqual(db.query(ClusterMapPointCache).filter_by(project_id=pid).count(), 0)
 
     def test_non_owner_cannot_archive_or_delete_ordinary_project(self):
         created = self.client.post(

@@ -339,7 +339,10 @@ export const fetchOutliers = (projectId, params = {}) =>
   api.get(`/projects/${projectId}/outliers`, { params, timeout: 120000 }).then(r => r.data);
 
 export const fetchClusterMap = (projectId, { force = false } = {}) =>
-  api.get(`/projects/${projectId}/cluster-map`, { params: { force }, timeout: 300000 }).then(r => r.data);
+  api.get(`/projects/${projectId}/cluster-map`, { params: { force }, timeout: 30000 }).then(r => ({
+    httpStatus: r.status,
+    data: r.data,
+  }));
 
 // ---------------------------------------------------------------------------
 // Admin

@@ -86,7 +86,8 @@ async def lifespan(app: FastAPI):
         print("[STARTUP] Using SQLite backend", flush=True)
         from sqlalchemy import create_engine
         db_url = os.environ.get("DATABASE_URL", "sqlite:////tmp/cv_explorer.db")
-        engine = create_engine(db_url, echo=False)
+        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+        engine = create_engine(db_url, echo=False, connect_args=connect_args)
 
     from sqlalchemy.orm import sessionmaker
     session_factory = sessionmaker(bind=engine)

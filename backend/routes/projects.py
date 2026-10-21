@@ -16,6 +16,8 @@ from ..deps import get_db, get_user_email
 from ..models import (
     Annotation,
     AnnotationHistory,
+    ClusterMapPointCache,
+    ClusterMapRun,
     ConsensusCase,
     EmbeddingRun,
     FinetuneRun,
@@ -100,6 +102,8 @@ def _purge_project_row(db: Session, p: LabelingProject) -> None:
     db.query(PreannotateRun).filter_by(project_id=pid).delete(synchronize_session=False)
     db.query(EmbeddingRun).filter_by(project_id=pid).delete(synchronize_session=False)
     db.query(FinetuneRun).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.query(ClusterMapPointCache).filter_by(project_id=pid).delete(synchronize_session=False)
+    db.query(ClusterMapRun).filter_by(project_id=pid).delete(synchronize_session=False)
     db.query(AnnotationHistory).filter_by(project_id=pid).delete(synchronize_session=False)
     db.delete(p)
 
@@ -534,6 +538,8 @@ def update_project(
             db.delete(case)
         db.flush()
         db.query(Annotation).filter_by(project_id=project_id).delete()
+        db.query(ClusterMapPointCache).filter_by(project_id=project_id).delete(synchronize_session=False)
+        db.query(ClusterMapRun).filter_by(project_id=project_id).delete(synchronize_session=False)
         db.query(ProjectSample).filter_by(project_id=project_id).delete()
         if payload.source_type is not None:
             p.source_type = payload.source_type
