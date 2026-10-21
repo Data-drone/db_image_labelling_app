@@ -24,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 
@@ -104,15 +105,8 @@ class ProjectSample(Base):
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
 
-    # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
-    # columns in the DB but NOT mapped here — they're managed via raw SQL in
-    # the cluster-map endpoint to avoid breaking queries when the columns
-    # can't be added (e.g. insufficient table ownership on Lakebase).
-
-    # Cached 2D UMAP projection coordinates are stored as umap_x/umap_y
-    # columns in the DB but NOT mapped here — they're managed via raw SQL in
-    # the cluster-map endpoint to avoid breaking queries when the columns
-    # can't be added (e.g. insufficient table ownership on Lakebase).
+    # Optional umap_x/umap_y columns may still be written via raw SQL for
+    # back-compat, but Cluster Map persists coordinates in cluster_map_points.
 
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(
@@ -201,6 +195,43 @@ class EmbeddingRun(Base):
 
     __table_args__ = (
         Index("ix_embedding_runs_project", "project_id"),
+    )
+
+
+class ClusterMapRun(Base):
+    """Tracks in-app UMAP projection so Cluster Map GET never blocks on compute."""
+
+    __tablename__ = "cluster_map_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
+    status = Column(String(32), nullable=False, default="running")
+    sample_count = Column(Integer, default=0, nullable=False)
+    sample_fingerprint = Column(String(64), default="", nullable=False)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_cluster_map_runs_project", "project_id"),
+        Index("ix_cluster_map_runs_status", "status"),
+    )
+
+
+class ClusterMapPointCache(Base):
+    """Cached 2D projection coordinates, independent of optional umap_x/umap_y."""
+
+    __tablename__ = "cluster_map_points"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("labeling_projects.id"), nullable=False)
+    sample_id = Column(Integer, ForeignKey("project_samples.id"), nullable=False)
+    x = Column(Float, nullable=False)
+    y = Column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "sample_id", name="uq_cluster_map_points_sample"),
+        Index("ix_cluster_map_points_project", "project_id"),
     )
 
 
@@ -435,6 +466,8 @@ TABLE_NAMES = [
     "annotation_history",
     "preannotate_runs",
     "embedding_runs",
+    "cluster_map_runs",
+    "cluster_map_points",
     "finetune_runs",
     "consensus_cases",
     "labeling_tasks",

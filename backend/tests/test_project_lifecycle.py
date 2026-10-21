@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.models import PreannotateRun
+from backend.models import ClusterMapPointCache, ClusterMapRun, PreannotateRun
 from backend.tests.conftest import make_sample_volume, test_client
 
 
@@ -65,6 +65,7 @@ class TestProjectLifecycle(unittest.TestCase):
         pid = project["id"]
         with deps.get_session_factory()() as db:
             db.add(PreannotateRun(project_id=pid, status="succeeded"))
+            db.add(ClusterMapRun(project_id=pid, status="ready", sample_count=0))
             db.commit()
 
         deleted = self.client.delete(f"/api/projects/{pid}")
@@ -77,6 +78,8 @@ class TestProjectLifecycle(unittest.TestCase):
         with deps.get_session_factory()() as db:
             leftover = db.query(PreannotateRun).filter_by(project_id=pid).count()
             self.assertEqual(leftover, 0)
+            self.assertEqual(db.query(ClusterMapRun).filter_by(project_id=pid).count(), 0)
+            self.assertEqual(db.query(ClusterMapPointCache).filter_by(project_id=pid).count(), 0)
 
     def test_non_owner_cannot_archive_or_delete_ordinary_project(self):
         created = self.client.post(

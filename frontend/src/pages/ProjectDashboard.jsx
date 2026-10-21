@@ -159,6 +159,8 @@ export default function ProjectDashboard() {
   const [clusterPoints, setClusterPoints] = useState(null);
   const [clusterLoading, setClusterLoading] = useState(false);
   const [clusterError, setClusterError] = useState('');
+  const [clusterComputingCount, setClusterComputingCount] = useState(null);
+  const clusterRequestRef = useRef(0);
 
   const onFilenameInputChange = useCallback((value) => {
     setFilenameInput(value);
@@ -804,28 +806,58 @@ export default function ProjectDashboard() {
 
   const galleryTotalPages = getGalleryTotalPages(galleryTotal, galleryPageSize);
 
+  const loadClusterMap = useCallback(async ({ force = false, requestId } = {}) => {
+    const isCurrent = () => requestId === clusterRequestRef.current;
+    const started = Date.now();
+    const budgetMs = 120000;
+    let first = true;
+    setClusterLoading(true);
+    setClusterError('');
+    if (force) setClusterPoints(null);
+    try {
+      while (Date.now() - started < budgetMs) {
+        if (!isCurrent()) return;
+        const { httpStatus, data } = await fetchClusterMap(projectId, { force: force && first });
+        first = false;
+        if (!isCurrent()) return;
+        if (httpStatus === 202) {
+          setClusterComputingCount(data?.sample_count ?? null);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+        if (data?.points) {
+          setClusterPoints(data.points);
+          setClusterComputingCount(null);
+          return;
+        }
+        setClusterError('Cluster map returned no points.');
+        return;
+      }
+      if (isCurrent()) {
+        setClusterError('Cluster map timed out waiting for the projection. Retry to try again.');
+      }
+    } catch (err) {
+      if (isCurrent()) {
+        setClusterError(humanizeApiError(err) || 'Failed to load cluster map');
+      }
+    } finally {
+      if (isCurrent()) setClusterLoading(false);
+    }
+  }, [projectId]);
+
   // Load cluster map data when switching to cluster view
   useEffect(() => {
-    if (viewMode !== 'cluster' || !project || clusterPoints) return;
-    setClusterLoading(true);
-    setClusterError('');
-    fetchClusterMap(projectId)
-      .then((data) => setClusterPoints(data.points))
-      .catch((err) => setClusterError(humanizeApiError(err) || 'Failed to load cluster map'))
-      .finally(() => setClusterLoading(false));
-  }, [viewMode, project, projectId, clusterPoints]);
+    if (viewMode !== 'cluster' || !projectId || !project) return;
+    const requestId = ++clusterRequestRef.current;
+    loadClusterMap({ force: false, requestId });
+    return () => {
+      if (requestId === clusterRequestRef.current) clusterRequestRef.current += 1;
+    };
+  }, [viewMode, projectId, loadClusterMap, project?.id]);
 
-  const handleClusterRefresh = async () => {
-    setClusterLoading(true);
-    setClusterError('');
-    try {
-      const data = await fetchClusterMap(projectId, { force: true });
-      setClusterPoints(data.points);
-    } catch (err) {
-      setClusterError(humanizeApiError(err) || 'Failed to recompute cluster map');
-    } finally {
-      setClusterLoading(false);
-    }
+  const handleClusterRefresh = () => {
+    const requestId = ++clusterRequestRef.current;
+    loadClusterMap({ force: true, requestId });
   };
 
   const startEditing = () => {
@@ -2239,8 +2271,17 @@ export default function ProjectDashboard() {
             )}
 
             {clusterError && viewMode === 'cluster' && (
-              <div style={{ marginBottom: '0.75rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444' }}>
-                {clusterError}
+              <div style={{ marginBottom: '0.75rem', padding: '0.35rem 0.5rem', borderRadius: 4, background: 'rgba(239,68,68,0.08)', fontSize: '0.75rem', color: '#ef4444', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <span>{clusterError}</span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleClusterRefresh}
+                  disabled={clusterLoading}
+                  style={{ padding: '0.15rem 0.5rem', fontSize: '0.7rem' }}
+                >
+                  Retry
+                </button>
               </div>
             )}
 
@@ -2248,7 +2289,12 @@ export default function ProjectDashboard() {
             {viewMode === 'cluster' && !similarMode && !dupMode && !outlierMode ? (
               clusterLoading ? (
                 <div style={{ display: 'flex', justifyContent: 'center', padding: '3rem 0' }}>
-                  <Spinner /> <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Computing embedding projection...</span>
+                  <Spinner />
+                  <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                    {clusterComputingCount != null
+                      ? `Computing embedding projection for ${Number(clusterComputingCount).toLocaleString()} samples… This can take a minute.`
+                      : 'Loading cluster map…'}
+                  </span>
                 </div>
               ) : clusterPoints && clusterPoints.length > 0 ? (
                 <ClusterMap

@@ -831,3 +831,8 @@ class ClusterMapResult(BaseModel):
     points: list[ClusterMapPoint]
     total: int
     cached: bool = False
+
+
+class ClusterMapComputing(BaseModel):
+    status: str = "computing"
+    sample_count: int
