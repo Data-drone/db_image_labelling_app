@@ -230,7 +230,7 @@ class TestEndpointSelection(unittest.TestCase):
         ]
         with (
             patch("backend.lakebase._get_workspace_client", return_value=w),
-            patch("backend.lakebase.LAKEBASE_AUTO_PROVISION", True),
+            patch("backend.lakebase.LAKEBASE_AUTO_PROVISION", False),
         ):
             chosen = get_endpoint(project, branch_name="dev")
         self.assertEqual(chosen.name, feature_rw.name)

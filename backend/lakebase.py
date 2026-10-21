@@ -192,7 +192,7 @@ def get_endpoint(project, endpoint_name: str = None, branch_name: str = None):
             )
         return w.postgres.get_endpoint(name=configured_name)
 
-    if not LAKEBASE_AUTO_PROVISION:
+    if not LAKEBASE_AUTO_PROVISION and not (branch_name or "").strip():
         raise RuntimeError(
             "LAKEBASE_ENDPOINT is required when LAKEBASE_AUTO_PROVISION=false."
         )
