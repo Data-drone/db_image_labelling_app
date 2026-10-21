@@ -68,23 +68,55 @@ def _inject_sp_credentials():
         print(f"[PREANNOTATE] No SP credentials in argv (argc={len(sys.argv)})", flush=True)
 
 
+# argv[4:] order used by job definitions that predate NAME=value arguments.
+_LEGACY_POSITIONAL_ENV = (
+    "LAKEBASE_PROJECT_ID",
+    "LAKEBASE_ENDPOINT",
+    "LAKEBASE_DATABASE_NAME",
+    "LAKEBASE_SCHEMA",
+    "SERVING_ENDPOINT_ADAPTER",
+    "SERVING_COLD_START_MAX_RETRIES",
+    "SERVING_COLD_START_INITIAL_DELAY_S",
+    "SERVING_COLD_START_MAX_DELAY_S",
+    "SERVING_COLD_START_JOB_BUDGET_S",
+)
+_JOB_ENV_NAMES = frozenset(_LEGACY_POSITIONAL_ENV) | {
+    "PRE_ANNOTATE_JOB_BATCH_SIZE",
+    "PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE",
+}
+
+
+def _is_named_arg(arg: str) -> bool:
+    name, sep, _ = arg.partition("=")
+    return bool(sep) and name in _JOB_ENV_NAMES
+
+
+def _parse_bundle_args(args: list[str]) -> dict[str, str]:
+    """Map job config arguments to env names.
+
+    Serverless tasks cannot set environment variables, so the bundle passes
+    allowlisted ``NAME=value`` arguments. Older positional job definitions are
+    still accepted when no named argument is present.
+    """
+    if not any(_is_named_arg(arg) for arg in args):
+        return dict(zip(_LEGACY_POSITIONAL_ENV, args))
+    values = {}
+    for arg in args:
+        if not _is_named_arg(arg):
+            name = arg.partition("=")[0]
+            raise SystemExit(f"Unrecognized pre-annotate job argument: {name!r}")
+        name, _, value = arg.partition("=")
+        values[name] = value
+    return values
+
+
 def _inject_bundle_config():
     """Copy target-specific job parameters into the worker environment."""
-    values = {
-        "LAKEBASE_PROJECT_ID": sys.argv[4] if len(sys.argv) > 4 else "",
-        "LAKEBASE_ENDPOINT": sys.argv[5] if len(sys.argv) > 5 else "",
-        "LAKEBASE_DATABASE_NAME": sys.argv[6] if len(sys.argv) > 6 else "",
-        "LAKEBASE_SCHEMA": sys.argv[7] if len(sys.argv) > 7 else "",
-        "SERVING_ENDPOINT_ADAPTER": sys.argv[8] if len(sys.argv) > 8 else "",
-        "SERVING_COLD_START_MAX_RETRIES": sys.argv[9] if len(sys.argv) > 9 else "",
-        "SERVING_COLD_START_INITIAL_DELAY_S": sys.argv[10] if len(sys.argv) > 10 else "",
-        "SERVING_COLD_START_MAX_DELAY_S": sys.argv[11] if len(sys.argv) > 11 else "",
-        "SERVING_COLD_START_JOB_BUDGET_S": sys.argv[12] if len(sys.argv) > 12 else "",
-    }
+    values = _parse_bundle_args(sys.argv[4:])
     for name, value in values.items():
         if value:
             os.environ[name] = value
-    if values["LAKEBASE_ENDPOINT"] and values["LAKEBASE_DATABASE_NAME"]:
+    if values.get("LAKEBASE_ENDPOINT") and values.get("LAKEBASE_DATABASE_NAME"):
         os.environ["LAKEBASE_AUTO_PROVISION"] = "false"
 
 

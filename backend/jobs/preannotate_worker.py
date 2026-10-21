@@ -14,23 +14,34 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = int(os.environ.get("PRE_ANNOTATE_JOB_BATCH_SIZE", "50"))
+DEFAULT_BATCH_SIZE = 50
 DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE = 3
 
 
-def _max_consecutive_unavailable() -> int:
-    raw = os.environ.get("PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE")
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name)
     if raw is None or raw == "":
-        return DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE
+        return default
     try:
-        return max(0, int(raw))
+        value = int(raw)
     except ValueError:
-        log.warning(
-            "Ignoring invalid PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE=%r; using %d",
-            raw,
-            DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE,
-        )
-        return DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE
+        log.warning("Ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("Clamping %s to %d", name, minimum)
+        return minimum
+    return value
+
+
+BATCH_SIZE = _env_int("PRE_ANNOTATE_JOB_BATCH_SIZE", DEFAULT_BATCH_SIZE, minimum=1)
+
+
+def _max_consecutive_unavailable() -> int:
+    return _env_int(
+        "PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE",
+        DEFAULT_MAX_CONSECUTIVE_UNAVAILABLE,
+        minimum=0,
+    )
 
 
 def _init_db_backend():

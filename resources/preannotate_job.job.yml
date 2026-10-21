@@ -35,6 +35,10 @@ resources:
           default: ${var.serving_cold_start_max_delay_s}
         - name: serving_cold_start_job_budget_s
           default: ${var.serving_cold_start_job_budget_s}
+        - name: preannotate_job_batch_size
+          default: ${var.preannotate_job_batch_size}
+        - name: preannotate_max_consecutive_unavailable
+          default: ${var.preannotate_max_consecutive_unavailable}
       tasks:
         - task_key: main
           environment_key: preann_env
@@ -44,15 +48,19 @@ resources:
               - "{{job.parameters.run_id}}"
               - "{{job.parameters.sp_client_id}}"
               - "{{job.parameters.sp_client_secret}}"
-              - "{{job.parameters.lakebase_project_id}}"
-              - "{{job.parameters.lakebase_endpoint}}"
-              - "{{job.parameters.lakebase_database_name}}"
-              - "{{job.parameters.lakebase_schema_name}}"
-              - "{{job.parameters.inference_adapter}}"
-              - "{{job.parameters.serving_cold_start_max_retries}}"
-              - "{{job.parameters.serving_cold_start_initial_delay_s}}"
-              - "{{job.parameters.serving_cold_start_max_delay_s}}"
-              - "{{job.parameters.serving_cold_start_job_budget_s}}"
+              # Serverless tasks cannot set env vars; the entrypoint copies
+              # these allowlisted NAME=value arguments into the environment.
+              - "LAKEBASE_PROJECT_ID={{job.parameters.lakebase_project_id}}"
+              - "LAKEBASE_ENDPOINT={{job.parameters.lakebase_endpoint}}"
+              - "LAKEBASE_DATABASE_NAME={{job.parameters.lakebase_database_name}}"
+              - "LAKEBASE_SCHEMA={{job.parameters.lakebase_schema_name}}"
+              - "SERVING_ENDPOINT_ADAPTER={{job.parameters.inference_adapter}}"
+              - "SERVING_COLD_START_MAX_RETRIES={{job.parameters.serving_cold_start_max_retries}}"
+              - "SERVING_COLD_START_INITIAL_DELAY_S={{job.parameters.serving_cold_start_initial_delay_s}}"
+              - "SERVING_COLD_START_MAX_DELAY_S={{job.parameters.serving_cold_start_max_delay_s}}"
+              - "SERVING_COLD_START_JOB_BUDGET_S={{job.parameters.serving_cold_start_job_budget_s}}"
+              - "PRE_ANNOTATE_JOB_BATCH_SIZE={{job.parameters.preannotate_job_batch_size}}"
+              - "PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE={{job.parameters.preannotate_max_consecutive_unavailable}}"
       environments:
         - environment_key: preann_env
           spec:

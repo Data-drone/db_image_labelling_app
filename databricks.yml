@@ -52,6 +52,10 @@ variables:
     default: "45"
   serving_cold_start_job_budget_s:
     default: "900"
+  preannotate_job_batch_size:
+    default: "50"
+  preannotate_max_consecutive_unavailable:
+    default: "3"
   embedding_endpoint_name:
     default: cv-dinov3-cv_manufacturing
   finetune_job_id:
