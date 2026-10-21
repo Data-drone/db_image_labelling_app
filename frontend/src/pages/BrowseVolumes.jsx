@@ -16,6 +16,7 @@ import {
   fetchTables,
   fetchTablePreview,
   browseDirectory,
+  browseImageCount,
   browseThumbnailUrl,
 } from '../api/client';
 
@@ -65,6 +66,10 @@ export default function BrowseVolumes() {
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
   const [hasBrowsed, setHasBrowsed] = useState(false);
+  const [includeSubfolders, setIncludeSubfolders] = useState(false);
+  const [scanMaxDepth, setScanMaxDepth] = useState(3);
+  const [counting, setCounting] = useState(false);
+  const [countResult, setCountResult] = useState(null);
 
   // Load catalogs when picker or table mode is activated
   useEffect(() => {
@@ -235,8 +240,43 @@ export default function BrowseVolumes() {
     setFiles([]);
     setTotalFiles(0);
     setFilePage(0);
+    setCountResult(null);
     setHasBrowsed(true);
     setBrowseEpoch((n) => n + 1);
+  };
+
+  const scanDepth = Number.isFinite(Number(scanMaxDepth))
+    ? Math.max(0, Math.min(8, Number(scanMaxDepth)))
+    : 3;
+
+  const handlePreviewCount = async () => {
+    if (!currentPath) return;
+    setCounting(true);
+    setCountResult(null);
+    try {
+      const data = await browseImageCount(currentPath, {
+        include_subfolders: includeSubfolders,
+        max_depth: scanDepth,
+      });
+      setCountResult({
+        imageCount: data.image_count ?? 0,
+        truncated: Boolean(data.truncated),
+        warning: data.error || '',
+      });
+    } catch (e) {
+      setCountResult({ error: humanizeApiError(e) });
+    } finally {
+      setCounting(false);
+    }
+  };
+
+  const createProjectHref = () => {
+    const params = new URLSearchParams({ volume: currentPath });
+    if (includeSubfolders) {
+      params.set('include_subfolders', 'true');
+      params.set('max_depth', String(scanDepth));
+    }
+    return `/projects/new?${params.toString()}`;
   };
 
   return (
@@ -421,6 +461,81 @@ export default function BrowseVolumes() {
               />
             </div>
           </div>
+        </div>
+      )}
+
+      {mode !== 'table' && currentPath && (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: '0.75rem',
+            marginBottom: '1.25rem',
+            padding: '0.75rem 1rem',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 8,
+          }}
+        >
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+            <input
+              type="checkbox"
+              checked={includeSubfolders}
+              onChange={(e) => {
+                setIncludeSubfolders(e.target.checked);
+                setCountResult(null);
+              }}
+            />
+            Include subfolders
+          </label>
+          {includeSubfolders && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+              Max depth
+              <input
+                type="number"
+                min={0}
+                max={8}
+                value={scanMaxDepth}
+                onChange={(e) => {
+                  setScanMaxDepth(e.target.value);
+                  setCountResult(null);
+                }}
+                style={{ width: 56, padding: '0.2rem 0.35rem' }}
+              />
+            </label>
+          )}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handlePreviewCount}
+            disabled={counting}
+            style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+          >
+            {counting ? 'Scanning...' : 'Preview Volume'}
+          </button>
+          {countResult && !countResult.error && (
+            <span style={{ fontSize: '0.8rem', color: 'var(--status-success)' }}>
+              {countResult.imageCount} images eligible
+              {includeSubfolders ? ' (including nested folders)' : ' in this folder'}
+              {countResult.truncated && ' (count capped)'}
+            </span>
+          )}
+          {countResult?.warning && (
+            <span style={{ fontSize: '0.8rem', color: 'var(--status-error)' }}>{countResult.warning}</span>
+          )}
+          {countResult?.error && (
+            <span style={{ fontSize: '0.8rem', color: 'var(--status-error)' }}>{countResult.error}</span>
+          )}
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate(createProjectHref())}
+            style={{ marginLeft: 'auto', padding: '0.4rem 1rem', fontSize: '0.85rem' }}
+          >
+            Create Project
+            {countResult && !countResult.error ? ` (${countResult.imageCount} images)` : ''}
+          </button>
         </div>
       )}
 
@@ -642,7 +757,7 @@ export default function BrowseVolumes() {
                 {totalFiles > 0 && (
                   <button
                     className="btn-primary"
-                    onClick={() => navigate(`/projects/new?volume=${encodeURIComponent(currentPath)}`)}
+                    onClick={() => navigate(createProjectHref())}
                     style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem' }}
                   >
                     Create Project ({totalFiles} files)

@@ -94,8 +94,13 @@ export default function CreateProject() {
   const [schema, setSchema] = useState('');
   const [volume, setVolume] = useState('');
   const [nestedSubpath, setNestedSubpath] = useState(initialSub);
-  const [includeSubfolders, setIncludeSubfolders] = useState(false);
-  const [scanMaxDepth, setScanMaxDepth] = useState(3);
+  const [includeSubfolders, setIncludeSubfolders] = useState(
+    searchParams.get('include_subfolders') === 'true',
+  );
+  const [scanMaxDepth, setScanMaxDepth] = useState(() => {
+    const raw = Number(searchParams.get('max_depth'));
+    return Number.isFinite(raw) ? Math.max(0, Math.min(8, raw)) : 3;
+  });
   const [volumeFolders, setVolumeFolders] = useState([]);
   const [volumeNavLoading, setVolumeNavLoading] = useState(false);
   const [browsing, setBrowsing] = useState(false);
@@ -110,14 +115,22 @@ export default function CreateProject() {
   useEffect(() => {
     if (volumeFromBrowser && !hasAutoScanned.current && isValidSourceVolumePath(volumeFromBrowser)) {
       hasAutoScanned.current = true;
-      browseDirectory(volumeFromBrowser)
+      const parsedDepth = Number(scanMaxDepth);
+      const depth = Number.isFinite(parsedDepth) ? Math.max(0, Math.min(8, parsedDepth)) : 3;
+      browseImageCount(volumeFromBrowser, {
+        include_subfolders: includeSubfolders,
+        max_depth: depth,
+      })
         .then((data) => {
-          const imageCount = data.total_files ?? (data.files || []).length;
-          setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
+          setBrowseResult({
+            imageCount: data.image_count ?? 0,
+            truncated: Boolean(data.truncated),
+            warning: data.error || '',
+          });
         })
         .catch(() => {});
     }
-  }, [volumeFromBrowser]);
+  }, [volumeFromBrowser, includeSubfolders, scanMaxDepth]);
 
   // Workspace default endpoint is available, but not applied unless the user opts in.
   useEffect(() => {
@@ -781,6 +794,56 @@ export default function CreateProject() {
             </div>
           )}
 
+          <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+              <input
+                type="checkbox"
+                checked={includeSubfolders}
+                onChange={(e) => setIncludeSubfolders(e.target.checked)}
+              />
+              Include subfolders
+            </label>
+            {includeSubfolders && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                Max depth
+                <input
+                  type="number"
+                  min={0}
+                  max={8}
+                  value={scanMaxDepth}
+                  onChange={(e) => setScanMaxDepth(e.target.value)}
+                  style={{ width: 56, padding: '0.2rem 0.35rem' }}
+                />
+              </label>
+            )}
+            <button
+              type="button"
+              onClick={handleBrowse}
+              disabled={browsing || !sourceVolume}
+              className="btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+            >
+              {browsing ? 'Scanning...' : 'Preview Volume'}
+            </button>
+            {browseResult && !browseResult.error && (
+              <span style={{ fontSize: '0.8rem', color: 'var(--status-success)' }}>
+                {browseResult.imageCount} images found
+                {includeSubfolders ? ' (including nested folders)' : ''}
+                {browseResult.truncated && ' (count capped)'}
+              </span>
+            )}
+            {browseResult?.warning && (
+              <span style={{ fontSize: '0.8rem', color: 'var(--status-error)' }}>
+                {browseResult.warning}
+              </span>
+            )}
+            {browseResult?.error && (
+              <span style={{ fontSize: '0.8rem', color: 'var(--status-error)' }}>
+                {browseResult.error}
+              </span>
+            )}
+          </div>
+
           {showVolumeFolderNav && (
             <div
               style={{
@@ -865,64 +928,6 @@ export default function CreateProject() {
                     </div>
                   )}
                 </>
-              )}
-            </div>
-          )}
-
-          {sourceVolume && (
-            <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
-                <input
-                  type="checkbox"
-                  checked={includeSubfolders}
-                  onChange={(e) => setIncludeSubfolders(e.target.checked)}
-                />
-                Include subfolders
-              </label>
-              {includeSubfolders && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
-                  Max depth
-                  <input
-                    type="number"
-                    min={0}
-                    max={8}
-                    value={scanMaxDepth}
-                    onChange={(e) => setScanMaxDepth(e.target.value)}
-                    style={{ width: 56, padding: '0.2rem 0.35rem' }}
-                  />
-                </label>
-              )}
-            </div>
-          )}
-
-          {/* Browse button */}
-          {sourceVolume && (
-            <div style={{ marginTop: '0.5rem' }}>
-              <button
-                type="button"
-                onClick={handleBrowse}
-                disabled={browsing}
-                className="btn-secondary"
-                style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
-              >
-                {browsing ? 'Scanning...' : 'Preview Volume'}
-              </button>
-              {browseResult && !browseResult.error && (
-                <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--status-success)' }}>
-                  {browseResult.imageCount} images found
-                  {includeSubfolders ? ' (including nested folders)' : ''}
-                  {browseResult.truncated && ' (count capped)'}
-                </span>
-              )}
-              {browseResult?.warning && (
-                <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--status-error)' }}>
-                  {browseResult.warning}
-                </span>
-              )}
-              {browseResult?.error && (
-                <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--status-error)' }}>
-                  {browseResult.error}
-                </span>
               )}
             </div>
           )}
