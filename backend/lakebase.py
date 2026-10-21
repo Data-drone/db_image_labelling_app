@@ -36,6 +36,7 @@ LAKEBASE_AUTO_PROVISION = (
 TOKEN_REFRESH_INTERVAL = 20 * 60  # 20 minutes (tokens typically expire in ~1 hour)
 DEFAULT_DATABASE_NAME = "databricks_postgres"
 DEFAULT_APP_SCHEMA = "public"
+DEFAULT_BRANCH_ID = "production"
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,12 @@ _engine: Optional[Engine] = None
 _session_factory = None
 _token_refresh_thread: Optional[threading.Thread] = None
 _current_connection_url: Optional[str] = None
+_current_endpoint = None
+_current_pg_username: Optional[str] = None
+_current_host: Optional[str] = None
+_current_port: Optional[str] = None
+_current_database: Optional[str] = None
+_connection_generation: int = 0
 _lock = threading.Lock()
 
 
@@ -83,14 +90,99 @@ def ensure_lakebase_project():
     return project
 
 
-def get_endpoint(project, endpoint_name: str = None):
-    """Return a configured endpoint or discover the project's read-write one."""
-    from databricks.sdk.service.postgres import EndpointType
+def _endpoint_is_read_write(endpoint) -> bool:
+    """True when the endpoint advertises a read-write type."""
+    endpoint_type = getattr(getattr(endpoint, "status", None), "endpoint_type", None)
+    if endpoint_type is None:
+        return False
+    name = getattr(endpoint_type, "name", None) or str(endpoint_type)
+    return str(name).endswith("READ_WRITE")
+
+
+def select_read_write_endpoint(endpoints):
+    """Return the stable read-write endpoint, sorted by name (never API order)."""
+    candidates = [ep for ep in endpoints if _endpoint_is_read_write(ep)]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda ep: ep.name or "")[0]
+
+
+def _attr_from(objects, *names):
+    for obj in objects:
+        if obj is None:
+            continue
+        for name in names:
+            value = getattr(obj, name, None)
+            if value:
+                return value
+    return None
+
+
+def project_default_branch_name(project) -> str:
+    """Project default branch resource name, else ``.../branches/production``."""
+    value = _attr_from(
+        (getattr(project, "status", None), getattr(project, "spec", None)),
+        "default_branch",
+        "default_branch_id",
+    )
+    if not value:
+        return f"{project.name}/branches/{DEFAULT_BRANCH_ID}"
+    value = str(value).strip()
+    if value.startswith("projects/"):
+        return value
+    return f"{project.name}/branches/{value}"
+
+
+def _branch_is_default(branch) -> bool:
+    return bool(getattr(getattr(branch, "status", None), "default", False))
+
+
+def discover_default_branch_name(project, branches=None) -> str:
+    """Prefer ``ProjectStatus.default_branch``, then a branch marked default."""
+    named = _attr_from(
+        (getattr(project, "status", None), getattr(project, "spec", None)),
+        "default_branch",
+        "default_branch_id",
+    )
+    if named:
+        return resolve_branch_name(project, str(named))
+    listed = list(branches or [])
+    marked = [branch for branch in listed if _branch_is_default(branch)]
+    if marked:
+        marked.sort(key=lambda branch: branch.name or "")
+        return marked[0].name
+    production = f"{project.name}/branches/{DEFAULT_BRANCH_ID}"
+    names = {branch.name for branch in listed}
+    if not listed or production in names:
+        return production
+    raise RuntimeError(
+        f"No default branch found for Lakebase project {project.name}."
+    )
+
+
+def resolve_branch_name(project, branch_name: str = None) -> str:
+    """Full branch resource name from an explicit id/path or the project default."""
+    requested = (branch_name or "").strip()
+    if not requested:
+        return project_default_branch_name(project)
+    if requested.startswith("projects/"):
+        expected_prefix = f"{project.name}/branches/"
+        if not requested.startswith(expected_prefix):
+            raise RuntimeError(
+                f"Configured Lakebase branch '{requested}' does not belong "
+                f"to project '{project.name}'."
+            )
+        return requested
+    return f"{project.name}/branches/{requested}"
+
+
+def get_endpoint(project, endpoint_name: str = None, branch_name: str = None):
+    """Return a configured endpoint or the branch's read-write one."""
     w = _get_workspace_client()
 
-    configured_name = (
-        endpoint_name or os.environ.get("LAKEBASE_ENDPOINT", "")
-    ).strip()
+    configured_name = (endpoint_name or "").strip()
+    if not configured_name and not (branch_name or "").strip():
+        configured_name = os.environ.get("LAKEBASE_ENDPOINT", "").strip()
     if configured_name:
         expected_prefix = f"{project.name}/branches/"
         if not configured_name.startswith(expected_prefix):
@@ -105,23 +197,22 @@ def get_endpoint(project, endpoint_name: str = None):
             "LAKEBASE_ENDPOINT is required when LAKEBASE_AUTO_PROVISION=false."
         )
 
-    branches = list(w.postgres.list_branches(parent=project.name))
-    if not branches:
-        raise RuntimeError(f"No branches found for Lakebase project {project.name}")
-
-    all_endpoints = []
-    for branch in branches:
-        all_endpoints.extend(w.postgres.list_endpoints(parent=branch.name))
-
-    if not all_endpoints:
-        raise RuntimeError(f"No endpoints found for Lakebase project {project.name}")
-
-    # Prefer read-write endpoint
-    for ep in all_endpoints:
-        if ep.status and ep.status.endpoint_type == EndpointType.ENDPOINT_TYPE_READ_WRITE:
-            return ep
-    # Fallback to first endpoint
-    return all_endpoints[0]
+    if (branch_name or "").strip():
+        branch = resolve_branch_name(project, branch_name)
+    else:
+        branches = list(w.postgres.list_branches(parent=project.name))
+        branch = discover_default_branch_name(project, branches)
+    endpoints = list(w.postgres.list_endpoints(parent=branch))
+    if not endpoints:
+        raise RuntimeError(
+            f"No endpoints found for Lakebase branch {branch}."
+        )
+    endpoint = select_read_write_endpoint(endpoints)
+    if endpoint is None:
+        raise RuntimeError(
+            f"No read-write endpoint found for Lakebase branch {branch}."
+        )
+    return endpoint
 
 
 def _get_pg_username(endpoint) -> str:
@@ -367,10 +458,120 @@ def app_postgres_username() -> str:
     return user
 
 
+def connection_generation() -> int:
+    """Monotonic id of the currently active Lakebase connection."""
+    return _connection_generation
+
+
+def _start_refresh_thread(endpoint, pg_username, generation, host, port, database_name):
+    global _token_refresh_thread
+    thread = threading.Thread(
+        target=_refresh_token_loop,
+        args=(endpoint, pg_username, generation, host, port, database_name),
+        daemon=True,
+        name=f"lakebase-token-refresh-{generation}",
+    )
+    _token_refresh_thread = thread
+    thread.start()
+
+
+def _activate_connection(
+    engine: Engine,
+    url: str,
+    endpoint,
+    pg_username: str,
+    host: Optional[str],
+    port: Optional[str],
+    database_name: str,
+    *,
+    start_refresh: bool = True,
+) -> int:
+    """Install engine, session factory, and refresh-thread target together."""
+    global _engine, _session_factory, _current_connection_url
+    global _current_endpoint, _current_pg_username, _current_host, _current_port
+    global _current_database, _connection_generation
+
+    refresh_args = None
+    with _lock:
+        old_engine = _engine
+        _connection_generation += 1
+        generation = _connection_generation
+        _engine = engine
+        _session_factory = sessionmaker(bind=_engine)
+        _current_connection_url = url
+        _current_endpoint = endpoint
+        _current_pg_username = pg_username
+        _current_host = host
+        _current_port = port
+        _current_database = database_name
+        if start_refresh:
+            refresh_args = (
+                endpoint, pg_username, generation, host, port, database_name,
+            )
+        if old_engine is not None and old_engine is not engine:
+            old_engine.dispose()
+    if refresh_args:
+        _start_refresh_thread(*refresh_args)
+    return generation
+
+
+def connect_endpoint(
+    endpoint,
+    pg_username: str = None,
+    database_name: str = None,
+    host: str = None,
+    port: str = None,
+    *,
+    start_refresh: bool = True,
+    before_activate=None,
+) -> Engine:
+    """Validate a Lakebase endpoint and make it the process-wide connection.
+
+    Engine, session factory, and token-refresh target are updated together.
+    A failed validation or ``before_activate`` callback leaves the previous
+    connection in place. Database, schema, and username follow the selected
+    connection (explicit args, then the active connection, then env defaults).
+    Host always comes from the selected endpoint unless the caller passes one
+    (App-resource mode passes injected ``PGHOST``).
+    """
+    user = (pg_username or _current_pg_username or "").strip() or _get_pg_username(endpoint)
+    database = postgres_database_name(
+        database_name if database_name is not None else _current_database
+    )
+    resolved_host = (host or "").strip() or endpoint.status.hosts.host
+    resolved_port = (port or os.environ.get("PGPORT") or "5432").strip() or "5432"
+    url = generate_connection_string(
+        endpoint,
+        user,
+        database_name=database,
+        host=resolved_host,
+        port=resolved_port,
+    )
+    new_engine = _build_engine(url)
+    try:
+        with new_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        if before_activate is not None:
+            before_activate(new_engine)
+    except Exception:
+        new_engine.dispose()
+        raise
+
+    _activate_connection(
+        new_engine,
+        url,
+        endpoint,
+        user,
+        resolved_host,
+        resolved_port,
+        database,
+        start_refresh=start_refresh,
+    )
+    return new_engine
+
+
 def init_lakebase_from_app_resource() -> Engine:
     """Connect from an App postgres resource using PGUSER + OAuth token."""
-    global _engine, _session_factory, _token_refresh_thread, _current_connection_url
-
     if not uses_app_resource_postgres():
         raise RuntimeError(
             "PGHOST/PGDATABASE/PGUSER/LAKEBASE_ENDPOINT must be set "
@@ -383,43 +584,77 @@ def init_lakebase_from_app_resource() -> Engine:
     host = os.environ["PGHOST"].strip()
     port = os.environ.get("PGPORT") or "5432"
     database = postgres_database_name()
-    url = generate_connection_string(
-        endpoint, pg_username, database_name=database, host=host, port=port,
-    )
 
     print(f"[LAKEBASE] App resource OAuth mode (host={host}, db={database})", flush=True)
-    with _lock:
-        _current_connection_url = url
-        _engine = _build_engine(url)
-        _session_factory = sessionmaker(bind=_engine)
-
-    prepare_lakebase_schema(_engine)
-    with _engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-
-    _token_refresh_thread = threading.Thread(
-        target=_refresh_token_loop,
-        args=(endpoint, pg_username),
-        daemon=True,
+    connect_endpoint(
+        endpoint,
+        pg_username=pg_username,
+        database_name=database,
+        host=host,
+        port=port,
+        before_activate=prepare_lakebase_schema,
     )
-    _token_refresh_thread.start()
     print("[LAKEBASE] App resource OAuth connection OK", flush=True)
     log.info("Lakebase initialized from App postgres resource with token refresh")
-    return _engine
+    return get_engine()
 
 
-def _refresh_token_loop(endpoint, pg_username):
+def _refresh_once(endpoint, pg_username, generation, host=None, port=None, database_name=None):
+    """Refresh the token for ``generation``. Return False if that generation is stale."""
+    global _engine, _current_connection_url, _session_factory
+
+    new_url = generate_connection_string(
+        endpoint,
+        pg_username,
+        database_name=database_name,
+        host=host,
+        port=port,
+    )
+    new_engine = _build_engine(new_url)
+    try:
+        with new_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        with _lock:
+            if generation != _connection_generation:
+                new_engine.dispose()
+                log.info(
+                    "Skipping Lakebase token refresh for generation %s; "
+                    "active generation is %s",
+                    generation,
+                    _connection_generation,
+                )
+                return False
+            old_engine = _engine
+            _engine = new_engine
+            _session_factory = sessionmaker(bind=_engine)
+            _current_connection_url = new_url
+            if old_engine is not None and old_engine is not new_engine:
+                old_engine.dispose()
+            return True
+    except Exception:
+        new_engine.dispose()
+        raise
+
+
+def _refresh_token_loop(endpoint, pg_username, generation, host=None, port=None, database_name=None):
     """Background thread that refreshes the database token periodically.
 
     Uses exponential backoff on failure (30s, 60s, 120s, max 5min) and
-    resets to normal interval after a successful refresh.
+    resets to normal interval after a successful refresh. Exits when a
+    newer connection generation is installed.
     """
-    global _engine, _current_connection_url, _session_factory
-
     consecutive_failures = 0
     MAX_BACKOFF = 5 * 60  # 5 minutes
 
     while True:
+        if generation != _connection_generation:
+            log.info(
+                "Lakebase token refresh thread for generation %s exiting; "
+                "connection generation is now %s",
+                generation,
+                _connection_generation,
+            )
+            return
         if consecutive_failures == 0:
             time.sleep(TOKEN_REFRESH_INTERVAL)
         else:
@@ -427,24 +662,26 @@ def _refresh_token_loop(endpoint, pg_username):
             log.warning("Lakebase token refresh retry in %ds (attempt %d)", backoff, consecutive_failures + 1)
             time.sleep(backoff)
 
+        if generation != _connection_generation:
+            log.info(
+                "Lakebase token refresh thread for generation %s exiting; "
+                "connection generation is now %s",
+                generation,
+                _connection_generation,
+            )
+            return
+
         try:
-            new_url = generate_connection_string(
+            swapped = _refresh_once(
                 endpoint,
                 pg_username,
-                host=os.environ.get("PGHOST") or None,
-                port=os.environ.get("PGPORT") or None,
+                generation,
+                host=host,
+                port=port,
+                database_name=database_name,
             )
-            new_engine = _build_engine(new_url)
-            # Verify the new connection actually works before swapping
-            with new_engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            with _lock:
-                old_engine = _engine
-                _engine = new_engine
-                _session_factory = sessionmaker(bind=_engine)
-                _current_connection_url = new_url
-                if old_engine:
-                    old_engine.dispose()
+            if not swapped:
+                return
             consecutive_failures = 0
             log.info("Lakebase token refreshed successfully")
         except Exception:
@@ -470,8 +707,6 @@ def init_lakebase() -> Engine:
 
     Returns the SQLAlchemy engine.
     """
-    global _engine, _session_factory, _token_refresh_thread, _current_connection_url
-
     print("[LAKEBASE] Finding project...", flush=True)
     project = ensure_lakebase_project()
     print(f"[LAKEBASE] Project: {project.name}", flush=True)
@@ -482,45 +717,36 @@ def init_lakebase() -> Engine:
     pg_username = _get_pg_username(endpoint)
     print(f"[LAKEBASE] PG username: {pg_username}", flush=True)
     print("[LAKEBASE] Generating connection string...", flush=True)
-    connection_url = generate_connection_string(endpoint, pg_username)
-    print(f"[LAKEBASE] Got connection string (host: {endpoint.status.hosts.host})", flush=True)
-
-    with _lock:
-        _current_connection_url = connection_url
-        _engine = _build_engine(connection_url)
-        _session_factory = sessionmaker(bind=_engine)
-
-    prepare_lakebase_schema(_engine)
-    # Verify the connection actually works before returning
-    print("[LAKEBASE] Testing connection...", flush=True)
-    with _engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    print("[LAKEBASE] Connection test passed", flush=True)
-
-    # Start background token refresh
-    _token_refresh_thread = threading.Thread(
-        target=_refresh_token_loop,
-        args=(endpoint, pg_username),
-        daemon=True,
+    connect_endpoint(
+        endpoint,
+        pg_username=pg_username,
+        before_activate=prepare_lakebase_schema,
     )
-    _token_refresh_thread.start()
+    print(
+        f"[LAKEBASE] Got connection string (host: {endpoint.status.hosts.host})",
+        flush=True,
+    )
+    print("[LAKEBASE] Connection test passed", flush=True)
     log.info("Lakebase initialized, token refresh thread started")
-
-    return _engine
+    return get_engine()
 
 
 def get_engine() -> Engine:
     """Return the current SQLAlchemy engine. Call init_lakebase() first."""
-    if _engine is None:
+    with _lock:
+        engine = _engine
+    if engine is None:
         raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
-    return _engine
+    return engine
 
 
 def get_session_factory():
     """Return the current sessionmaker. Call init_lakebase() first."""
-    if _session_factory is None:
+    with _lock:
+        factory = _session_factory
+    if factory is None:
         raise RuntimeError("Lakebase not initialized. Call init_lakebase() first.")
-    return _session_factory
+    return factory
 
 
 def get_session():
