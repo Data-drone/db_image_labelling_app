@@ -42,6 +42,16 @@ variables:
     default: cv-sam31-cv_manufacturing
   inference_adapter:
     default: sam31
+  serving_cold_start_max_retries:
+    default: "3"
+  serving_cold_start_initial_delay_s:
+    default: "5"
+  serving_cold_start_max_delay_s:
+    default: "60"
+  serving_cold_start_interactive_budget_s:
+    default: "45"
+  serving_cold_start_job_budget_s:
+    default: "900"
   embedding_endpoint_name:
     default: cv-dinov3-cv_manufacturing
   finetune_job_id:

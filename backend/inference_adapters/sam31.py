@@ -7,7 +7,7 @@ import binascii
 import io
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from .base import InferenceAdapter
 
@@ -31,6 +31,8 @@ class Sam31Adapter(InferenceAdapter):
         task_type: str,
         class_list: list[str],
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> list[dict]:
         from .. import inference as inf
 
@@ -52,6 +54,7 @@ class Sam31Adapter(InferenceAdapter):
             endpoint_name,
             record,
             use_data_plane=True,
+            retry_context=retry_context,
         )
 
         return self._parse_sam_response(raw, class_list, cfg, task_type)

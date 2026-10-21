@@ -136,6 +136,11 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `DEMO_VOLUME_PATH` | _(from `valueFrom: demo-volume`)_ | UC volume path injected from the **demo-volume** App resource (`app.yml`). |
 | `SERVING_ENDPOINT` | _(from `valueFrom: serving-endpoint`)_ | Serving endpoint name from the **serving-endpoint** resource. |
 | `EMBEDDING_ENDPOINT` | _(from `valueFrom: embedding-endpoint`)_ | Image embedding endpoint from the **embedding-endpoint** resource. There is no workspace-specific code fallback. |
+| `SERVING_COLD_START_MAX_RETRIES` | `3` | Follow-up attempts after a recognized serving timeout. Set to `0` to disable. |
+| `SERVING_COLD_START_INITIAL_DELAY_S` | `5` | Initial cold-start retry delay in seconds; subsequent delays use bounded exponential backoff with jitter. |
+| `SERVING_COLD_START_MAX_DELAY_S` | `60` | Maximum delay between serving retries. |
+| `SERVING_COLD_START_INTERACTIVE_BUDGET_S` | `45` | Maximum retry/sleep budget for app HTTP requests (clamped to 105 seconds). |
+| `SERVING_COLD_START_JOB_BUDGET_S` | `900` | Maximum retry/sleep budget for the async pre-annotate Job (clamped to 3600 seconds). |
 | `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
 | `FINETUNE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-finetune-job`)_ | Numeric job id used by the Datasets & training workflow. |
 | `EXPORT_VOLUME_PATH` | _(from `valueFrom: export-volume`)_ | Default UC Volume destination for dataset snapshots and copied exports. |
@@ -181,6 +186,26 @@ This repo includes a **bundle job** (`resources/preannotate_job.job.yml`) and AP
 2. With **`resources/cv_explorer_app.yml`**, the app receives **`PRE_ANNOTATE_DATABRICKS_JOB_ID`** via `valueFrom: app-preannotate-job` (no manual copy). Bundle job parameters inject the exact Lakebase project, endpoint, PostgreSQL database, and inference adapter before the worker imports the backend.
 
 The dashboard shows **Pre-label (job)** when the job id resolves. The job runs `scripts/preannotate_job.py` with the `preannotate_runs` row id; it reuses the same Lakebase/SQLite and model-serving code paths as the app.
+
+### Scale-to-zero serving endpoints
+
+Serving requests retry only recognized transport/deadline timeouts and HTTP
+503/504 responses. Authentication, permission, request validation, not-found,
+and model execution errors fail immediately. The same policy is applied to
+workspace and route-optimized serving calls. Retry logs include only the
+endpoint name, attempt, delay, and exception class; image payloads and
+credentials are never logged. Serving uses a dedicated Databricks SDK client
+with a 10-second SDK-internal retry window and 30-second HTTP timeout for
+interactive calls, preventing the SDK's five-minute default retry window from
+delaying the app-level policy. Async Job calls use 120-second SDK bounds.
+
+Databricks Apps requests pass through a reverse proxy with a 120-second request
+limit, so the interactive retry budget is intentionally short. Use the
+existing **Pre-label (job)** start-and-poll workflow for batches or endpoints
+that may take longer to wake. The app and embedding endpoint resources require
+only `CAN_QUERY`; their endpoint names come from `valueFrom` bindings, while
+`WorkspaceClient()` uses the App service principal credentials injected by the
+platform.
 
 ## Importing annotations
 
