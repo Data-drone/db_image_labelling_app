@@ -76,6 +76,10 @@ def _inject_bundle_config():
         "LAKEBASE_DATABASE_NAME": sys.argv[6] if len(sys.argv) > 6 else "",
         "LAKEBASE_SCHEMA": sys.argv[7] if len(sys.argv) > 7 else "",
         "SERVING_ENDPOINT_ADAPTER": sys.argv[8] if len(sys.argv) > 8 else "",
+        "SERVING_COLD_START_MAX_RETRIES": sys.argv[9] if len(sys.argv) > 9 else "",
+        "SERVING_COLD_START_INITIAL_DELAY_S": sys.argv[10] if len(sys.argv) > 10 else "",
+        "SERVING_COLD_START_MAX_DELAY_S": sys.argv[11] if len(sys.argv) > 11 else "",
+        "SERVING_COLD_START_JOB_BUDGET_S": sys.argv[12] if len(sys.argv) > 12 else "",
     }
     for name, value in values.items():
         if value:

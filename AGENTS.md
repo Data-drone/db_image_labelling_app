@@ -126,6 +126,14 @@ a root `package.json` would make Apps run `npm install` at startup.
 - **Annotation model**: classification uses one row per sample; detection uses
   normalized `bbox_json`; segmentation uses COCO RLE `mask_json`. The
   `annotate-batch` endpoint replaces a sample's annotations.
+- **Serving cold starts**: bounded retries are centralized in
+ `inference.query_serving_endpoint` for both workspace and route-optimized
+ calls. Callers pass `retry_context="job"` only for the asynchronous
+ pre-annotation worker; do not add independent retry loops in routes or
+ adapters. Dedicated serving clients shorten the Databricks SDK's internal
+ retry window so the outer budget can take effect. App endpoint resources
+ remain least-privilege `CAN_QUERY`, with endpoint names injected through
+ `valueFrom`.
 - **Consensus model**: classification uses exact label-set voting. Detection
   and segmentation cluster same-class shapes by snapshotted IoU/quorum and
   materialize the submitted medoid geometry. Private `task_annotations`

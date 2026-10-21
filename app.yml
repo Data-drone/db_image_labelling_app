@@ -26,6 +26,17 @@ env:
     valueFrom: serving-endpoint
   - name: SERVING_ENDPOINT_ADAPTER
     value: 'sam31'
+  # Bounded scale-to-zero recovery. These are non-secret runtime settings.
+  - name: SERVING_COLD_START_MAX_RETRIES
+    value: '3'
+  - name: SERVING_COLD_START_INITIAL_DELAY_S
+    value: '5'
+  - name: SERVING_COLD_START_MAX_DELAY_S
+    value: '60'
+  - name: SERVING_COLD_START_INTERACTIVE_BUDGET_S
+    value: '45'
+  - name: SERVING_COLD_START_JOB_BUDGET_S
+    value: '900'
   - name: EMBEDDING_ENDPOINT
     valueFrom: embedding-endpoint
   - name: PRE_ANNOTATE_DATABRICKS_JOB_ID

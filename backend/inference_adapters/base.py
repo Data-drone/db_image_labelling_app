@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Literal, Optional
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ class InferenceAdapter(ABC):
         task_type: str,
         class_list: list[str],
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> list[dict]:
         """Query the serving endpoint and return AnnotationCreate-compatible dicts."""
         ...
@@ -42,6 +44,8 @@ class InferenceAdapter(ABC):
         endpoint_name: str,
         image_bytes: bytes,
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> Optional[list[float]]:
         """Query the serving endpoint for an embedding vector. Returns None if unsupported."""
         return None

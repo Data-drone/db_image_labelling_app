@@ -27,6 +27,14 @@ resources:
           default: ${var.lakebase_schema_name}
         - name: inference_adapter
           default: ${var.inference_adapter}
+        - name: serving_cold_start_max_retries
+          default: ${var.serving_cold_start_max_retries}
+        - name: serving_cold_start_initial_delay_s
+          default: ${var.serving_cold_start_initial_delay_s}
+        - name: serving_cold_start_max_delay_s
+          default: ${var.serving_cold_start_max_delay_s}
+        - name: serving_cold_start_job_budget_s
+          default: ${var.serving_cold_start_job_budget_s}
       tasks:
         - task_key: main
           environment_key: preann_env
@@ -41,6 +49,10 @@ resources:
               - "{{job.parameters.lakebase_database_name}}"
               - "{{job.parameters.lakebase_schema_name}}"
               - "{{job.parameters.inference_adapter}}"
+              - "{{job.parameters.serving_cold_start_max_retries}}"
+              - "{{job.parameters.serving_cold_start_initial_delay_s}}"
+              - "{{job.parameters.serving_cold_start_max_delay_s}}"
+              - "{{job.parameters.serving_cold_start_job_budget_s}}"
       environments:
         - environment_key: preann_env
           spec:

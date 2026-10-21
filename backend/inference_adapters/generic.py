@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from .base import InferenceAdapter
 
@@ -20,12 +20,19 @@ class GenericAdapter(InferenceAdapter):
         task_type: str,
         class_list: list[str],
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> list[dict]:
         # Import here so ``backend.inference`` can load before this package is initialized.
         from .. import inference as inf
 
         use_dp = inf.resolve_use_data_plane(endpoint_config)
-        raw = inf.query_endpoint(endpoint_name, image_bytes, use_data_plane=use_dp)
+        raw = inf.query_endpoint(
+            endpoint_name,
+            image_bytes,
+            use_data_plane=use_dp,
+            retry_context=retry_context,
+        )
 
         if task_type == "classification":
             return inf.parse_classification_response(raw, class_list, endpoint_config)

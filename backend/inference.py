@@ -8,10 +8,17 @@ and detection (bounding box) models.
 
 import base64
 import logging
+import math
 import os
-from typing import Optional
+import random
+import time
+from dataclasses import dataclass
+from typing import Callable, Literal, Optional, TypeVar
 
 log = logging.getLogger(__name__)
+
+RetryContext = Literal["interactive", "job"]
+_T = TypeVar("_T")
 
 DEFAULT_ENDPOINT_CONFIG = {
     "label_key": "label",
@@ -20,10 +27,234 @@ DEFAULT_ENDPOINT_CONFIG = {
     "min_confidence": 0.5,
 }
 
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_INITIAL_DELAY_S = 5.0
+_DEFAULT_MAX_DELAY_S = 60.0
+_DEFAULT_INTERACTIVE_BUDGET_S = 45.0
+_DEFAULT_JOB_BUDGET_S = 900.0
+# The final attempt may start at the budget edge and still run for the
+# interactive HTTP timeout plus SDK retry window (30s + 10s). Keep the total
+# under the 120-second Databricks Apps proxy limit.
+_MAX_INTERACTIVE_BUDGET_S = 75.0
+_MAX_JOB_BUDGET_S = 3600.0
 
-def _get_workspace_client():
-    from .volumes import _get_workspace_client as _gwc
-    return _gwc()
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_retries: int
+    initial_delay_s: float
+    max_delay_s: float
+    budget_s: float
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("Clamping %s to %s", name, minimum)
+        return minimum
+    if value > maximum:
+        log.warning("Clamping %s to %s", name, maximum)
+        return maximum
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+    if not math.isfinite(value):
+        log.warning("Ignoring non-finite %s=%r; using %s", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("Clamping %s to %s", name, minimum)
+        return minimum
+    if value > maximum:
+        log.warning("Clamping %s to %s", name, maximum)
+        return maximum
+    return value
+
+
+def _retry_policy_from_env(context: RetryContext = "interactive") -> RetryPolicy:
+    """Build a bounded retry policy from non-secret runtime configuration."""
+    if context not in ("interactive", "job"):
+        raise ValueError(f"Unknown serving retry context: {context!r}")
+
+    budget_name = (
+        "SERVING_COLD_START_JOB_BUDGET_S"
+        if context == "job"
+        else "SERVING_COLD_START_INTERACTIVE_BUDGET_S"
+    )
+    budget_default = (
+        _DEFAULT_JOB_BUDGET_S
+        if context == "job"
+        else _DEFAULT_INTERACTIVE_BUDGET_S
+    )
+    budget_max = (
+        _MAX_JOB_BUDGET_S if context == "job" else _MAX_INTERACTIVE_BUDGET_S
+    )
+
+    initial_delay = _env_float(
+        "SERVING_COLD_START_INITIAL_DELAY_S",
+        _DEFAULT_INITIAL_DELAY_S,
+        minimum=0.0,
+        maximum=300.0,
+    )
+    max_delay = _env_float(
+        "SERVING_COLD_START_MAX_DELAY_S",
+        _DEFAULT_MAX_DELAY_S,
+        minimum=0.0,
+        maximum=300.0,
+    )
+    if max_delay < initial_delay:
+        log.warning(
+            "SERVING_COLD_START_MAX_DELAY_S is below the initial delay; "
+            "using the initial delay"
+        )
+        max_delay = initial_delay
+
+    return RetryPolicy(
+        max_retries=_env_int(
+            "SERVING_COLD_START_MAX_RETRIES",
+            _DEFAULT_MAX_RETRIES,
+            minimum=0,
+            maximum=10,
+        ),
+        initial_delay_s=initial_delay,
+        max_delay_s=max_delay,
+        budget_s=_env_float(
+            budget_name,
+            budget_default,
+            minimum=0.0,
+            maximum=budget_max,
+        ),
+    )
+
+
+def _exception_chain(exc: BaseException):
+    """Yield an exception and its explicit/implicit causes without looping."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _is_cold_start_timeout(exc: BaseException) -> bool:
+    """Return whether *exc* is a narrowly recognized transient timeout."""
+    for current in _exception_chain(exc):
+        if isinstance(current, TimeoutError):
+            return True
+
+        cls = type(current)
+        cls_name = cls.__name__
+        module_name = cls.__module__
+        if module_name.startswith("requests.") and cls_name in {
+            "Timeout",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "ConnectionError",
+        }:
+            return True
+        if cls_name in {"DeadlineExceeded", "TemporarilyUnavailable"}:
+            return True
+
+        status_code = getattr(current, "status_code", None)
+        if status_code is None:
+            response = getattr(current, "response", None)
+            status_code = getattr(response, "status_code", None)
+        try:
+            if int(status_code) in (503, 504):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _query_with_cold_start_retry(
+    endpoint_name: str,
+    call: Callable[[], _T],
+    *,
+    policy: RetryPolicy,
+) -> _T:
+    """Run one serving query with bounded retries for cold-start timeouts."""
+    started = time.monotonic()
+    retries_used = 0
+
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            if not _is_cold_start_timeout(exc) or retries_used >= policy.max_retries:
+                raise
+
+            base_delay = min(
+                policy.initial_delay_s * (2 ** retries_used),
+                policy.max_delay_s,
+            )
+            delay = min(
+                policy.max_delay_s,
+                base_delay + random.uniform(0.0, base_delay * 0.2),
+            )
+            elapsed = time.monotonic() - started
+            if elapsed + delay > policy.budget_s:
+                raise
+
+            retries_used += 1
+            log.warning(
+                "Serving endpoint %s cold-start retry %d/%d in %.2fs (%s)",
+                endpoint_name,
+                retries_used,
+                policy.max_retries,
+                delay,
+                type(exc).__name__,
+            )
+            time.sleep(delay)
+
+
+_serving_workspace_clients: dict[RetryContext, object] = {}
+
+
+def _serving_sdk_timeouts(context: RetryContext) -> tuple[int, int]:
+    """Return HTTP and SDK-internal retry timeouts for serving calls."""
+    if context == "job":
+        return 120, 120
+    return 30, 10
+
+
+def _get_workspace_client(retry_context: RetryContext = "interactive"):
+    """Get a serving-only client whose SDK retries fit the outer retry budget.
+
+    The SDK defaults to a five-minute internal retry window. A scale-to-zero
+    endpoint can consume that entire window before our cold-start helper sees
+    the timeout, so serving uses dedicated clients with shorter bounds.
+    """
+    client = _serving_workspace_clients.get(retry_context)
+    if client is not None:
+        return client
+
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.core import Config
+
+    http_timeout_s, sdk_retry_timeout_s = _serving_sdk_timeouts(retry_context)
+    client = WorkspaceClient(config=Config(
+        http_timeout_seconds=http_timeout_s,
+        retry_timeout_seconds=sdk_retry_timeout_s,
+    ))
+    _serving_workspace_clients[retry_context] = client
+    return client
 
 
 def get_default_endpoint() -> Optional[str]:
@@ -81,35 +312,43 @@ def resolve_use_data_plane(endpoint_config: Optional[dict]) -> bool:
     return True
 
 
-_sp_workspace_client = None
+_sp_workspace_clients: dict[RetryContext, object] = {}
 
 
-def _get_sp_workspace_client():
+def _get_sp_workspace_client(retry_context: RetryContext = "interactive"):
     """Create a WorkspaceClient using injected SP OAuth credentials (M2M).
 
     Used when the default client (unified auth on serverless) can't access
     route-optimized serving endpoints that require OAuth data-plane tokens.
     """
-    global _sp_workspace_client
-    if _sp_workspace_client is not None:
-        return _sp_workspace_client
+    client = _sp_workspace_clients.get(retry_context)
+    if client is not None:
+        return client
 
     from databricks.sdk import WorkspaceClient
+    from databricks.sdk.core import Config
 
     sp_id = os.environ.get("SP_SERVING_CLIENT_ID", "")
     sp_secret = os.environ.get("SP_SERVING_CLIENT_SECRET", "")
     if not sp_id or not sp_secret:
         return None
 
-    host = os.environ.get("DATABRICKS_HOST") or _get_workspace_client().config.host
-    _sp_workspace_client = WorkspaceClient(
+    host = (
+        os.environ.get("DATABRICKS_HOST")
+        or _get_workspace_client(retry_context).config.host
+    )
+    http_timeout_s, sdk_retry_timeout_s = _serving_sdk_timeouts(retry_context)
+    client = WorkspaceClient(config=Config(
         host=host,
         client_id=sp_id,
         client_secret=sp_secret,
-    )
+        http_timeout_seconds=http_timeout_s,
+        retry_timeout_seconds=sdk_retry_timeout_s,
+    ))
     log.info("Created SP OAuth WorkspaceClient for data-plane serving (auth_type=%s)",
-             _sp_workspace_client.config.auth_type)
-    return _sp_workspace_client
+             client.config.auth_type)
+    _sp_workspace_clients[retry_context] = client
+    return client
 
 
 def query_serving_endpoint(
@@ -117,30 +356,46 @@ def query_serving_endpoint(
     dataframe_records: list,
     *,
     use_data_plane: bool,
+    retry_context: RetryContext = "interactive",
 ) -> dict:
     """Query a serving endpoint with automatic fallback for route-optimized endpoints.
 
     Tries: SDK data-plane OAuth → SP OAuth data-plane → SDK control plane.
     """
-    w = _get_workspace_client()
+    policy = _retry_policy_from_env(retry_context)
+    w = _get_workspace_client(retry_context)
 
     if use_data_plane:
         dp = getattr(w, "serving_endpoints_data_plane", None)
         if dp is not None:
             try:
-                resp = dp.query(name=endpoint_name, dataframe_records=dataframe_records)
+                resp = _query_with_cold_start_retry(
+                    endpoint_name,
+                    lambda: dp.query(
+                        name=endpoint_name,
+                        dataframe_records=dataframe_records,
+                    ),
+                    policy=policy,
+                )
                 return resp.as_dict() if hasattr(resp, "as_dict") else resp
             except Exception as e:
                 if "OAuth tokens are not available" not in str(e):
                     raise
                 log.info("Data-plane OAuth unavailable on default client")
 
-        sp_w = _get_sp_workspace_client()
+        sp_w = _get_sp_workspace_client(retry_context)
         if sp_w is not None:
             sp_dp = getattr(sp_w, "serving_endpoints_data_plane", None)
             if sp_dp is not None:
                 log.info("Trying SP OAuth data-plane for %s", endpoint_name)
-                resp = sp_dp.query(name=endpoint_name, dataframe_records=dataframe_records)
+                resp = _query_with_cold_start_retry(
+                    endpoint_name,
+                    lambda: sp_dp.query(
+                        name=endpoint_name,
+                        dataframe_records=dataframe_records,
+                    ),
+                    policy=policy,
+                )
                 return resp.as_dict() if hasattr(resp, "as_dict") else resp
 
         raise RuntimeError(
@@ -149,9 +404,13 @@ def query_serving_endpoint(
             f"are set, or that the runtime supports data-plane tokens."
         )
 
-    resp = w.serving_endpoints.query(
-        name=endpoint_name,
-        dataframe_records=dataframe_records,
+    resp = _query_with_cold_start_retry(
+        endpoint_name,
+        lambda: w.serving_endpoints.query(
+            name=endpoint_name,
+            dataframe_records=dataframe_records,
+        ),
+        policy=policy,
     )
     return resp.as_dict() if hasattr(resp, "as_dict") else resp
 
@@ -186,6 +445,7 @@ def query_endpoint(
     use_data_plane: bool = False,
     image_field: str = "image",
     extra_record_fields: Optional[dict] = None,
+    retry_context: RetryContext = "interactive",
 ) -> dict:
     """Send an image to a serving endpoint and return the raw prediction.
 
@@ -201,6 +461,7 @@ def query_endpoint(
         endpoint_name,
         [record],
         use_data_plane=use_data_plane,
+        retry_context=retry_context,
     )
 
 
@@ -320,6 +581,8 @@ def predict_sample(
     task_type: str,
     class_list: list[str],
     endpoint_config: Optional[dict] = None,
+    *,
+    retry_context: RetryContext = "interactive",
 ) -> list[dict]:
     """End-to-end: query endpoint and parse response for a single image.
 
@@ -337,4 +600,5 @@ def predict_sample(
         task_type,
         class_list,
         endpoint_config,
+        retry_context=retry_context,
     )

@@ -158,6 +158,7 @@ def main(run_id: int) -> None:
                 chunk,
                 min_confidence=min_confidence,
                 text_prompt=text_prompt,
+                retry_context="job",
             )
             db.commit()
             completed += stats["completed"]

@@ -37,6 +37,16 @@ resources:
             value: ${var.inference_adapter}
           - name: USE_SERVING_DATA_PLANE
             value: "true"
+          - name: SERVING_COLD_START_MAX_RETRIES
+            value: ${var.serving_cold_start_max_retries}
+          - name: SERVING_COLD_START_INITIAL_DELAY_S
+            value: ${var.serving_cold_start_initial_delay_s}
+          - name: SERVING_COLD_START_MAX_DELAY_S
+            value: ${var.serving_cold_start_max_delay_s}
+          - name: SERVING_COLD_START_INTERACTIVE_BUDGET_S
+            value: ${var.serving_cold_start_interactive_budget_s}
+          - name: SERVING_COLD_START_JOB_BUDGET_S
+            value: ${var.serving_cold_start_job_budget_s}
           - name: PRE_ANNOTATE_DATABRICKS_JOB_ID
             value_from: app-preannotate-job
           - name: EXPORT_VOLUME_PATH

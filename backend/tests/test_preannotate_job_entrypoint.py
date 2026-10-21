@@ -20,6 +20,10 @@ class TestPreannotateBundleConfig(unittest.TestCase):
             "databricks_postgres",
             "cv_explorer_app",
             "sam31",
+            "3",
+            "5",
+            "60",
+            "900",
         ]
         keys = (
             "LAKEBASE_PROJECT_ID",
@@ -27,6 +31,10 @@ class TestPreannotateBundleConfig(unittest.TestCase):
             "LAKEBASE_DATABASE_NAME",
             "LAKEBASE_SCHEMA",
             "SERVING_ENDPOINT_ADAPTER",
+            "SERVING_COLD_START_MAX_RETRIES",
+            "SERVING_COLD_START_INITIAL_DELAY_S",
+            "SERVING_COLD_START_MAX_DELAY_S",
+            "SERVING_COLD_START_JOB_BUDGET_S",
             "LAKEBASE_AUTO_PROVISION",
         )
         with patch.object(sys, "argv", argv), patch.dict(
@@ -43,6 +51,14 @@ class TestPreannotateBundleConfig(unittest.TestCase):
             )
             self.assertEqual(os.environ["LAKEBASE_SCHEMA"], "cv_explorer_app")
             self.assertEqual(os.environ["SERVING_ENDPOINT_ADAPTER"], "sam31")
+            self.assertEqual(os.environ["SERVING_COLD_START_MAX_RETRIES"], "3")
+            self.assertEqual(
+                os.environ["SERVING_COLD_START_INITIAL_DELAY_S"], "5"
+            )
+            self.assertEqual(os.environ["SERVING_COLD_START_MAX_DELAY_S"], "60")
+            self.assertEqual(
+                os.environ["SERVING_COLD_START_JOB_BUDGET_S"], "900"
+            )
             self.assertEqual(os.environ["LAKEBASE_AUTO_PROVISION"], "false")
             self.assertEqual(set(keys), set(os.environ))
 

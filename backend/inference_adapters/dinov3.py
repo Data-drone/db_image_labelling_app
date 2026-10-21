@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from .base import InferenceAdapter
 
@@ -54,6 +54,8 @@ class DinOv3Adapter(InferenceAdapter):
         task_type: str,
         class_list: list[str],
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> list[dict]:
         return []
 
@@ -62,8 +64,15 @@ class DinOv3Adapter(InferenceAdapter):
         endpoint_name: str,
         image_bytes: bytes,
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> Optional[list[float]]:
-        results = self.batch_query_embedding(endpoint_name, [image_bytes], endpoint_config)
+        results = self.batch_query_embedding(
+            endpoint_name,
+            [image_bytes],
+            endpoint_config,
+            retry_context=retry_context,
+        )
         return results[0]
 
     def batch_query_embedding(
@@ -71,6 +80,8 @@ class DinOv3Adapter(InferenceAdapter):
         endpoint_name: str,
         image_bytes_list: list[bytes],
         endpoint_config: Optional[dict],
+        *,
+        retry_context: Literal["interactive", "job"] = "interactive",
     ) -> list[Optional[list[float]]]:
         """Query embeddings for a batch of images (up to BATCH_SIZE).
 
@@ -89,6 +100,7 @@ class DinOv3Adapter(InferenceAdapter):
                 endpoint_name,
                 records,
                 use_data_plane=True,
+                retry_context=retry_context,
             )
         except Exception as exc:
             log.warning("DINOv3 batch query failed: %s", exc)

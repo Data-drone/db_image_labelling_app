@@ -7,7 +7,7 @@ Clears prior model drafts per sample before re-inferring (idempotent re-run).
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from sqlalchemy.orm import Session
 
@@ -63,13 +63,17 @@ def _generate_embedding(
     embedding_endpoint,
     endpoint_config: dict,
     db: Session,
+    retry_context: Literal["interactive", "job"],
 ) -> None:
     """Generate and store an embedding for a sample, if possible."""
     if sample.embedding is not None or not embedding_endpoint or not embedding_adapter:
         return
     try:
         emb = embedding_adapter.query_embedding(
-            embedding_endpoint, image_bytes, endpoint_config,
+            embedding_endpoint,
+            image_bytes,
+            endpoint_config,
+            retry_context=retry_context,
         )
         if emb is not None:
             from .embeddings import set_sample_embedding
@@ -85,6 +89,7 @@ def run_preannotate_for_samples(
     *,
     min_confidence: Optional[float] = None,
     text_prompt: Optional[str] = None,
+    retry_context: Literal["interactive", "job"] = "interactive",
 ) -> dict[str, int]:
     """Run model inference and insert draft annotations. Caller must commit.
 
@@ -136,12 +141,19 @@ def run_preannotate_for_samples(
                 task_type=project.task_type,
                 class_list=list(project.class_list),
                 endpoint_config=endpoint_config,
+                retry_context=retry_context,
             )
         except Exception as e:
             log.warning("Pre-annotate failed for sample %d: %s", sample.id, e)
             failed += 1
             _generate_embedding(
-                sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+                sample,
+                image_bytes,
+                embedding_adapter,
+                embedding_endpoint,
+                endpoint_config,
+                db,
+                retry_context,
             )
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
@@ -149,7 +161,13 @@ def run_preannotate_for_samples(
         if not predictions:
             skipped += 1
             _generate_embedding(
-                sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+                sample,
+                image_bytes,
+                embedding_adapter,
+                embedding_endpoint,
+                endpoint_config,
+                db,
+                retry_context,
             )
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
@@ -177,7 +195,13 @@ def run_preannotate_for_samples(
         sample.status = "pre_labeled"
 
         _generate_embedding(
-            sample, image_bytes, embedding_adapter, embedding_endpoint, endpoint_config, db,
+            sample,
+            image_bytes,
+            embedding_adapter,
+            embedding_endpoint,
+            endpoint_config,
+            db,
+            retry_context,
         )
 
         completed += 1
