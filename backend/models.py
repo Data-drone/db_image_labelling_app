@@ -105,8 +105,8 @@ class ProjectSample(Base):
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
 
-    # Optional umap_x/umap_y columns may still be written via raw SQL for
-    # back-compat, but Cluster Map persists coordinates in cluster_map_points.
+    # Legacy umap_x/umap_y columns may exist in the DB but are unused; Cluster
+    # Map persists coordinates in cluster_map_points.
 
     project = relationship("LabelingProject", back_populates="samples")
     annotations = relationship(

@@ -1,6 +1,7 @@
 """In-app Cluster Map projection: cache, background UMAP, and GET helpers.
 
 UMAP never runs on the HTTP request. GET either returns cached points or 202.
+The projection itself runs in a spawned subprocess so a timeout can kill it.
 """
 
 from __future__ import annotations
@@ -8,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -21,11 +22,18 @@ from .schemas import ClusterMapPoint, ClusterMapResult
 
 log = logging.getLogger(__name__)
 
-WORKER_TIMEOUT_SEC = 90
+WORKER_TIMEOUT_SEC = float(os.environ.get("CLUSTER_MAP_TIMEOUT_SEC", "600"))
+# Covers embedding load, subprocess start, and persisting points around the projection.
+STALE_GRACE_SEC = 120
 MIN_SAMPLES = 3
 
 _locks_guard = threading.Lock()
 _project_locks: dict[int, threading.Lock] = {}
+_active_runs: set[int] = set()
+
+
+class ProjectionTimeout(Exception):
+    pass
 
 
 def _project_lock(project_id: int) -> threading.Lock:
@@ -50,15 +58,6 @@ def embedded_sample_ids(db: Session, project_id: int) -> list[int]:
         .all()
     )
     return [r.id for r in rows]
-
-
-def _umap_columns_exist(db: Session) -> bool:
-    try:
-        db.execute(text("SELECT umap_x FROM project_samples LIMIT 0"))
-        return True
-    except Exception:
-        db.rollback()
-        return False
 
 
 def compute_umap_projection(embeddings: list[list[float]]) -> list[tuple[float, float]]:
@@ -104,13 +103,6 @@ def load_cached_points(db: Session, project_id: int) -> dict[int, tuple[float, f
     return {r.sample_id: (r.x, r.y) for r in rows}
 
 
-def cache_matches(cache: dict[int, tuple[float, float]], sample_ids: list[int]) -> bool:
-    if not sample_ids:
-        return False
-    wanted = set(sample_ids)
-    return wanted == set(cache.keys())
-
-
 def _labels_for_samples(db: Session, project_id: int, sample_ids: list[int]) -> dict[int, list[str]]:
     if not sample_ids:
         return {}
@@ -135,6 +127,7 @@ def build_result(
     sample_ids: list[int],
     coords: dict[int, tuple[float, float]],
     cached: bool,
+    recompute_error: str | None = None,
 ) -> ClusterMapResult:
     samples = (
         db.query(ProjectSample.id, ProjectSample.filename, ProjectSample.status)
@@ -159,13 +152,24 @@ def build_result(
                 labels=labels_map.get(sid, []),
             )
         )
-    return ClusterMapResult(points=points, total=len(points), cached=cached)
+    return ClusterMapResult(
+        points=points, total=len(points), cached=cached, recompute_error=recompute_error,
+    )
 
 
 def latest_run(db: Session, project_id: int) -> ClusterMapRun | None:
     return (
         db.query(ClusterMapRun)
         .filter_by(project_id=project_id)
+        .order_by(ClusterMapRun.id.desc())
+        .first()
+    )
+
+
+def latest_ready_run(db: Session, project_id: int) -> ClusterMapRun | None:
+    return (
+        db.query(ClusterMapRun)
+        .filter_by(project_id=project_id, status="ready")
         .order_by(ClusterMapRun.id.desc())
         .first()
     )
@@ -182,11 +186,14 @@ def _aware(dt: datetime | None) -> datetime | None:
 def run_is_stale(run: ClusterMapRun, now: datetime | None = None) -> bool:
     if run.status != "running":
         return False
+    with _locks_guard:
+        if run.id in _active_runs:
+            return False
     now = now or datetime.now(timezone.utc)
     created = _aware(run.created_at)
     if created is None:
         return True
-    return (now - created).total_seconds() > WORKER_TIMEOUT_SEC + 10
+    return (now - created).total_seconds() > WORKER_TIMEOUT_SEC + STALE_GRACE_SEC
 
 
 def mark_run_failed(db: Session, run: ClusterMapRun, message: str) -> None:
@@ -226,12 +233,14 @@ def load_embeddings(db: Session, project_id: int) -> tuple[list[int], list[list[
     except Exception:
         use_pgvec = False
 
+    # Same row filter as embedded_sample_ids; embedding_vec can lag the JSON
+    # column until the startup backfill runs.
     if use_pgvec:
         try:
             emb_rows = db.execute(text(
-                "SELECT id, embedding_vec::text AS emb_text "
+                "SELECT id, COALESCE(embedding_vec::text, embedding::text) AS emb_text "
                 "FROM project_samples "
-                "WHERE project_id = :pid AND embedding_vec IS NOT NULL "
+                "WHERE project_id = :pid AND embedding IS NOT NULL "
                 "ORDER BY id"
             ), {"pid": project_id}).fetchall()
         except Exception:
@@ -274,6 +283,7 @@ def persist_points(
     sample_ids: list[int],
     coords: list[tuple[float, float]],
 ) -> None:
+    """Replace the project's cached points. Caller commits."""
     db.query(ClusterMapPointCache).filter_by(project_id=project_id).delete(
         synchronize_session=False
     )
@@ -285,31 +295,56 @@ def persist_points(
             for sid, (x, y) in zip(sample_ids, coords)
         ]
     )
-    db.commit()
 
-    if not _umap_columns_exist(db):
-        return
-    dialect = getattr(getattr(db.bind, "dialect", None), "name", "") or ""
-    if dialect != "postgresql":
-        return
+
+def _projection_child(fn, embeddings, conn) -> None:
     try:
-        batch_size = 500
-        for i in range(0, len(sample_ids), batch_size):
-            batch_ids = sample_ids[i:i + batch_size]
-            batch_coords = coords[i:i + batch_size]
-            values = ", ".join(
-                f"({sid}, {x}, {y})"
-                for sid, (x, y) in zip(batch_ids, batch_coords)
-            )
-            db.execute(text(
-                f"UPDATE project_samples AS ps SET umap_x = v.x, umap_y = v.y "
-                f"FROM (VALUES {values}) AS v(id, x, y) "
-                f"WHERE ps.id = v.id"
-            ))
-        db.commit()
-    except Exception:
-        db.rollback()
-        log.warning("Could not cache UMAP coordinates on project_samples")
+        conn.send(("ok", fn(embeddings)))
+    except BaseException as exc:
+        conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def project_embeddings(
+    embeddings: list[list[float]], timeout: float,
+) -> list[tuple[float, float]]:
+    """Run compute_umap_projection in a killable subprocess."""
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_projection_child,
+        args=(compute_umap_projection, embeddings, sender),
+        daemon=True,
+        name="cluster-map-umap",
+    )
+    proc.start()
+    sender.close()
+    try:
+        if not receiver.poll(timeout):
+            raise ProjectionTimeout()
+        try:
+            status, payload = receiver.recv()
+        except EOFError:
+            proc.join(5)
+            raise RuntimeError(
+                f"Embedding projection process exited unexpectedly (exit code {proc.exitcode})."
+            ) from None
+        if status != "ok":
+            raise RuntimeError(payload)
+        return payload
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+        proc.join(5)
+        receiver.close()
+
+
+def _timeout_message() -> str:
+    return f"Embedding projection timed out after {WORKER_TIMEOUT_SEC:g}s. Retry to try again."
 
 
 def _open_session():
@@ -322,6 +357,16 @@ def _open_session():
 
 
 def run_cluster_map_worker(run_id: int, project_id: int) -> None:
+    with _locks_guard:
+        _active_runs.add(run_id)
+    try:
+        _run_cluster_map_worker(run_id, project_id)
+    finally:
+        with _locks_guard:
+            _active_runs.discard(run_id)
+
+
+def _run_cluster_map_worker(run_id: int, project_id: int) -> None:
     import time as _time
 
     _time.sleep(0.15)
@@ -358,37 +403,31 @@ def run_cluster_map_worker(run_id: int, project_id: int) -> None:
             )
             return
 
+        # The GET handler compares against embedded_sample_ids, so fingerprint
+        # that set even when some rows have unparseable embeddings.
         run.sample_count = len(sample_ids)
-        run.sample_fingerprint = fingerprint_ids(sample_ids)
+        run.sample_fingerprint = fingerprint_ids(embedded_sample_ids(gen_db, project_id))
         gen_db.commit()
 
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="umap")
         try:
-            future = executor.submit(compute_umap_projection, embeddings)
-            coords = future.result(timeout=WORKER_TIMEOUT_SEC)
-        except FuturesTimeoutError:
-            mark_run_failed(
-                gen_db, run,
-                f"Embedding projection timed out after {WORKER_TIMEOUT_SEC}s. Retry to try again.",
-            )
+            coords = project_embeddings(embeddings, WORKER_TIMEOUT_SEC)
+        except ProjectionTimeout:
+            mark_run_failed(gen_db, run, _timeout_message())
             return
         except Exception as exc:
             log.exception("UMAP projection failed for project %s", project_id)
             mark_run_failed(gen_db, run, str(exc)[:4000])
             return
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
         persist_points(gen_db, project_id, sample_ids, coords)
-        run = gen_db.get(ClusterMapRun, run_id)
-        if run:
-            run.status = "ready"
-            run.finished_at = datetime.now(timezone.utc)
-            run.error_message = None
-            gen_db.commit()
+        run.status = "ready"
+        run.finished_at = datetime.now(timezone.utc)
+        run.error_message = None
+        gen_db.commit()
     except Exception as exc:
         log.exception("Cluster map worker failed for run %d", run_id)
         try:
+            gen_db.rollback()
             run = gen_db.get(ClusterMapRun, run_id)
             if run:
                 mark_run_failed(gen_db, run, str(exc)[:4000])
@@ -399,6 +438,8 @@ def run_cluster_map_worker(run_id: int, project_id: int) -> None:
 
 
 def start_cluster_map_worker(run_id: int, project_id: int) -> None:
+    with _locks_guard:
+        _active_runs.add(run_id)
     threading.Thread(
         target=run_cluster_map_worker,
         args=(run_id, project_id),
@@ -433,8 +474,5 @@ def ensure_projection_started(db: Session, project_id: int, sample_ids: list[int
         if existing and not run_is_stale(existing):
             return existing
         if existing and run_is_stale(existing):
-            mark_run_failed(
-                db, existing,
-                f"Embedding projection timed out after {WORKER_TIMEOUT_SEC}s. Retry to try again.",
-            )
+            mark_run_failed(db, existing, _timeout_message())
         return enqueue_projection(db, project_id, sample_ids)

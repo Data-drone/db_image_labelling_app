@@ -14,12 +14,13 @@ from sqlalchemy.orm import Session
 from ..cluster_map import (
     MIN_SAMPLES,
     build_result,
-    cache_matches,
     embedded_sample_ids,
     ensure_projection_started,
     fingerprint_ids,
+    latest_ready_run,
     latest_run,
     load_cached_points,
+    mark_run_failed,
     run_is_stale,
 )
 from ..deps import get_db, get_user_email
@@ -887,41 +888,36 @@ def cluster_map(
     run = latest_run(db, project_id)
 
     if run and run.status == "running" and run_is_stale(run):
-        from ..cluster_map import mark_run_failed
-        mark_run_failed(
-            db, run,
-            "Embedding projection timed out. Retry to try again.",
-        )
+        mark_run_failed(db, run, "Embedding projection timed out. Retry to try again.")
         run = latest_run(db, project_id)
 
+    # A running projection (including a forced recompute) supersedes the cache
+    # so pollers wait for the new points instead of the previous map.
+    if run and run.status == "running":
+        return _computing_response(run.sample_count or len(sample_ids))
+
+    failed_same_set = run and run.status == "failed" and run.sample_fingerprint == fp
+
     if not force:
-        cache = load_cached_points(db, project_id)
-        if cache_matches(cache, sample_ids):
-            return build_result(db, project_id, sample_ids, cache, cached=True)
+        ready = latest_ready_run(db, project_id)
+        if ready and ready.sample_fingerprint == fp:
+            cache = load_cached_points(db, project_id)
+            if cache:
+                recompute_error = (
+                    run.error_message or "Cluster map recompute failed."
+                    if failed_same_set and run.id > ready.id
+                    else None
+                )
+                return build_result(
+                    db, project_id, sample_ids, cache,
+                    cached=True, recompute_error=recompute_error,
+                )
 
-        if run and run.status == "running":
-            return _computing_response(run.sample_count or len(sample_ids))
-
-        if (
-            run
-            and run.status == "failed"
-            and run.sample_fingerprint == fp
-        ):
+        if failed_same_set:
             raise HTTPException(
                 status_code=409,
                 detail=run.error_message or "Cluster map projection failed. Retry to try again.",
             )
-
-    if force:
-        cache = load_cached_points(db, project_id)
-        if cache:
-            from ..models import ClusterMapPointCache
-            db.query(ClusterMapPointCache).filter_by(project_id=project_id).delete(
-                synchronize_session=False
-            )
-            db.commit()
-        if run and run.status == "running" and not run_is_stale(run):
-            return _computing_response(run.sample_count or len(sample_ids))
 
     started = ensure_projection_started(db, project_id, sample_ids)
     return _computing_response(started.sample_count or len(sample_ids))

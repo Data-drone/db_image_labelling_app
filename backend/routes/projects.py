@@ -538,6 +538,8 @@ def update_project(
             db.delete(case)
         db.flush()
         db.query(Annotation).filter_by(project_id=project_id).delete()
+        db.query(ClusterMapPointCache).filter_by(project_id=project_id).delete(synchronize_session=False)
+        db.query(ClusterMapRun).filter_by(project_id=project_id).delete(synchronize_session=False)
         db.query(ProjectSample).filter_by(project_id=project_id).delete()
         if payload.source_type is not None:
             p.source_type = payload.source_type

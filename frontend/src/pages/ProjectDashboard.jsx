@@ -809,7 +809,8 @@ export default function ProjectDashboard() {
   const loadClusterMap = useCallback(async ({ force = false, requestId } = {}) => {
     const isCurrent = () => requestId === clusterRequestRef.current;
     const started = Date.now();
-    const budgetMs = 120000;
+    // Backstop only: the backend fails runs after CLUSTER_MAP_TIMEOUT_SEC (600s) plus a grace period.
+    const budgetMs = 13 * 60 * 1000;
     let first = true;
     setClusterLoading(true);
     setClusterError('');
@@ -828,6 +829,9 @@ export default function ProjectDashboard() {
         if (data?.points) {
           setClusterPoints(data.points);
           setClusterComputingCount(null);
+          if (data.recompute_error) {
+            setClusterError(`Recompute failed: ${data.recompute_error} Showing the previous map.`);
+          }
           return;
         }
         setClusterError('Cluster map returned no points.');
