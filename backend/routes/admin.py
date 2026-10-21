@@ -7,8 +7,6 @@ import os
 
 from fastapi import APIRouter, HTTPException, Request
 
-from sqlalchemy.orm import sessionmaker
-
 from ..deps import get_engine, get_session_factory
 from ..models import Base, LabelingProject, ProjectSample, Annotation, init_db
 from ..volumes import _get_workspace_client
@@ -189,60 +187,56 @@ def admin_connect_lakebase(body: dict, request: Request):
     """Switch the app's database backend to an existing Lakebase project."""
     _require_admin(request)
     from ..deps import configure_db
+    from ..lakebase import (
+        connect_endpoint,
+        get_endpoint,
+        get_engine as lakebase_get_engine,
+        get_session_factory as lakebase_get_session_factory,
+        prepare_lakebase_schema,
+        resolve_branch_name,
+        setup_replica_identity,
+    )
+    from ..models import TABLE_NAMES
 
     project_id = (body.get("project_id") or "").strip()
     if not project_id:
         raise HTTPException(status_code=400, detail="project_id is required")
+    branch_id = (body.get("branch_id") or body.get("branch") or "").strip() or None
 
     try:
         w = _get_workspace_client()
 
         full_name = f"projects/{project_id}"
         project = w.postgres.get_project(name=full_name)
+        branch = resolve_branch_name(project, branch_id)
+        endpoint = get_endpoint(project, branch_name=branch)
+        previous_engine = get_engine()
 
-        branches = list(w.postgres.list_branches(parent=project.name))
-        if not branches:
-            raise HTTPException(status_code=400, detail="No branches found for this project.")
-        endpoint = None
-        for branch in branches:
-            endpoints = list(w.postgres.list_endpoints(parent=branch.name))
-            if endpoints:
-                endpoint = endpoints[0]
-                break
-        if not endpoint:
-            raise HTTPException(status_code=400, detail="No endpoints found for this project.")
+        def before_activate(new_engine):
+            prepare_lakebase_schema(new_engine)
+            Base.metadata.create_all(new_engine)
+            try:
+                setup_replica_identity(new_engine, TABLE_NAMES)
+            except Exception as exc:
+                log.warning("Replica identity setup: %s", exc)
 
-        from ..lakebase import (
-            _build_engine,
-            _get_pg_username,
-            generate_connection_string,
-            prepare_lakebase_schema,
+        connect_endpoint(endpoint, before_activate=before_activate)
+        live_engine = lakebase_get_engine()
+        configure_db(
+            live_engine,
+            lakebase_get_session_factory(),
+            use_lakebase=True,
         )
+        if previous_engine is not None and previous_engine is not live_engine:
+            previous_engine.dispose()
 
-        host = endpoint.status.hosts.host
-        pg_username = _get_pg_username(endpoint)
-        conn_url = generate_connection_string(endpoint, pg_username)
-
-        new_engine = _build_engine(conn_url)
-        prepare_lakebase_schema(new_engine)
-        Base.metadata.create_all(new_engine)
-
-        try:
-            from ..lakebase import setup_replica_identity
-            setup_replica_identity(new_engine, ["labeling_projects", "project_samples", "annotations"])
-        except Exception as e:
-            log.warning("Replica identity setup: %s", e)
-
-        old_engine = get_engine()
-        new_factory = sessionmaker(bind=new_engine)
-        configure_db(new_engine, new_factory, use_lakebase=True)
-        if old_engine:
-            old_engine.dispose()
-
+        host = endpoint.status.hosts.host if endpoint.status and endpoint.status.hosts else ""
         return {
             "status": "connected",
             "message": f"Connected to Lakebase project '{project_id}'. Tables created.",
             "host": host,
+            "endpoint": endpoint.name,
+            "branch": branch,
         }
     except HTTPException:
         raise
