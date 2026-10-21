@@ -32,6 +32,11 @@ _DEFAULT_INITIAL_DELAY_S = 5.0
 _DEFAULT_MAX_DELAY_S = 60.0
 _DEFAULT_INTERACTIVE_BUDGET_S = 45.0
 _DEFAULT_JOB_BUDGET_S = 900.0
+# The final attempt may start at the budget edge and still run for the
+# interactive HTTP timeout plus SDK retry window (30s + 10s). Keep the total
+# under the 120-second Databricks Apps proxy limit.
+_MAX_INTERACTIVE_BUDGET_S = 75.0
+_MAX_JOB_BUDGET_S = 3600.0
 
 
 @dataclass(frozen=True)
@@ -96,7 +101,9 @@ def _retry_policy_from_env(context: RetryContext = "interactive") -> RetryPolicy
         if context == "job"
         else _DEFAULT_INTERACTIVE_BUDGET_S
     )
-    budget_max = 3600.0 if context == "job" else 105.0
+    budget_max = (
+        _MAX_JOB_BUDGET_S if context == "job" else _MAX_INTERACTIVE_BUDGET_S
+    )
 
     initial_delay = _env_float(
         "SERVING_COLD_START_INITIAL_DELAY_S",

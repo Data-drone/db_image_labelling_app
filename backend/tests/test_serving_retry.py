@@ -242,7 +242,7 @@ class TestServingColdStartRetry(unittest.TestCase):
         self.assertEqual(policy.max_retries, 0)
         self.assertEqual(policy.initial_delay_s, 5)
         self.assertEqual(policy.max_delay_s, 300)
-        self.assertEqual(policy.budget_s, 105)
+        self.assertEqual(policy.budget_s, 75)
 
     @unittest.skipUnless(_HAS_DATABRICKS_SDK, "databricks-sdk not installed")
     def test_dedicated_clients_apply_sdk_timeout_config(self):
