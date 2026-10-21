@@ -14,6 +14,36 @@ from sqlalchemy.orm import Session
 log = logging.getLogger(__name__)
 
 
+class EndpointCircuitBreaker:
+    """Trip after consecutive samples fail because the serving endpoint is unavailable.
+
+    Any endpoint response, including a non-retryable error, resets the streak.
+    A threshold of 0 disables the breaker.
+    """
+
+    def __init__(self, threshold: int):
+        self.threshold = max(0, threshold)
+        self.consecutive = 0
+        self.last_error: Optional[BaseException] = None
+
+    @property
+    def tripped(self) -> bool:
+        return self.threshold > 0 and self.consecutive >= self.threshold
+
+    def record_success(self) -> None:
+        self.consecutive = 0
+
+    def record_failure(self, exc: BaseException) -> bool:
+        from .inference import is_endpoint_unavailable_error
+
+        if is_endpoint_unavailable_error(exc):
+            self.consecutive += 1
+            self.last_error = exc
+        else:
+            self.consecutive = 0
+        return self.tripped
+
+
 def clear_model_drafts_for_sample(db: Session, project_id: int, sample_id: int) -> None:
     from .models import Annotation
 
@@ -90,10 +120,12 @@ def run_preannotate_for_samples(
     min_confidence: Optional[float] = None,
     text_prompt: Optional[str] = None,
     retry_context: Literal["interactive", "job"] = "interactive",
+    circuit_breaker: Optional[EndpointCircuitBreaker] = None,
 ) -> dict[str, int]:
     """Run model inference and insert draft annotations. Caller must commit.
 
-    Returns counters: completed, failed, skipped, total.
+    Returns counters: completed, failed, skipped, total. When *circuit_breaker*
+    trips, the remaining samples are left untouched and the caller should stop.
     """
     from .embeddings import resolve_embedding_endpoint
     from .inference import predict_sample, resolve_endpoint
@@ -146,6 +178,15 @@ def run_preannotate_for_samples(
         except Exception as e:
             log.warning("Pre-annotate failed for sample %d: %s", sample.id, e)
             failed += 1
+            if circuit_breaker is not None and circuit_breaker.record_failure(e):
+                refresh_sample_status_after_annotation_change(db, project.id, sample.id)
+                log.error(
+                    "Stopping pre-annotate: %d consecutive samples failed because "
+                    "endpoint %s is unavailable",
+                    circuit_breaker.consecutive,
+                    endpoint_name,
+                )
+                break
             _generate_embedding(
                 sample,
                 image_bytes,
@@ -157,6 +198,9 @@ def run_preannotate_for_samples(
             )
             refresh_sample_status_after_annotation_change(db, project.id, sample.id)
             continue
+
+        if circuit_breaker is not None:
+            circuit_breaker.record_success()
 
         if not predictions:
             skipped += 1

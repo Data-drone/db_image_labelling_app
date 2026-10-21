@@ -183,6 +183,11 @@ def _is_cold_start_timeout(exc: BaseException) -> bool:
     return False
 
 
+def is_endpoint_unavailable_error(exc: BaseException) -> bool:
+    """Return whether *exc* is a serving timeout/503/504 rather than a model error."""
+    return _is_cold_start_timeout(exc)
+
+
 def _query_with_cold_start_retry(
     endpoint_name: str,
     call: Callable[[], _T],

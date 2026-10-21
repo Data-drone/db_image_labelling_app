@@ -141,6 +141,7 @@ Export to additional volumes still requires **WRITE_VOLUME** on those paths (add
 | `SERVING_COLD_START_MAX_DELAY_S` | `60` | Maximum delay between serving retries. |
 | `SERVING_COLD_START_INTERACTIVE_BUDGET_S` | `45` | Latest time a retry may start in an app HTTP request (clamped to 75 seconds). The final attempt can then run up to about 40 more seconds. |
 | `SERVING_COLD_START_JOB_BUDGET_S` | `900` | Maximum retry/sleep budget for the async pre-annotate Job (clamped to 3600 seconds). |
+| `PRE_ANNOTATE_MAX_CONSECUTIVE_UNAVAILABLE` | `3` | Pre-annotate Job stops and marks the run failed after this many consecutive samples fail with serving timeouts or 503/504. Set to `0` to disable. |
 | `PRE_ANNOTATE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-preannotate-job`)_ | Numeric job id from the **app-preannotate-job** resource (bundle-bound job). |
 | `FINETUNE_DATABRICKS_JOB_ID` | _(from `valueFrom: app-finetune-job`)_ | Numeric job id used by the Datasets & training workflow. |
 | `EXPORT_VOLUME_PATH` | _(from `valueFrom: export-volume`)_ | Default UC Volume destination for dataset snapshots and copied exports. |
