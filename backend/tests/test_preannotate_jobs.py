@@ -168,6 +168,67 @@ class TestPreannotateTriggers(unittest.TestCase):
             else:
                 os.environ.pop("PRE_ANNOTATE_JOB_ID", None)
 
+    def test_sqlite_mode_omits_lakebase_connection_params(self):
+        """Without an active Lakebase connection, no lakebase_* overrides are sent."""
+        from backend import preannotate_triggers as pt
+
+        os.environ["PRE_ANNOTATE_DATABRICKS_JOB_ID"] = "1"
+        try:
+            with (
+                patch("backend.deps.is_lakebase", return_value=False),
+                patch(
+                    "backend.preannotate_triggers.trigger_databricks_job",
+                    return_value=1,
+                ) as mock_trigger,
+            ):
+                pt.trigger_preannotate_job(7)
+            job_params = mock_trigger.call_args[0][1]
+            self.assertNotIn("lakebase_project_id", job_params)
+            self.assertNotIn("lakebase_endpoint", job_params)
+            self.assertNotIn("lakebase_database_name", job_params)
+            self.assertNotIn("lakebase_schema_name", job_params)
+        finally:
+            os.environ.pop("PRE_ANNOTATE_DATABRICKS_JOB_ID", None)
+
+    def test_lakebase_mode_pins_job_to_active_connection(self):
+        """Switching Lakebase connections must carry through to queued jobs.
+
+        Regression test: previously the job always used the bundle's
+        deploy-time default endpoint/database, so an Admin switching the
+        app's Lakebase connection left async jobs pointed at the stale one.
+        """
+        from backend import preannotate_triggers as pt
+
+        os.environ["PRE_ANNOTATE_DATABRICKS_JOB_ID"] = "1"
+        try:
+            with (
+                patch("backend.deps.is_lakebase", return_value=True),
+                patch(
+                    "backend.lakebase.current_connection_params",
+                    return_value={
+                        "project_id": "cv-explorer",
+                        "endpoint": "projects/cv-explorer/branches/dev/endpoints/primary",
+                        "database": "databricks_postgres",
+                        "schema": "cv_explorer_app",
+                    },
+                ),
+                patch(
+                    "backend.preannotate_triggers.trigger_databricks_job",
+                    return_value=1,
+                ) as mock_trigger,
+            ):
+                pt.trigger_preannotate_job(7)
+            job_params = mock_trigger.call_args[0][1]
+            self.assertEqual(job_params["lakebase_project_id"], "cv-explorer")
+            self.assertEqual(
+                job_params["lakebase_endpoint"],
+                "projects/cv-explorer/branches/dev/endpoints/primary",
+            )
+            self.assertEqual(job_params["lakebase_database_name"], "databricks_postgres")
+            self.assertEqual(job_params["lakebase_schema_name"], "cv_explorer_app")
+        finally:
+            os.environ.pop("PRE_ANNOTATE_DATABRICKS_JOB_ID", None)
+
 
 class TestInferenceSettingsJobFlag(unittest.TestCase):
     def test_settings_includes_async_flag(self):

@@ -28,6 +28,25 @@ def trigger_preannotate_job(run_db_id: int) -> int:
 
     job_params = {"run_id": str(run_db_id)}
 
+    # Pin the job to the *currently active* Lakebase connection. Without this,
+    # the job falls back to its bundle-deploy-time defaults, so an Admin
+    # switching the app to a different Lakebase project/branch leaves queued
+    # jobs reading/writing the original connection instead.
+    from . import deps
+
+    if deps.is_lakebase():
+        from .lakebase import current_connection_params
+
+        conn = current_connection_params()
+        if conn.get("project_id"):
+            job_params["lakebase_project_id"] = conn["project_id"]
+        if conn.get("endpoint"):
+            job_params["lakebase_endpoint"] = conn["endpoint"]
+        if conn.get("database"):
+            job_params["lakebase_database_name"] = conn["database"]
+        if conn.get("schema"):
+            job_params["lakebase_schema_name"] = conn["schema"]
+
     sp_id = os.environ.get("SP_SERVING_CLIENT_ID") or os.environ.get("DATABRICKS_CLIENT_ID", "")
     sp_secret = os.environ.get("SP_SERVING_CLIENT_SECRET") or os.environ.get("DATABRICKS_CLIENT_SECRET", "")
     if sp_id and sp_secret:

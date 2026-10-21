@@ -463,6 +463,36 @@ def connection_generation() -> int:
     return _connection_generation
 
 
+def _project_id_from_endpoint_name(endpoint_name: str) -> str:
+    """Extract ``<project_id>`` from ``projects/<project_id>/branches/.../endpoints/...``."""
+    parts = (endpoint_name or "").split("/")
+    if len(parts) >= 2 and parts[0] == "projects":
+        return parts[1]
+    return ""
+
+
+def current_connection_params() -> dict:
+    """Snapshot of the currently active Lakebase connection.
+
+    Used by callers (e.g. async job triggers) that must point work at the
+    *same* project/branch/database/schema the app is presently using, rather
+    than whatever was configured at deploy time. Returns ``{}`` if no
+    Lakebase connection is active (e.g. running on SQLite).
+    """
+    with _lock:
+        endpoint = _current_endpoint
+        database = _current_database
+    if endpoint is None:
+        return {}
+    endpoint_name = getattr(endpoint, "name", "") or ""
+    return {
+        "project_id": _project_id_from_endpoint_name(endpoint_name),
+        "endpoint": endpoint_name,
+        "database": database or "",
+        "schema": get_lakebase_schema(),
+    }
+
+
 def _start_refresh_thread(endpoint, pg_username, generation, host, port, database_name):
     global _token_refresh_thread
     thread = threading.Thread(
