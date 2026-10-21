@@ -29,7 +29,7 @@ from ..schemas import (
     ClassCount, DailyVelocity, DetailedProjectStats, SourceSyncOut,
 )
 from ..uc_tables import TableScanResult, TableSourceError, scan_table_for_samples
-from ..volumes import scan_volume_for_samples
+from ..volumes import clamp_scan_max_depth, scan_volume_for_samples
 from .users import record_current_user, validate_active_project_users
 
 log = logging.getLogger(__name__)
@@ -61,7 +61,13 @@ def _scan_project_source(db: Session, project: LabelingProject):
         if result.volume_hint and not (project.source_volume or "").strip():
             project.source_volume = result.volume_hint
         return result
-    added = scan_volume_for_samples(db, project.id, project.source_volume)
+    added = scan_volume_for_samples(
+        db,
+        project.id,
+        project.source_volume,
+        include_subfolders=bool(getattr(project, "scan_include_subfolders", False)),
+        max_depth=getattr(project, "scan_max_depth", None),
+    )
     return TableScanResult(added=added, skipped_existing=0, volume_hint=project.source_volume)
 
 
@@ -194,6 +200,8 @@ def _project_out(p, total=None, labeled=None, user_email=None, db: Session | Non
         labeled_count=labeled if labeled is not None else 0,
         version=p.version or 1,
         parent_project_id=p.parent_project_id,
+        scan_include_subfolders=bool(getattr(p, "scan_include_subfolders", False)),
+        scan_max_depth=getattr(p, "scan_max_depth", 3) or 3,
         **consensus_counts,
     )
 
@@ -257,6 +265,8 @@ def create_project(
         consensus_agreement_threshold=payload.consensus_agreement_threshold,
         consensus_reviewer_emails=payload.consensus_reviewer_emails,
         consensus_labeller_emails=payload.consensus_labeller_emails,
+        scan_include_subfolders=bool(payload.scan_include_subfolders),
+        scan_max_depth=clamp_scan_max_depth(payload.scan_max_depth),
         created_by=user_email,
     )
     db.add(project)
@@ -494,6 +504,18 @@ def update_project(
                 detail="Consensus cannot be disabled after labeling work has started.",
             )
 
+    scan_flags_changed = False
+    if payload.scan_include_subfolders is not None:
+        include = bool(payload.scan_include_subfolders)
+        if include != bool(getattr(p, "scan_include_subfolders", False)):
+            scan_flags_changed = True
+        p.scan_include_subfolders = include
+    if payload.scan_max_depth is not None:
+        depth = clamp_scan_max_depth(payload.scan_max_depth)
+        if depth != (getattr(p, "scan_max_depth", 3) or 3):
+            scan_flags_changed = True
+        p.scan_max_depth = depth
+
     volume_changed = (
         payload.source_volume is not None
         and payload.source_volume != p.source_volume
@@ -523,6 +545,18 @@ def update_project(
             p.source_filter = (payload.source_filter or "").strip() or None
         if payload.source_volume is not None:
             p.source_volume = payload.source_volume
+        try:
+            _scan_project_source(db, p)
+        except TableSourceError as e:
+            db.rollback()
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        except ValueError as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if p.consensus_enabled:
+            from ..consensus import ensure_consensus_cases
+            ensure_consensus_cases(db, p)
+    elif scan_flags_changed and _source_type(p) == "volume":
         try:
             _scan_project_source(db, p)
         except TableSourceError as e:
@@ -727,6 +761,8 @@ def clone_project(
         consensus_labeller_emails=list(
             getattr(parent, "consensus_labeller_emails", None) or []
         ),
+        scan_include_subfolders=bool(getattr(parent, "scan_include_subfolders", False)),
+        scan_max_depth=getattr(parent, "scan_max_depth", 3) or 3,
         created_by=user_email,
         version=new_version,
         parent_project_id=root_id,

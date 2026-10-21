@@ -4,9 +4,10 @@ Pydantic schemas for the CV Explorer API.
 
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend import masks
+from backend.volumes import DEFAULT_SCAN_MAX_DEPTH, clamp_scan_max_depth
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,15 @@ class ProjectCreate(BaseModel):
     consensus_agreement_threshold: float = 0.5
     consensus_reviewer_emails: list[str] = Field(default_factory=list)
     consensus_labeller_emails: list[str] = Field(default_factory=list)
+    scan_include_subfolders: bool = False
+    scan_max_depth: int = DEFAULT_SCAN_MAX_DEPTH
+
+    @field_validator("scan_max_depth", mode="before")
+    @classmethod
+    def _clamp_scan_max_depth(cls, value):
+        if value is None:
+            return DEFAULT_SCAN_MAX_DEPTH
+        return clamp_scan_max_depth(value)
 
     @model_validator(mode="after")
     def _require_source(self):
@@ -85,6 +95,8 @@ class ProjectUpdate(BaseModel):
     image_path_column: Optional[str] = None
     source_filter: Optional[str] = None
     class_list: Optional[list[str]] = None
+    scan_include_subfolders: Optional[bool] = None
+    scan_max_depth: Optional[int] = None
     confirm_source_change: bool = False
     serving_endpoint: Optional[str] = None
     endpoint_config: Optional[dict] = None
@@ -97,6 +109,13 @@ class ProjectUpdate(BaseModel):
     consensus_reviewer_emails: Optional[list[str]] = None
     consensus_labeller_emails: Optional[list[str]] = None
     reset_consensus_unstarted: bool = False
+
+    @field_validator("scan_max_depth", mode="before")
+    @classmethod
+    def _clamp_scan_max_depth(cls, value):
+        if value is None:
+            return value
+        return clamp_scan_max_depth(value)
 
     @model_validator(mode="after")
     def _source_type_ok(self):
@@ -187,6 +206,8 @@ class ProjectOut(BaseModel):
     labeled_count: int = 0
     version: int = 1
     parent_project_id: Optional[int] = None
+    scan_include_subfolders: bool = False
+    scan_max_depth: int = DEFAULT_SCAN_MAX_DEPTH
 
     model_config = {"from_attributes": True}
 

@@ -23,7 +23,7 @@ Browser (React SPA)
 - `backend/schemas.py` — Pydantic request/response schemas
 - `backend/deps.py` — shared dependencies (`get_db`, `get_user_email`)
 - `backend/lakebase.py` — Lakebase: SDK auto-provision or **App postgres resource** (`PG*` + `LAKEBASE_ENDPOINT` via `valueFrom: lakebase-db`). App-resource mode uses injected `PGUSER` plus a refreshing OAuth token. SQLite after a Lakebase failure requires `ALLOW_SQLITE_FALLBACK=true`. Partial `PG*` without the endpoint binding fails startup.
-- `backend/volumes.py` — UC Volume I/O (`read_image_bytes`, `scan_volume_for_samples`)
+- `backend/volumes.py` — UC Volume I/O (`read_image_bytes`, `iter_images`, `scan_volume_for_samples`)
 - `backend/routes/` — domain routers for projects, labeling, inference/runs, export/import, browse, similarity, and admin
 - `databricks.yml` + `resources/*.yml` — DAB bundle: app (`cv_explorer_app.yml` with UC/Lakebase/serving/job resources), pre-annotate job
 - `scripts/preannotate_job.py` — cluster entrypoint for that job (`argv[1]` = `preannotate_runs.id`)
@@ -136,7 +136,10 @@ a root `package.json` would make Apps run `npm install` at startup.
 ## Common Pitfalls
 
 - **SPA catch-all ordering**: The `/{path:path}` route in `main.py` must be registered last. New `/api/` routes in a router with `prefix="/api/..."` are fine, but bare routes will be masked.
-- **Volume scanning is not recursive**: Only top-level files in the volume path are found. Nested directories are ignored.
+- **Volume scanning is opt-in recursive**: Default remains the selected
+  directory only. `scan_include_subfolders` plus a bounded `scan_max_depth`
+  (cap 8) walk nested folders. Preview counts must use the same settings via
+  `/api/browse/count`; ordinary `/api/browse` navigation stays one level.
 - **Local dev without Databricks**: Set `USE_LAKEBASE=false` to fall back to SQLite. Image paths must be local (e.g., `/tmp/images/`). User identity will be `"anonymous"`. A failed Lakebase init no longer silently uses SQLite unless `ALLOW_SQLITE_FALLBACK=true`.
 - **CORS**: Defaults to `*` if `CORS_ORIGINS` env var is not set.
 - **Lakebase Postgres username**: App-resource mode uses injected `PGUSER`;

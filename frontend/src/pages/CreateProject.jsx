@@ -10,6 +10,7 @@ import {
   fetchSchemas,
   fetchVolumes,
   browseDirectory,
+  browseImageCount,
   fetchInferenceDefaults,
   fetchTables,
   fetchTablePreview,
@@ -93,6 +94,8 @@ export default function CreateProject() {
   const [schema, setSchema] = useState('');
   const [volume, setVolume] = useState('');
   const [nestedSubpath, setNestedSubpath] = useState(initialSub);
+  const [includeSubfolders, setIncludeSubfolders] = useState(false);
+  const [scanMaxDepth, setScanMaxDepth] = useState(3);
   const [volumeFolders, setVolumeFolders] = useState([]);
   const [volumeNavLoading, setVolumeNavLoading] = useState(false);
   const [browsing, setBrowsing] = useState(false);
@@ -267,7 +270,7 @@ export default function CreateProject() {
 
   useEffect(() => {
     setBrowseResult(null);
-  }, [sourceVolume]);
+  }, [sourceVolume, includeSubfolders, scanMaxDepth]);
 
   const showVolumeFolderNav = useMemo(() => {
     if (sourceKind !== 'volume') return false;
@@ -307,15 +310,24 @@ export default function CreateProject() {
     setBrowsing(true);
     setBrowseResult(null);
     try {
-      const data = await browseDirectory(sourceVolume);
-      const imageCount = data.total_files ?? (data.files || []).length;
-      setBrowseResult({ imageCount, folders: data.folders?.length || 0 });
+      const parsedDepth = Number(scanMaxDepth);
+      const depth = Number.isFinite(parsedDepth) ? Math.max(0, Math.min(8, parsedDepth)) : 3;
+      const data = await browseImageCount(sourceVolume, {
+        include_subfolders: includeSubfolders,
+        max_depth: depth,
+      });
+      const imageCount = data.image_count ?? 0;
+      setBrowseResult({
+        imageCount,
+        truncated: Boolean(data.truncated),
+        warning: data.error || '',
+      });
     } catch (e) {
       setBrowseResult({ error: humanizeApiError(e) });
     } finally {
       setBrowsing(false);
     }
-  }, [sourceVolume]);
+  }, [sourceVolume, includeSubfolders, scanMaxDepth]);
 
   // Add class to list
   const addClass = () => {
@@ -401,6 +413,11 @@ export default function CreateProject() {
       } else {
         payload.source_type = 'volume';
         payload.source_volume = sourceVolume;
+        payload.scan_include_subfolders = includeSubfolders;
+        const parsedDepth = Number(scanMaxDepth);
+        payload.scan_max_depth = Number.isFinite(parsedDepth)
+          ? Math.max(0, Math.min(8, parsedDepth))
+          : 3;
       }
       if (servingEndpoint.trim()) {
         payload.serving_endpoint = servingEndpoint.trim();
@@ -842,10 +859,38 @@ export default function CreateProject() {
                     </div>
                   ) : (
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      No subfolders in this location. Images must sit directly in this folder (not in deeper nested paths for scanning).
+                      {includeSubfolders
+                        ? 'No subfolders in this location. Images in this folder will still be included.'
+                        : 'No subfolders here. Enable Include subfolders to scan nested directories, or pick a folder that contains images directly.'}
                     </div>
                   )}
                 </>
+              )}
+            </div>
+          )}
+
+          {sourceVolume && (
+            <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                <input
+                  type="checkbox"
+                  checked={includeSubfolders}
+                  onChange={(e) => setIncludeSubfolders(e.target.checked)}
+                />
+                Include subfolders
+              </label>
+              {includeSubfolders && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                  Max depth
+                  <input
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={scanMaxDepth}
+                    onChange={(e) => setScanMaxDepth(e.target.value)}
+                    style={{ width: 56, padding: '0.2rem 0.35rem' }}
+                  />
+                </label>
               )}
             </div>
           )}
@@ -865,7 +910,13 @@ export default function CreateProject() {
               {browseResult && !browseResult.error && (
                 <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--status-success)' }}>
                   {browseResult.imageCount} images found
-                  {browseResult.folders > 0 && `, ${browseResult.folders} subfolders`}
+                  {includeSubfolders ? ' (including nested folders)' : ''}
+                  {browseResult.truncated && ' (count capped)'}
+                </span>
+              )}
+              {browseResult?.warning && (
+                <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--status-error)' }}>
+                  {browseResult.warning}
                 </span>
               )}
               {browseResult?.error && (
