@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,15 @@ class _Proc:
 def _write(path: Path, size: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\0" * size)
+
+
+def _init_git(root: Path) -> None:
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
 
 
 class TestCheckAppSourceSize(unittest.TestCase):
@@ -58,6 +68,30 @@ class TestCheckAppSourceSize(unittest.TestCase):
             _write(root / "tmp" / "scratch.bin", APPS_MAX_FILE_BYTES + 50)
             _write(root / "ok.txt", 16)
             check_app_source_size(root)
+
+    def test_gitignored_local_file_does_not_false_fail(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _init_git(root)
+            (root / ".gitignore").write_text("*.db\n")
+            _write(root / "local.db", APPS_MAX_FILE_BYTES + 1)
+            check_app_source_size(root)
+
+    def test_tracked_ignored_file_is_still_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _init_git(root)
+            (root / ".gitignore").write_text("*.db\n")
+            _write(root / "tracked.db", APPS_MAX_FILE_BYTES + 1)
+            subprocess.run(
+                ["git", "add", "--force", "tracked.db"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            with self.assertRaises(AppSourceTooLargeError) as ctx:
+                check_app_source_size(root)
+        self.assertIn("tracked.db", str(ctx.exception))
 
     def test_error_lists_every_oversized_staged_file(self):
         with tempfile.TemporaryDirectory() as raw:

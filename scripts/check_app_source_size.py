@@ -9,6 +9,8 @@ bundle sync exclusions, so local install trees do not false-fail.
 from __future__ import annotations
 
 import fnmatch
+import os
+import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -110,19 +112,58 @@ def path_is_excluded(rel_posix: str, patterns: Sequence[str]) -> bool:
     return False
 
 
+def _git_staged_paths(repo_root: Path) -> list[Path] | None:
+    """Return tracked and non-ignored files, or None outside a Git worktree."""
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+
+    paths: list[Path] = []
+    for raw_path in completed.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        path = repo_root / os.fsdecode(raw_path)
+        if path.is_file():
+            paths.append(path)
+    return paths
+
+
 def iter_staged_files(
     repo_root: Path,
     *,
     extra_excludes: Sequence[str] = (),
 ) -> Iterable[tuple[Path, int]]:
-    """Yield (path, size) for files that would be in the Apps source tree."""
+    """Yield (path, size) for files that would be in the Apps source tree.
+
+    Bundle sync honors `.gitignore`, while still uploading tracked files that
+    now match an ignore rule. `git ls-files` supplies exactly that base set.
+    The fallback keeps the standalone checker usable outside a Git worktree.
+    """
     root = Path(repo_root)
     patterns = [
         *DEFAULT_STAGING_EXCLUDES,
         *load_sync_exclude_patterns(root),
         *extra_excludes,
     ]
-    for path in root.rglob("*"):
+    git_paths = _git_staged_paths(root)
+    paths = git_paths if git_paths is not None else root.rglob("*")
+    for path in paths:
         if not path.is_file():
             continue
         rel = _posix(path.relative_to(root))
