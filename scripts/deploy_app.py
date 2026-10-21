@@ -5,8 +5,9 @@ Usage:
   python scripts/deploy_app.py --target <target> --profile <profile>
   python scripts/deploy_app.py --build-only
 
-A failed production build exits before the Databricks CLI is invoked, so
-stale UI assets are not staged or uploaded. The running App never needs
+A failed production build or an oversized staged file exits before the
+Databricks CLI is invoked, so stale UI assets are not uploaded and the
+Apps 10 MiB per-file limit is caught locally. The running App never needs
 npm: it installs requirements.txt and serves the uploaded frontend/dist.
 """
 
@@ -23,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.build_frontend import FrontendBuildError, build_frontend
+from scripts.check_app_source_size import AppSourceTooLargeError, check_app_source_size
 
 
 def deploy_app(
@@ -43,6 +45,13 @@ def deploy_app(
     print(f"Using frontend assets from {dist}")
     if build_only:
         return 0
+
+    root = Path(repo_root) if repo_root is not None else REPO_ROOT
+    try:
+        check_app_source_size(root)
+    except AppSourceTooLargeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     databricks = which("databricks")
     if not databricks:
